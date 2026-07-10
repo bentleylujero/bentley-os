@@ -95,9 +95,9 @@ services:
       timeout: 5s
       retries: 3
 
-  opencode:
+  contractor:
     build:
-      context: ./opencode
+      context: ./contractor
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:

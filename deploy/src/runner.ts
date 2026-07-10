@@ -12,7 +12,7 @@ const HEALTH_INTERVAL_MS = 5000;
 // to `docker compose ps` state instead of an HTTP probe.
 const SERVICE_HEALTH: Record<string, string | null> = {
   api: 'http://api:3000/health',
-  opencode: 'http://opencode:4100/health',
+  contractor: 'http://contractor:4100/health',
   marionette: 'http://marionette:4200/health',
   // add more as they gain HTTP health endpoints; unknown services are rejected.
 };
@@ -23,7 +23,7 @@ const SERVICE_HEALTH: Record<string, string | null> = {
 // in the same commit range, which is not what "rollback service X" should do.
 const SERVICE_PATH: Record<string, string> = {
   api: 'apps/api',
-  opencode: 'opencode',
+  contractor: 'contractor',
   marionette: 'marionette',
 };
 
