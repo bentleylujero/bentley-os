@@ -26,6 +26,7 @@ export interface Job {
   startedAt?: string;
   finishedAt?: string;
   fromCommit?: string; // rollback target captured before build
+  deployedCommit?: string; // the actual commit that was built/deployed this run
   log: string[];
 }
 
@@ -178,6 +179,9 @@ async function runJob(job: Job): Promise<void> {
   } else {
     line(job, 'rollback target = none — this deploy has no safety net if it fails');
   }
+
+  job.deployedCommit = (await currentCommit()) || undefined;
+  line(job, `deploying commit = ${job.deployedCommit || '(unknown)'}`);
   await audit('deploy.started', {
     target: job.service,
     outcome: 'running',
@@ -194,7 +198,7 @@ async function runJob(job: Job): Promise<void> {
     await audit('deploy.succeeded', {
       target: job.service,
       outcome: 'success',
-      payload: { job_id: job.id, commit: job.fromCommit },
+      payload: { job_id: job.id, commit: job.deployedCommit },
     });
     return;
   }
