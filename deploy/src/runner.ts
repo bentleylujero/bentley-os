@@ -12,6 +12,7 @@ const HEALTH_INTERVAL_MS = 5000;
 // to `docker compose ps` state instead of an HTTP probe.
 const SERVICE_HEALTH: Record<string, string | null> = {
   api: 'http://api:3000/health',
+  opencode: 'http://opencode:4100/health',
   // add more as they gain HTTP health endpoints; unknown services are rejected.
 };
 
