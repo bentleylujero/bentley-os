@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { audit } from './audit.ts';
+import { audit, pool } from './audit.ts';
 
 // --- config ---------------------------------------------------------------
 const REPO_DIR = '/home/spaghettios/bentley-os'; // the bind-mounted ~/bentley-os
@@ -109,6 +109,29 @@ async function currentCommit(): Promise<string> {
   });
 }
 
+// The rollback target must be the last commit that was actually verified healthy for
+// THIS service — never "whatever HEAD is right now," since HEAD may already be the
+// broken commit we're deploying. Source of truth: audit_log, not git alone.
+async function lastGoodCommit(job: Job, service: string): Promise<string | null> {
+  try {
+    const res = await pool.query<{ payload: { commit?: string } }>(
+      `SELECT payload FROM audit_log
+       WHERE actor = 'deploy-service' AND action = 'deploy.succeeded' AND target = $1
+       ORDER BY at DESC LIMIT 1`,
+      [service],
+    );
+    const commit = res.rows[0]?.payload?.commit;
+    if (!commit) {
+      line(job, `no prior successful deploy found for '${service}' in audit_log — no rollback baseline exists`);
+      return null;
+    }
+    return commit;
+  } catch (e) {
+    line(job, `failed to query last-good commit from audit_log: ${String(e)}`);
+    return null;
+  }
+}
+
 async function pollHealth(job: Job, url: string | null): Promise<boolean> {
   if (url === null) {
     const code = await run(job, 'docker', ['compose', 'ps', '--status=running', job.service]);
@@ -149,8 +172,12 @@ async function runJob(job: Job): Promise<void> {
   job.startedAt = new Date().toISOString();
   const healthUrl = SERVICE_HEALTH[job.service];
 
-  job.fromCommit = await currentCommit();
-  line(job, `rollback target = ${job.fromCommit || '(unknown)'}`);
+  job.fromCommit = (await lastGoodCommit(job, job.service)) ?? undefined;
+  if (job.fromCommit) {
+    line(job, `rollback target (last known-good) = ${job.fromCommit}`);
+  } else {
+    line(job, 'rollback target = none — this deploy has no safety net if it fails');
+  }
   await audit('deploy.started', {
     target: job.service,
     outcome: 'running',
