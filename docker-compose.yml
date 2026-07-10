@@ -109,7 +109,28 @@ services:
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4100/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
-
+  marionette:
+    build:
+      context: ./marionette
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      COMPOSE_PROJECT_NAME: bentley-os
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    env_file:
+      - .env
+    volumes:
+      - ./:/home/spaghettios/bentley-os
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4200/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 15s
   cloudflared:
     image: cloudflare/cloudflared:2025.5.0
     restart: unless-stopped
