@@ -1,0 +1,159 @@
+# Bentley OS — Architecture & Roadmap
+
+*Source of truth pulled directly from `bentleylujero/bentley-os` @ main, plus local
+uncommitted work as of 2026-07-10. Regenerate this doc from the repo whenever it
+drifts — don't hand-edit it into staleness.*
+
+---
+
+## 1. System map — who does what
+
+One `docker-compose.yml`, two networks (`backend` for services, `monitoring` for
+ops tooling). Every service below has exactly one job. **If a new feature doesn't
+obviously belong to one row, that's the sign to stop and decide before coding —
+don't let it leak into two services.**
+
+| Service | Port | Owns | Does NOT own |
+|---|---|---|---|
+| **postgres** | 5432 (LAN only) | All persisted state — ontology, sync tokens, audit log | Vector search (that's qdrant) |
+| **qdrant** | 6333 (LAN only) | Vector storage for embeddings (Milestone 3+) | Currently **unused** — nothing writes to it yet |
+| **redis** | 6379 (LAN only) | Caching / ephemeral state | Not used by any service yet either |
+| **api** | 3000 | HTTP surface: `/health`, dashboard (`/`), ingestion (gcal/gmail — writes to Postgres), OpenCode proxy (`/opencode/*`) | Build/deploy logic, AI reasoning/classification |
+| **deploy** | 4000 | Build + restart + health-check + auto-rollback for `api`, `opencode`, `marionette`; writes every action to `audit_log` | Anything about *what* code does — purely a CI/CD-style operator |
+| **opencode** (container) | 4100 | **Stub only right now** — health check stub, target of the in-progress containerization effort | Not yet doing real work — see §3 duplication warning |
+| **marionette** | 4200 | Future home of the `/think` AI agent (classification, morning brief, grounded Q&A) — currently a health-check stub | Ingestion (that's api's job), deploy (that's deploy's job) |
+| **cloudflared** | — | Public tunnel, gated on `api` health | — |
+| **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility (containers, logs, uptime) | Nothing app-level |
+
+**Rule of thumb going forward:** ingestion and read APIs live in `api`; AI
+reasoning lives in `marionette`; anything that touches `docker compose` or git
+lives in `deploy`. If a task description mentions two of these, split the ticket.
+
+---
+
+## 2. Data model (already in Postgres, migration `0001`)
+
+```
+people ──< email_recipients >── emails
+people ──< event_attendees  >── calendar_events
+                                       │
+                                   audit_log   (every deploy action, eventually every AI action)
+```
+
+Worth knowing before Milestone 3: `emails` **already has** `category` and
+`importance` columns sitting unused. The DeepSeek classifier doesn't need a new
+migration — it needs to start writing to columns that already exist. Don't
+recreate them.
+
+Also unused so far: `organizer_id` on `calendar_events` and the whole
+`event_attendees` table — the current `gcal.ts` upsert doesn't populate people
+at all. That's a real gap, not a design decision yet — flag it before Milestone 3
+Q&A needs to answer "who's coming to X."
+
+---
+
+## 3. ⚠️ Active duplication risk: two OpenCode instances
+
+This is exactly the kind of thing you asked me to catch:
+
+- **Real one:** OpenCode server managed by `systemd` at `127.0.0.1:4096`,
+  Basic-Auth protected, proxied today by `apps/api/src/routes/opencode.ts`
+  (session create, prompt, SSE event stream).
+- **Stub one:** the `opencode` container in `docker-compose.yml` (port 4100,
+  internal to `backend` network) — right now it's *only* a health-check
+  endpoint. This is the target of the "containerize OpenCode" work
+  (`july-9th` skill).
+
+**These are not the same thing yet, and nothing marks that in the code.** If
+work continues on the containerized version without a clear cutover step,
+you'll end up with `apps/api/src/routes/opencode.ts` still pointed at the
+systemd instance while a second, functionally-idle OpenCode sits in Docker —
+two things doing the same job, neither fully "the" one.
+
+**Decision needed, not yet made:** when the container reaches parity, repoint
+`opencode.ts`'s `baseUrl` from `http://127.0.0.1:4096` to
+`http://opencode:4100` (in-network hostname) in the *same* deploy that retires
+the systemd unit. Don't run both long-term.
+
+---
+
+## 4. Known bug already logged: rollback scope
+
+`deploy/src/runner.ts`, in the rollback path:
+
+```ts
+await run(job, 'git', ['checkout', job.fromCommit, '--', '.']);
+```
+
+The `-- .` scopes the checkout to **the entire repo**, not the one service
+that failed. A rollback triggered by a broken `api` deploy will also silently
+revert any uncommitted-but-pushed changes to `marionette`, `opencode`, or
+`deploy` itself sitting in that commit range. Must be scoped to the service's
+own directory (e.g. `apps/api/`) before Milestone 5/6 turn on unattended
+deploys — an autonomous system rolling back the wrong files with no one
+watching is the failure mode this whole tiering exercise exists to prevent.
+
+---
+
+## 5. Milestone roadmap (unchanged goals, mapped to actual files)
+
+### Milestone 1 — Data in (in progress)
+| Step | Status | File |
+|---|---|---|
+| `sync_state` migration | ✅ done, applied to DB | `supabase/migrations/0002_sync_state.sql` (local, not pushed) |
+| `gcal.ts` DB writes + token wiring | ✅ done | `apps/api/src/ingestion/gcal.ts` |
+| Rebuild api image with `googleapis` | ✅ done | `apps/api/package.json`, image rebuilt |
+| Isolation-test write path | 🔶 in progress | `apps/api/src/ingestion/test-gcal-sync.ts` (throwaway — delete before commit) |
+| `gmail.ts` (same pattern) | ⬜ not started | `apps/api/src/ingestion/gmail.ts` |
+| node-cron schedule in api | ⬜ not started | wire into `apps/api/src/index.ts` or a new `ingestion/scheduler.ts` |
+
+**Done when:** events + emails land in Postgres on their own, with provenance.
+
+### Milestone 2 — Insight out
+Replace `apps/api/src/routes/dashboard.ts` (currently a static status card) with
+server-rendered views reading `calendar_events` / `emails` directly. "Today"
+and "what changed" first. Only reach for a separate frontend app if the
+server-rendered version genuinely can't keep up.
+
+### Milestone 3 — AI layer, read-only
+Lives in **marionette**, not api. Email classification writes to the
+already-existing `category`/`importance` columns. This is also where the
+qdrant/embeddings decision can no longer be deferred — nothing currently
+writes vectors anywhere.
+
+### Milestone 4 — Action layer, approval-gated
+New action types (create event, draft reply) behind one-click approval, all
+writes going through `audit_log` — the same table `deploy` already uses, so
+the audit trail is unified across "code changed" and "AI acted" from day one.
+
+### Milestone 5 — Earned autonomy
+Blocked on the rollback-scope fix in §4. Don't flip auto-execution on before
+that's resolved — the blast radius of a bad auto-rollback is the same
+mechanism that would need to contain a bad AI action.
+
+### Milestone 6 — Self-extension
+Tool registry + isolated test + approval + git automation + rollback, reusing
+`deploy`'s existing job/audit machinery rather than building a second
+build-and-rollback system next to it.
+
+---
+
+## 6. Guardrails to prevent contradiction/duplication going forward
+
+1. **One AI brain.** All classification/reasoning/generation logic goes in
+   `marionette`. If you catch yourself writing a prompt-calling function
+   inside `apps/api`, stop — it belongs in marionette, with api just calling
+   marionette's HTTP endpoint (same pattern as the OpenCode proxy).
+2. **One build/deploy system.** `deploy` already has queueing, health-check
+   polling, and audit-backed rollback. Milestone 6's "git automation" is an
+   *extension* of `deploy`, not a parallel service.
+3. **Schema before code.** Check `supabase/migrations/0001_secretary_ontology.sql`
+   before adding a column — `emails.category`/`importance` already exist for
+   the classifier; don't re-add them under a different name.
+4. **audit_log is the one ledger.** Deploy actions and (soon) AI actions both
+   write here. Don't spin up a second logging table for "AI decisions" —
+   extend `audit_log`'s `action`/`payload` conventions instead.
+5. **Local vs. pushed state.** As of this doc, local `bentley-os` is 1 commit
+   ahead of `origin/main` plus uncommitted migration/ingestion work. Before
+   starting new work in a fresh session, `git status` first — this doc
+   reflects the repo at time of writing, not necessarily right now.
