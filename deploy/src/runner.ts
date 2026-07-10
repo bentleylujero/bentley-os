@@ -17,6 +17,16 @@ const SERVICE_HEALTH: Record<string, string | null> = {
   // add more as they gain HTTP health endpoints; unknown services are rejected.
 };
 
+// Repo-relative path each service's build context lives under. Rollback must be
+// scoped to ONLY this path -- a repo-wide `git checkout <sha> -- .` would also
+// revert unrelated files (other services, shared config) that happened to change
+// in the same commit range, which is not what "rollback service X" should do.
+const SERVICE_PATH: Record<string, string> = {
+  api: 'apps/api',
+  opencode: 'opencode',
+  marionette: 'marionette',
+};
+
 // --- types ----------------------------------------------------------------
 export type JobStatus = 'queued' | 'running' | 'success' | 'rolled_back' | 'failed';
 
@@ -224,7 +234,11 @@ async function runJob(job: Job): Promise<void> {
     return;
   }
 
-  await run(job, 'git', ['checkout', job.fromCommit, '--', '.']);
+  const scopePath = SERVICE_PATH[job.service] ?? '.';
+  if (scopePath === '.') {
+    line(job, `WARNING: no SERVICE_PATH entry for '${job.service}' -- rollback will be repo-wide`);
+  }
+  await run(job, 'git', ['checkout', job.fromCommit, '--', scopePath]);
   const recovered = (await buildAndUp(job)) && (await pollHealth(job, healthUrl));
 
   job.finishedAt = new Date().toISOString();
