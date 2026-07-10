@@ -71,6 +71,30 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
 
+  deploy:
+    build:
+      context: ./deploy
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      COMPOSE_PROJECT_NAME: bentley-os
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./:/home/spaghettios/bentley-os
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+    ports:
+      - "127.0.0.1:4000:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:4000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
   cloudflared:
     image: cloudflare/cloudflared:2025.5.0
     restart: unless-stopped
