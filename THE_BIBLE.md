@@ -371,7 +371,7 @@ actually proven.**
 | Rebuild api image with `googleapis` | ✅ done |
 | node-cron schedule in api | ✅ done, live in prod |
 | Wire `gcal.ts` + `gmail.ts` into running api | ✅ done, live in prod |
-| `event_attendees` / `organizer_id` population | ⬜ **last Milestone 1 gap** |
+| `event_attendees` / `organizer_id` population | ✅ verified live (organizer_id 1534/1541 populated, event_attendees confirmed via real test event) |
 
 - **Done when:** new events + emails land in Postgres automatically, with provenance, **and**
   `event_attendees`/`organizer_id` are populated. First two conditions met; third is the
