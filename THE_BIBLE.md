@@ -138,7 +138,7 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
 | **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision, audited. Can `reply` or `delegate` to contractor — **the build-machine keystone, now verified working end-to-end including real multi-step tool-call tasks** | Ingestion (api's job), deploy (deploy's job) |
-| **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `small.en` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
+| **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `base` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
 | **cloudflared** | — | Public tunnel, gated on `api` health | — |
 | **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
 
@@ -359,7 +359,7 @@ actually proven.**
   about it — and it's now verified against a real multi-step tool-call task, not just a
   trivial reply that happened to avoid the two bugs that were actually blocking it.**
 - Wolverine (fixer) — not built.
-- Local Whisper — **✅ done** (self-hosted `whisper.cpp`, `small.en` model, Cloudflare
+- Local Whisper — **✅ done** (self-hosted `whisper.cpp`, `base` model, Cloudflare
   Access-gated, Hammerspoon push-to-talk client on laptop). Local embeddings — not built.
 
 **Milestone 1 — Data in (Gmail + Calendar): 🔶 nearly done, one gap left**
@@ -498,7 +498,7 @@ system.
   Decide whether it's worth adding, given it's a low-churn service.
 - **Whisper GPU acceleration** — box has an AMD RX 5700 XT, currently unused; whisper runs
   CPU-only. Vulkan or ROCm/HIP backend would speed up larger models significantly. Not
-  started — scoped as a future task if `small.en`'s CPU latency becomes annoying in daily
+  started — scoped as a future task if `base`'s CPU latency becomes annoying in daily
   use.
 - **Log aggregation** specifics — not decided.
 - **`event_attendees` / `organizer_id` gap** — last item blocking Milestone 1 completion.
