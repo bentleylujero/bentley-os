@@ -4,9 +4,9 @@
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
 
-*Last verified: 2026-07-11 (keystone hardened — undici timeout + OpenCode headless
-permissions fixed and verified with a real multi-step tool-call task, not just a trivial
-reply).*
+*Last verified: 2026-07-11 (whisper speech-to-text added — self-hosted whisper.cpp server,
+Cloudflare Access service-token gated, Hammerspoon push-to-talk client on laptop, model
+upgraded base → small.en).*
 
 ---
 
@@ -19,7 +19,10 @@ single web dashboard (`bentleyos.me`).
 
 **Three principles that don't bend:**
 1. **Host locally by default.** Everything runs on my box except the AI models themselves
-   (API-only, no local inference — for now).
+   (API-only, no local inference — for now). **Exception, deliberately made:** whisper
+   speech-to-text runs locally on the box (`whisper.cpp`), not via an API — a self-hosted
+   model was the right call here since it's a small, well-understood model with no need for
+   frontier quality, and local hosting avoids sending voice audio to a third party.
 2. **One source of truth.** Every fact lives once, attached to the right object, related
    through typed links. No shadow tables, no duplicated state.
 3. **Autonomy is earned, not assumed.** The path is guardrail-first: suggest → approve →
@@ -65,7 +68,10 @@ unsure whether something exists on the box, give the one command to check — do
 - **When a request will run long (real OpenCode agent work, not a trivial round-trip), give
   it real wall-clock time before concluding it's stuck.** Check `audit_log`, not stdout logs
   (services here don't log per-request) and not a short-lived test client's own timeout —
-  the server-side call can still be running after the test client gives up.
+  the server-side call can still be running after the test client gives up. **Same applies
+  to Docker builds:** a `docker compose up --build` can sit on "exporting to image" /
+  "unpacking" for 10+ minutes on slow disk I/O with zero visible progress — check
+  `docker info` responsiveness and system load before assuming the daemon is hung (see §7).
 
 **File-creation quirk:** the browser terminal has bracketed-paste issues. Short heredocs
 (`cat > file << 'EOF'`) are fine. **For long files — like this one — heredoc in the browser
@@ -84,8 +90,9 @@ flagged as failure-prone.
 2. **Store each fact once.**
 3. **Schema changes are versioned migrations** in `supabase/migrations/` (sequential numeric
    prefix, plain SQL, e.g. `0001_secretary_ontology.sql`) — never ad-hoc production edits.
-4. **Host locally; AI is API-only.** No local model inference. Do not reintroduce a local
-   embeddings/LLM service.
+4. **Host locally; AI is API-only, except small local-model utilities like whisper.** No
+   local LLM inference. Do not reintroduce a local embeddings/LLM service. Whisper (speech-
+   to-text) is a deliberate, narrow exception — see §0.
 5. **Autonomy is earned — except inside the sandbox, and never for external comms.** Any AI
    action capability that touches the *production* zone or the outside world ships
    approval-gated first. Never wire autonomous actions onto real Gmail without a guardrail.
@@ -101,13 +108,19 @@ flagged as failure-prone.
   `.ts`.
 - After any api code change: `cd ~/bentley-os && docker compose up -d --build api` (running
   container keeps serving until the new build succeeds). For known services, prefer the
-  deploy service (`POST /deploy {"service":"api"}`) over raw compose.
+  deploy service (`POST /deploy {"service":"api"}`) over raw compose. **Services outside
+  `deploy`'s `SERVICE_HEALTH` map (e.g. `whisper`) must be rebuilt directly via
+  `docker compose up -d --build <service>`** — there's no audited path for them yet.
 - Never ship a change that could take down `/health` without saying so and giving the
   rollback.
 - **Any process making outbound calls to a service that can legitimately run long (OpenCode
   agent tasks) must set an explicit timeout via `undici`'s `setGlobalDispatcher`** — Node's
   fetch default (5 min headers/body timeout) is too short and fails silently as a generic
   `fetch failed` with no diagnosable cause unless `err.cause` is explicitly captured.
+- **`sed -i` syntax differs by platform.** GNU sed (the box, Ubuntu): `sed -i 's/x/y/' file`.
+  BSD/macOS sed (laptop): `sed -i '' 's/x/y/' file` (empty string arg required for the
+  backup-suffix parameter). Using the wrong form fails silently or errors — always confirm
+  which machine you're on before reaching for `sed -i`.
 
 ---
 
@@ -123,9 +136,10 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | **qdrant** | 6333 (LAN only) | Vector storage for embeddings (Milestone 3+) | Currently **unused** — nothing writes to it |
 | **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
 | **api** | 3000 | HTTP surface: `/health`, dashboard (`/`), ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min), OpenCode proxy (`/opencode/*`) | Build/deploy logic, AI reasoning |
-| **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator |
+| **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
 | **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision, audited. Can `reply` or `delegate` to contractor — **the build-machine keystone, now verified working end-to-end including real multi-step tool-call tasks** | Ingestion (api's job), deploy (deploy's job) |
+| **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `small.en` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
 | **cloudflared** | — | Public tunnel, gated on `api` health | — |
 | **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
 
@@ -152,7 +166,7 @@ Running on the box at `~/bentley-os` (Ubuntu, LAN IP `172.16.30.4`). Absolute pa
 qdrant (6333/6334 — reachable, zero collections, unused), cloudflared, dozzle (8080),
 portainer (9000/8000/9443), uptime-kuma (healthy, 3001), deploy (healthy, 4000 /
 127.0.0.1), contractor (healthy, 4100, backend only), marionette (healthy, 4200, backend
-only).
+only), **whisper (healthy, 4300, backend only, `small.en` model)**.
 
 **No `embedder` service exists** — confirmed absent. Embeddings deferred to a local model
 (not yet built).
@@ -176,9 +190,9 @@ state).
   does **not** currently write to `audit_log` — stdout only. Open item.
 - **psql inside the container:** use `-h 127.0.0.1` to force TCP+password auth (peer auth
   fails on the Unix socket):
-  ```bash
+```bash
   docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c "..."
-  ```
+```
   **Always pass `-P pager=off`** — the container has no `less` installed, so psql's default
   pager silently breaks output display.
 
@@ -189,33 +203,74 @@ state).
   tab, not the global org toggle.
 - Verify Access changes in **incognito** — existing sessions give false "still open"
   readings.
-  **Whisper remote access — done:**
-- Published application route added: `whisper.bentleyos.me` → `http://whisper:4300`
-  (Cloudflare dashboard, token-based tunnel — no local `cloudflared` config file exists
-  on the box; routes/policies live entirely in the Cloudflare dashboard, not the repo).
-- Access policy: reused existing policy (renamed `Me - Self-Hosted Apps`, ID
-  `63930902-c6ba-4551-bd30-388383443ac0`), same email gate (`bentley.lujero@gmail.com`)
-  as `ssh` and `Bentley OS API`. Confirmed via `curl -I` returning `302` to
-  `cloudflareaccess.com` login — Access is actually gating the endpoint.
-- Second pre-existing "Me" policy (App-Launcher-only, ID `0544c4e3-...`) renamed
-  `Me - App Launcher` to disambiguate.
-- Service token generated (`whisper-laptop`, non-expiring) for scripted/off-browser
-  access — used by a Hammerspoon push-to-talk script on Bentley's laptop
-  (`~/.hammerspoon/init.lua`, not in this repo) that hits `/inference` directly.
-- **Not yet done:** rotating this service token off plaintext in chat (see Open
-  Questions) or moving it to macOS Keychain in the laptop script.
+
+**Whisper — self-hosted speech-to-text, done end-to-end:**
+- **Server:** `~/bentley-os/whisper/Dockerfile` builds `whisper.cpp` from source
+  (`ggerganov/whisper.cpp`, `whisper-server` target) and bundles a `ggml-*.bin` model.
+  Currently **`ggml-small.en.bin`** (487MB, English-only) — upgraded from the original
+  `ggml-base.bin` (74MB) for better transcription accuracy. `CMD` runs
+  `whisper-server -m models/ggml-small.en.bin --host 0.0.0.0 --port 4300`.
+- **API contract (confirmed via direct testing, not assumed):** `POST /inference`,
+  multipart form, field `file` (audio, wav tested at 16kHz mono), optional
+  `response_format=json` → `{"text": " transcribed words\n"}`. No auth of its own — auth is
+  entirely Cloudflare Access in front of it.
+- **Public route:** `whisper.bentleyos.me` → `http://whisper:4300` (Cloudflare dashboard,
+  token-based tunnel — no local `cloudflared` config file exists on the box; routes/policies
+  live entirely in the Cloudflare dashboard, not the repo).
+- **Access policies on the `whisper` app — two, both required:**
+  1. `Me - Self-Hosted Apps` (renamed, ID `63930902-c6ba-4551-bd30-388383443ac0`) — email
+     gate (`bentley.lujero@gmail.com`) for browser access, shared with `ssh` and
+     `Bentley OS API`.
+  2. **`Whisper Service Token`** (Action: **Service Auth**, Include: Service Token
+     `whisper-laptop`) — added separately, specifically for the Hammerspoon client. **A
+     generated service token is NOT automatically valid against an app** — it must be
+     explicitly included in a Service Auth policy on that specific app, or every request
+     gets bounced to the login redirect with `service_token_status:false` in the JWT meta,
+     even though the token itself is valid. Confirmed the hard way: token worked fine at
+     generation time, still got rejected until this policy existed.
+- **Service token:** `whisper-laptop`, non-expiring, generated for the Hammerspoon
+  push-to-talk client. **Exposed in plaintext in chat multiple times across sessions —
+  rotation still not done** (see §8).
+- **Hammerspoon client (laptop-side, NOT in this repo — lives at `~/.hammerspoon/` on
+  Bentley's MacBook):**
+  - `~/.hammerspoon/whisper_secrets.lua` — holds the Cloudflare Client ID/Secret, `require`d
+    by `init.lua`, kept separate so the token isn't inline in logic that might get pasted
+    elsewhere.
+  - `~/.hammerspoon/init.lua` — push-to-talk: holding **right Command** (keycode 54, watched
+    via `hs.eventtap` `flagsChanged`, distinct from left Command's keycode 55) starts an
+    `hs.task` running `sox -d -r 16000 -c 1 <tmp wav>`; releasing stops the task, waits
+    300ms, then `hs.task` runs `curl` against `whisper.bentleyos.me/inference`, decodes the
+    JSON response, sets the pasteboard, and sends Cmd+V.
+  - Requires **Accessibility** permission granted to Hammerspoon (System Settings → Privacy
+    & Security) — without it, `hs.eventtap:start()` fails silently at startup with
+    `Unable to create eventtap. Is Accessibility enabled?` in the Hammerspoon Console, and
+    the hotkey simply never fires. No crash, no obvious error to the user — check the
+    Console, not assumptions, when a Hammerspoon hotkey "does nothing."
+  - `hs.task` uses absolute binary paths (`/opt/homebrew/bin/sox`, `/usr/bin/curl`) — it does
+    not inherit the shell's `$PATH`.
+  - Confirmed working end-to-end: hold key → speak → release → real transcribed text pasted
+    at cursor.
+- **GPU acceleration — not yet explored.** Box has an AMD Radeon RX 5700 XT (confirmed via
+  `lspci`), currently running whisper on CPU only. `whisper.cpp` supports a Vulkan backend
+  (broader compatibility) or ROCm/HIP (better perf, heavier setup — kernel driver + device
+  passthrough + different cmake target) for AMD acceleration. Scoped as a future task, not
+  started.
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `5f28f3f`.
+Local in sync with `origin/main` at `b634e17`.
 Recent commits: `369e256` (gcal + gmail ingestion wired into live api via node-cron) →
 `5c020cc` (gcal: populate organizer_id and event_attendees) → `5f28f3f` (fix: keystone
-end-to-end — undici timeout + OpenCode headless permissions).
+end-to-end — undici timeout + OpenCode headless permissions) → `35887c2` (docs: whisper
+remote access setup, via GitHub web UI per the long-file workaround) → `26ecab1` (whisper:
+switch model from base to small.en for better accuracy).
 
 **Deploy service** (`~/bentley-os/deploy/`): serialized queue, reads last-good commit from
 `audit_log` → build → `up -d` → poll real `/health` over `backend` → success or
 auto-rollback, every step audited. `SERVICE_HEALTH` map covers `api`, `contractor`,
-`marionette`. Deploys go through `POST /deploy` — never raw compose for known services.
+`marionette` — **not `whisper`**, which must be rebuilt directly via
+`docker compose up -d --build whisper` until it's added to the map. Deploys for covered
+services go through `POST /deploy` — never raw compose for those.
 - **Known open bug:** rollback runs `git checkout <commit> -- .` — reverts the **entire repo
   tree**, not just the failed service's files. **Blocks Milestone 5** — must fix before any
   auto-executed AI action, since the blast radius of a bad auto-rollback is the same
@@ -287,22 +342,7 @@ mount). Reached as `http://contractor:4100`.
 - OAuth secrets (`client_secret.json`, `token.json`) bind-mounted read-only into the live
   `api` container at `/secrets/` (exact absolute host path, per §7 bind-mount lesson).
 - Confirmed live: first tick after deploy ran clean, both syncs incremental
-  (`fetched: 0, upserted: 0` — correct, since the isolation test had just consumed the
-  delta).
-
----
-
-## 5. Data model
-
-```
-people ──< email_recipients >── emails
-people ──< event_attendees  >── calendar_events
-                                       │
-                                   audit_log   (every deploy action, eventually every AI action)
-sync_state   (source PK, sync_token, updated_at — incremental ingestion cursors)
-```
-
----
+  (`fetched: 0, upserted: 0` — correct, since ---
 
 ## 6. Roadmap (ordered by what unblocks what)
 
@@ -319,7 +359,8 @@ actually proven.**
   about it — and it's now verified against a real multi-step tool-call task, not just a
   trivial reply that happened to avoid the two bugs that were actually blocking it.**
 - Wolverine (fixer) — not built.
-- Local Whisper + embeddings — not built.
+- Local Whisper — **✅ done** (self-hosted `whisper.cpp`, `small.en` model, Cloudflare
+  Access-gated, Hammerspoon push-to-talk client on laptop). Local embeddings — not built.
 
 **Milestone 1 — Data in (Gmail + Calendar): 🔶 nearly done, one gap left**
 | Step | Status |
@@ -330,7 +371,7 @@ actually proven.**
 | Rebuild api image with `googleapis` | ✅ done |
 | node-cron schedule in api | ✅ done, live in prod |
 | Wire `gcal.ts` + `gmail.ts` into running api | ✅ done, live in prod |
-| `event_attendees` / `organizer_id` population | ⬜ **last Milestone 1 gap** |
+| `event_attendees` / `organizer_id` population | ✅ verified live (organizer_id 1534/1541 populated, event_attendees confirmed via real test event) |
 
 - **Done when:** new events + emails land in Postgres automatically, with provenance, **and**
   `event_attendees`/`organizer_id` are populated. First two conditions met; third is the
@@ -401,6 +442,31 @@ system.
 - **Long file pastes break the browser terminal.** Beyond a short heredoc, generate the file
   in Claude's sandbox and commit it via the GitHub web UI (paste into the online editor, or
   drag-and-drop upload to replace the file) rather than fighting heredoc/scp limits.
+- **A Cloudflare Access service token is not automatically valid against an app just because
+  it was generated.** It must be explicitly attached via a separate **Service Auth** policy
+  on that specific application (Action: Service Auth, Include: Service Token). Without it,
+  every request bounces to the login redirect with `service_token_status:false` buried in
+  the JWT `meta` payload — the token itself can be completely valid and still get rejected.
+  Confirmed by testing: generating the token and using correct headers still failed until
+  this policy existed.
+- **`sed -i` syntax is platform-specific.** GNU sed (Linux/the box) takes no argument after
+  `-i` for in-place editing without a backup. BSD/macOS sed requires an explicit (even if
+  empty) backup-suffix argument: `sed -i '' 's/x/y/'`. Using the Linux form on macOS or vice
+  versa either errors outright or silently no-ops — always confirm which machine a command
+  is about to run on.
+- **A Docker build sitting at "exporting to image" / "unpacking" for 10+ minutes isn't
+  necessarily hung.** On slow disk I/O, large layers (e.g. a ~500MB model file) can take
+  a very long time to unpack with the progress line appearing frozen. Before assuming
+  `dockerd` is stuck: check `docker info` responds within a timeout, check `uptime`/load
+  average, check for processes in D-state (`ps aux | awk '$8 ~ /D/'`). If the daemon itself
+  is responsive and load is low, it's probably just slow — the build in this repo's history
+  took ~800s longer than expected and completed successfully once left alone.
+- **Interrupting a `docker compose up --build` with Ctrl+C after the image has already built
+  but before the container swap can leave the new image sitting unused.** Check
+  `docker images` for the freshly-built image and `docker compose ps` for what's actually
+  running — if the image exists but the running container's `CREATED` timestamp predates it,
+  a plain `docker compose up -d <service>` (no `--build`) will pick up the already-built
+  image quickly, no rebuild needed.
 
 ---
 
@@ -421,11 +487,19 @@ system.
   write logic; unify eventually. Ingestion (gcal/gmail) doesn't write to `audit_log` at
   all yet — decide whether it should before Milestone 2 dashboards need "last synced."
 - **Embeddings provider** — resolved to "local model" but not built.
-- **Whisper model size** — not decided.
-- **Whisper service token exposed in chat** — `whisper-laptop` Client ID/Secret pasted
-  in plaintext during setup (2026-07-11), same pattern as the Postgres/DeepSeek leaks.
-  Not rotated yet. Consider moving the laptop-side Hammerspoon script's credentials to
-  macOS Keychain instead of the plaintext `init.lua` file.
+- **`whisper-laptop` Cloudflare service token exposed in plaintext in chat multiple times
+  across sessions** (initial setup, then again during the Service Auth policy debugging).
+  Not rotated yet — same pattern as the Postgres/DeepSeek leaks, now the most-repeated
+  instance of this issue. Rotate in the Cloudflare dashboard and update
+  `~/.hammerspoon/whisper_secrets.lua` on the laptop when done. Consider moving the laptop
+  script's credentials to macOS Keychain instead of a plaintext Lua file while at it.
+- **Whisper deploy path** — `whisper` isn't in `deploy`'s `SERVICE_HEALTH` map, so it has no
+  audited deploy/rollback path and must be rebuilt via raw `docker compose up -d --build`.
+  Decide whether it's worth adding, given it's a low-churn service.
+- **Whisper GPU acceleration** — box has an AMD RX 5700 XT, currently unused; whisper runs
+  CPU-only. Vulkan or ROCm/HIP backend would speed up larger models significantly. Not
+  started — scoped as a future task if `small.en`'s CPU latency becomes annoying in daily
+  use.
 - **Log aggregation** specifics — not decided.
 - **`event_attendees` / `organizer_id` gap** — last item blocking Milestone 1 completion.
 - **`marionette/src/schema.ts`** has one leftover comment mentioning "opencode"
@@ -437,7 +511,9 @@ system.
 
 1. **One AI brain.** All classification/reasoning/generation goes in `marionette`. A
    prompt-calling function in `apps/api` belongs in marionette instead, with api calling
-   marionette's HTTP endpoint.
+   marionette's HTTP endpoint. **Whisper is not an exception** — it does pure transcription
+   only, no interpretation; any future step that reasons about transcribed text belongs in
+   marionette, not in the whisper service or the Hammerspoon client.
 2. **One build/deploy system.** `deploy` already has queueing, health polling, audit-backed
    rollback. Milestone 6's git automation is an *extension* of `deploy`, not a parallel
    service.
@@ -459,4 +535,15 @@ system.
    - **External comms are never in scope for autonomy, in either zone.** No
      email/messaging/external-comms MCP or tool is wired to contractor. If one ever is, it
      ships with an explicit deny in the permission policy from day one — never relying on
-     "it just doesn't have that tool" once the tool exists.
+     "it just doesn't have that tool" once the tool exists.the isolation test had just consumed the
+  delta).
+
+---
+
+## 5. Data model
+people ──< email_recipients >── emails
+people ──< event_attendees  >── calendar_events
+│
+audit_log   (every deploy action, eventually every AI action)
+sync_state   (source PK, sync_token, updated_at — incremental ingestion cursors)
+
