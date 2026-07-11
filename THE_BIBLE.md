@@ -4,7 +4,7 @@
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
 
-*Last verified: 2026-07-10 (contractor rename + gcal ingestion isolation-tested & pushed).*
+*Last verified: 2026-07-11 (marionette → contractor delegation wired, isolation-tested & deployed — the keystone).*
 
 ---
 
@@ -98,7 +98,7 @@ stop and decide before coding — don't let it leak into two services.**
 | **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
 | **api** | 3000 | HTTP surface: `/health`, dashboard (`/`), ingestion (gcal/gmail → Postgres), OpenCode proxy (`/opencode/*`) | Build/deploy logic, AI reasoning |
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator |
-| **contractor** | 4100 (`backend` only) | The coding/build layer (formerly `opencode` container). **Health-only stub — no business logic yet** | Orchestration, ingestion, deploy |
+| **contractor** | 4100 (`backend` only) | The coding/build layer (formerly `opencode` container). `POST /execute` creates a real OpenCode session, runs the spec, returns the result, audits every call | Orchestration, ingestion, deploy |
 | **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision, audited. AI reasoning/classification/brief/Q&A lives here | Ingestion (api's job), deploy (deploy's job) |
 | **cloudflared** | — | Public tunnel, gated on `api` health | — |
 | **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
@@ -150,10 +150,11 @@ contractor (healthy, 4100, backend only), marionette (healthy, 4200, backend onl
 - Verify Access changes in **incognito** — existing sessions give false "still open" readings.
 
 **Git:** `~/bentley-os` is a git repo, `main` branch. Remote **is** configured:
-`git@github.com:bentleylujero/bentley-os.git` (private). GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `a8e721e`.
-Recent commits: `ad0847b` (marionette /think) → `2e0b466` (contractor rename) →
-`a8e721e` (gcal ingestion).
+`git@github.com:bentleylujero/bentley-os.git` (private, seems to actually be reachable
+publicly via clone — worth double-checking repo visibility settings). GitHub username
+`bentleylujero`. Local in sync with `origin/main` at `8ab47d6`.
+Recent commits: `a8e721e` (gcal ingestion) → `355e21b` (contractor `/execute` + OpenCode
+LAN-bind fix) → `8ab47d6` (marionette delegate branch — **the keystone**).
 
 **Deploy service** (`~/bentley-os/deploy/`): serialized queue, reads last-good commit from
 `audit_log` → build → `up -d` → poll real `/health` over `backend` → success or auto-rollback,
@@ -166,11 +167,20 @@ through `POST /deploy` — never raw compose for known services.
   (e.g. `docker-compose.yml`) in separate commits so this stays dormant.
 
 **Contractor service** (`~/bentley-os/contractor/`): the coding/build layer (renamed from
-`opencode`, `2e0b466`). Minimal Hono app, `/health` only, no business logic. `WORKDIR /app`
-(outside the bind mount). Reached as `http://contractor:4100`.
-- Note: `apps/api/src/routes/opencode.ts` (proxy to the real third-party systemd OpenCode
-  server at `127.0.0.1:4096`) was **deliberately left unrenamed** — "opencode" there is the
-  actual tool (`@opencode-ai/sdk`, `opencode.json`), not our container.
+`opencode`, `2e0b466`). `WORKDIR /app` (outside the bind mount). Reached as
+`http://contractor:4100`.
+- `POST /execute {"spec":"..."}` — creates a fresh OpenCode session via `@opencode-ai/sdk`,
+  sends `spec` as a prompt, returns `{sessionId, result}`. Sandbox zone — no approval gate.
+  Audited (`actor='contractor'`, `action='contractor.execute'`, success or error either way).
+- Talks to the real third-party systemd OpenCode server directly at `http://172.16.30.4:4096`
+  (LAN IP — **not** `127.0.0.1`, which inside a container means the container itself). Basic
+  Auth via `OPENCODE_SERVER_PASSWORD`, same secret `apps/api/src/routes/opencode.ts` uses.
+- **Fixed 2026-07-11:** `opencode.service` (systemd) was bound to `--hostname 127.0.0.1` —
+  loopback-only, unreachable from *any* container. Rebound to `0.0.0.0:4096` (still Basic
+  Auth-gated). This means `apps/api/src/routes/opencode.ts` had been dead code until now;
+  it should work too, but hasn't been re-verified since the rebind.
+- Now has `postgres` dependency + `DATABASE_URL` + `.env` wired into compose (previously had
+  neither, since it did nothing that needed them).
 
 **Marionette service** (`~/bentley-os/marionette/`): the orchestrator, DeepSeek reasoning.
 - `POST /think {"request":"..."}` → DeepSeek (`deepseek-v4-pro`, JSON mode) → structured
@@ -182,8 +192,15 @@ through `POST /deploy` — never raw compose for known services.
   back to `reply`.
 - System prompt scoped to present capability — hard-ruled to admit what it can't see rather
   than hallucinate. Verified in prod.
-- **Still cannot:** no memory (Qdrant unused, `/think` stateless), no ingested data, no
-  delegation/control (can't talk to contractor or trigger deploy).
+- **Delegation is live (2026-07-11):** when DeepSeek returns `decision: "delegate"`
+  (`target_service` must be `"contractor"`, validated against an allowlist in `schema.ts`),
+  `/think` POSTs `spec` to `http://contractor:4100/execute`, folds the result into its
+  response, and audits `marionette.delegate` (contractor's own `contractor.execute` row
+  covers the second hop). A failed delegation still returns 200 with the reasoning +
+  error — never 502s a request that reasoned correctly. Verified end-to-end in prod:
+  real file created via OpenCode, both audit rows confirmed.
+- **Still cannot:** no memory (Qdrant unused, `/think` stateless), no ingested data, can't
+  trigger `deploy`, can only delegate to `contractor` (no other target_service exists yet).
 
 ---
 
@@ -206,8 +223,9 @@ Cloudflare Access email-locked + MFA on.
 
 **Orchestrator build-order (precedes Milestone 1's remaining work):**
 - Deploy service — ✅ built, rollback-tested + fixed.
-- Contractor (OpenCode container) — ✅ scaffolded (infra only, no logic).
-- Marionette — ✅ scaffolded, ✅ `/think` reasoning logic built.
+- Contractor — ✅ real `/execute`, wired to systemd OpenCode, audited.
+- Marionette — ✅ `/think` reasoning logic built, ✅ delegate → contractor wired and
+  deployed (**the keystone — build-order item complete**).
 - Wolverine (fixer) — not built.
 - Local Whisper + embeddings — not built.
 
