@@ -189,6 +189,21 @@ state).
   tab, not the global org toggle.
 - Verify Access changes in **incognito** — existing sessions give false "still open"
   readings.
+  **Whisper remote access — done:**
+- Published application route added: `whisper.bentleyos.me` → `http://whisper:4300`
+  (Cloudflare dashboard, token-based tunnel — no local `cloudflared` config file exists
+  on the box; routes/policies live entirely in the Cloudflare dashboard, not the repo).
+- Access policy: reused existing policy (renamed `Me - Self-Hosted Apps`, ID
+  `63930902-c6ba-4551-bd30-388383443ac0`), same email gate (`bentley.lujero@gmail.com`)
+  as `ssh` and `Bentley OS API`. Confirmed via `curl -I` returning `302` to
+  `cloudflareaccess.com` login — Access is actually gating the endpoint.
+- Second pre-existing "Me" policy (App-Launcher-only, ID `0544c4e3-...`) renamed
+  `Me - App Launcher` to disambiguate.
+- Service token generated (`whisper-laptop`, non-expiring) for scripted/off-browser
+  access — used by a Hammerspoon push-to-talk script on Bentley's laptop
+  (`~/.hammerspoon/init.lua`, not in this repo) that hits `/inference` directly.
+- **Not yet done:** rotating this service token off plaintext in chat (see Open
+  Questions) or moving it to macOS Keychain in the laptop script.
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
@@ -407,6 +422,10 @@ system.
   all yet — decide whether it should before Milestone 2 dashboards need "last synced."
 - **Embeddings provider** — resolved to "local model" but not built.
 - **Whisper model size** — not decided.
+- **Whisper service token exposed in chat** — `whisper-laptop` Client ID/Secret pasted
+  in plaintext during setup (2026-07-11), same pattern as the Postgres/DeepSeek leaks.
+  Not rotated yet. Consider moving the laptop-side Hammerspoon script's credentials to
+  macOS Keychain instead of the plaintext `init.lua` file.
 - **Log aggregation** specifics — not decided.
 - **`event_attendees` / `organizer_id` gap** — last item blocking Milestone 1 completion.
 - **`marionette/src/schema.ts`** has one leftover comment mentioning "opencode"
