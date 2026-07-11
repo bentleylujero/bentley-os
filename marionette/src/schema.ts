@@ -1,8 +1,7 @@
 // schema.ts — the structured decision marionette returns from /think.
 //
-// Designed to grow. Today the only reachable decision is "reply". When opencode
-// (and later other services) can receive work, we add "delegate" as an additional
-// variant WITHOUT changing the existing shape — additive, not a rewrite.
+// "reply" answers directly. "delegate" hands work to another service (today:
+// contractor) via target_service + spec. Additive — reply's shape is unchanged.
 
 export type DecisionKind = 'reply' | 'delegate';
 
@@ -14,14 +13,16 @@ export interface Decision {
   spec?: string;
 }
 
-// The only decision kind marionette can currently act on. Anything else coming
-// back from the model is coerced to a safe reply so we never pretend to delegate
-// to a service that can't yet receive it.
-export const SUPPORTED_DECISIONS: DecisionKind[] = ['reply'];
+export const SUPPORTED_DECISIONS: DecisionKind[] = ['reply', 'delegate'];
+
+// Services marionette is actually allowed to delegate to. Keeps the model
+// from inventing a target_service that doesn't exist.
+export const DELEGATABLE_SERVICES = ['contractor'];
 
 // Validates and normalizes whatever JSON the model returned into a Decision.
-// If the model returns something unexpected, we degrade to a reply rather than
-// throwing — marionette should never crash on its own output shape.
+// If the model returns something unexpected — unsupported decision kind, or a
+// delegate with no valid target_service/spec — we degrade to a reply rather
+// than throwing or delegating to something that can't receive it.
 export function normalizeDecision(raw: unknown): Decision {
   const obj = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
 
@@ -33,5 +34,17 @@ export function normalizeDecision(raw: unknown): Decision {
   const message = typeof obj.message === 'string' ? obj.message : '';
   const reasoning = typeof obj.reasoning === 'string' ? obj.reasoning : '';
 
-  return { decision: decision as DecisionKind, message, reasoning };
+  if (decision === 'delegate') {
+    const target_service = typeof obj.target_service === 'string' ? obj.target_service : '';
+    const spec = typeof obj.spec === 'string' ? obj.spec : '';
+
+    if (!DELEGATABLE_SERVICES.includes(target_service) || spec.trim() === '') {
+      // Can't safely delegate — degrade to reply so we never silently drop the request.
+      return { decision: 'reply', message, reasoning };
+    }
+
+    return { decision: 'delegate', message, reasoning, target_service, spec };
+  }
+
+  return { decision: 'reply', message, reasoning };
 }

@@ -11,6 +11,8 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 
 // POST /think  { "request": "<what you want marionette to reason about>" }
 // Calls DeepSeek, returns a structured Decision, audits the call either way.
+// If the decision is "delegate", hands the spec to contractor and folds the
+// result back into the response before returning.
 app.post('/think', async (c) => {
   let body: any;
   try {
@@ -24,6 +26,7 @@ app.post('/think', async (c) => {
     return c.json({ error: 'missing "request" string in body' }, 400);
   }
 
+  let decision;
   try {
     const result = await callDeepSeek([
       { role: 'system', content: SYSTEM_PROMPT },
@@ -37,7 +40,7 @@ app.post('/think', async (c) => {
       parsed = { decision: 'reply', message: result.content, reasoning: '' };
     }
 
-    const decision = normalizeDecision(parsed);
+    decision = normalizeDecision(parsed);
 
     await audit({
       action: 'marionette.think',
@@ -50,8 +53,6 @@ app.post('/think', async (c) => {
         finish_reason: result.finishReason,
       },
     });
-
-    return c.json({ decision, model: result.model, usage: result.usage });
   } catch (err: any) {
     const message = err?.message || String(err);
 
@@ -64,6 +65,43 @@ app.post('/think', async (c) => {
     });
 
     return c.json({ error: 'think failed', detail: message }, 502);
+  }
+
+  if (decision.decision !== 'delegate') {
+    return c.json({ decision });
+  }
+
+  // Delegate branch: hand the spec to contractor, fold its result back in.
+  // A failed delegation is still a successful /think — we return what we
+  // know rather than 502ing a request that reasoned correctly.
+  try {
+    const res = await fetch('http://contractor:4100/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ spec: decision.spec }),
+    });
+
+    const contractorResult = await res.json();
+
+    await audit({
+      action: 'marionette.delegate',
+      outcome: res.ok ? 'success' : 'error',
+      target: decision.target_service,
+      payload: { spec: decision.spec, status: res.status, result: contractorResult },
+    });
+
+    return c.json({ decision, delegation: { status: res.status, result: contractorResult } });
+  } catch (err: any) {
+    const message = err?.message || String(err);
+
+    await audit({
+      action: 'marionette.delegate',
+      outcome: 'error',
+      target: decision.target_service,
+      payload: { spec: decision.spec, error: message },
+    });
+
+    return c.json({ decision, delegation: { error: message } });
   }
 });
 
