@@ -4,9 +4,8 @@
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
 
-*Last verified: 2026-07-11 (whisper speech-to-text added — self-hosted whisper.cpp server,
-Cloudflare Access service-token gated, Hammerspoon push-to-talk client on laptop, model
-upgraded base → small.en).*
+*Last verified: 2026-07-11 (whisper model reverted small.en → base — small.en was too slow
+on CPU-only inference in daily use).*
 
 ---
 
@@ -166,7 +165,7 @@ Running on the box at `~/bentley-os` (Ubuntu, LAN IP `172.16.30.4`). Absolute pa
 qdrant (6333/6334 — reachable, zero collections, unused), cloudflared, dozzle (8080),
 portainer (9000/8000/9443), uptime-kuma (healthy, 3001), deploy (healthy, 4000 /
 127.0.0.1), contractor (healthy, 4100, backend only), marionette (healthy, 4200, backend
-only), **whisper (healthy, 4300, backend only, `small.en` model)**.
+only), **whisper (healthy, 4300, backend only, `base` model)**.
 
 **No `embedder` service exists** — confirmed absent. Embeddings deferred to a local model
 (not yet built).
@@ -207,9 +206,9 @@ state).
 **Whisper — self-hosted speech-to-text, done end-to-end:**
 - **Server:** `~/bentley-os/whisper/Dockerfile` builds `whisper.cpp` from source
   (`ggerganov/whisper.cpp`, `whisper-server` target) and bundles a `ggml-*.bin` model.
-  Currently **`ggml-small.en.bin`** (487MB, English-only) — upgraded from the original
-  `ggml-base.bin` (74MB) for better transcription accuracy. `CMD` runs
-  `whisper-server -m models/ggml-small.en.bin --host 0.0.0.0 --port 4300`.
+  Currently **`ggml-base.bin`** (74MB) — reverted from `ggml-small.en.bin` (487MB) after
+  small.en proved too slow for daily push-to-talk use on CPU-only inference. `CMD` runs
+  `whisper-server -m models/ggml-base.bin --host 0.0.0.0 --port 4300`.
 - **API contract (confirmed via direct testing, not assumed):** `POST /inference`,
   multipart form, field `file` (audio, wav tested at 16kHz mono), optional
   `response_format=json` → `{"text": " transcribed words\n"}`. No auth of its own — auth is
@@ -263,7 +262,8 @@ Recent commits: `369e256` (gcal + gmail ingestion wired into live api via node-c
 `5c020cc` (gcal: populate organizer_id and event_attendees) → `5f28f3f` (fix: keystone
 end-to-end — undici timeout + OpenCode headless permissions) → `35887c2` (docs: whisper
 remote access setup, via GitHub web UI per the long-file workaround) → `26ecab1` (whisper:
-switch model from base to small.en for better accuracy).
+switch model from base to small.en for better accuracy) → `527d877` (whisper: revert
+model from small.en to base for speed).
 
 **Deploy service** (`~/bentley-os/deploy/`): serialized queue, reads last-good commit from
 `audit_log` → build → `up -d` → poll real `/health` over `backend` → success or
