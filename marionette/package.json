@@ -8,6 +8,7 @@
   "dependencies": {
     "hono": "^4.6.0",
     "@hono/node-server": "^1.13.0",
-    "postgres": "^3.4.5"
+    "postgres": "^3.4.5",
+    "undici": "^6.19.0"
   }
 }

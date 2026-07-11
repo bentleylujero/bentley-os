@@ -19,5 +19,20 @@
         }
       }
     }
+  },
+  "permission": {
+    "*": "allow",
+    "external_directory": "allow",
+    "doom_loop": "allow",
+    "bash": {
+      "*": "allow",
+      "rm -rf /*": "deny",
+      "rm -rf /": "deny",
+      "rm -rf ~*": "deny",
+      "rm -rf ~": "deny",
+      "rm -rf .": "deny",
+      "rm -rf ..": "deny",
+      "rm -rf /home*": "deny"
+    }
   }
 }
