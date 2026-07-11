@@ -70,6 +70,9 @@ services:
       retries: 3
     ports:
       - "127.0.0.1:3000:3000"
+    volumes:
+      - /home/spaghettios/bentley-os/client_secret.json:/secrets/client_secret.json:ro
+      - /home/spaghettios/bentley-os/token.json:/secrets/token.json:ro
 
   deploy:
     build:

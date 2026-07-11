@@ -2,6 +2,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import 'dotenv/config';
 import { routes } from './routes/index.js';
+import { startScheduler } from './ingestion/scheduler.js';
 
 const app = new Hono();
 
@@ -14,4 +15,5 @@ serve({
   port,
 }, (info) => {
   console.log(`Bentley OS API listening on port ${info.port}`);
+  startScheduler();
 });
