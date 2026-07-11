@@ -118,6 +118,16 @@ services:
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4100/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
+  whisper:
+    build:
+      context: ./whisper
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4300/"]
+      interval: 15s
   marionette:
     build:
       context: ./marionette
