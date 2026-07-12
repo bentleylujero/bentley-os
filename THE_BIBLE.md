@@ -4,8 +4,10 @@
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
 
-*Last verified: 2026-07-12 (Telegram → marionette integration shipped and verified
-end-to-end, including a real delegate-to-contractor task).*
+*Last verified: 2026-07-12 (Milestone 4 approval-gated action layer shipped — `actions`
+table + lifecycle + 5 marionette routes + Telegram Approve/Deny buttons; and marionette
+audit-sight read endpoint `GET /audit/summary` shipped. Both live, confirmed via audited
+`POST /deploy`. `/think` does NOT yet use audit-sight — that integration is the next task.)*
 
 ---
 
@@ -155,10 +157,10 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | **postgres** | 5432 (LAN only) | All persisted state — ontology, sync tokens, audit log | Vector search (qdrant) |
 | **qdrant** | 6333 (LAN only) | Vector storage for embeddings (Milestone 3+) | Currently **unused** — nothing writes to it |
 | **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
-| **api** | 3000 | HTTP surface: `/health`, dashboard (`/`), ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → forwards to marionette's `/think`, replies via Telegram `sendMessage`** | Build/deploy logic, AI reasoning |
+| **api** | 3000 | HTTP surface: `/health`, dashboard (`/`), ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
-| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — the build-machine keystone, verified working end-to-end including real multi-step tool-call tasks **and now driven live from Telegram** | Ingestion (api's job), deploy (deploy's job) |
+| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`** | Ingestion (api's job), deploy (deploy's job). **`/think` does NOT yet consume audit-sight** |
 | **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `base` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
 | **cloudflared** | — | Public tunnel, gated on `api` health | — |
 | **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
@@ -199,7 +201,8 @@ state).
 
 **Database (Postgres `bentley` db):** ontology schema loaded. Tables: `people`, `emails`,
 `email_recipients`, `calendar_events`, `event_attendees`, `audit_log`, plus `sync_state`
-(from `0002_sync_state.sql`, applied live).
+(from `0002_sync_state.sql`) and `actions` (from `0003_actions.sql`, M4 — see below), both
+applied live.
 - `emails` **already has** unused `category` + `importance` columns — the future classifier
   writes to these, no new migration needed. Don't recreate them.
 - `calendar_events.organizer_id` and `event_attendees` are now **populated** — see Milestone
@@ -275,6 +278,81 @@ state).
 - **Commit:** `c97ba37` — `feat: Telegram webhook -> marionette, Access-bypassed on
   /telegram/webhook path`.
 
+**Milestone 4 — approval-gated action layer (gate slice) — done, live:**
+- **Migration `0003_actions.sql` applied live.** `actions` table — a mutable current-state
+  store for proposed side-effecting operations awaiting human approval. `audit_log` remains
+  the append-only ledger (`target` = the action's id); the two do not overlap in role.
+  Columns: `id` (bigint identity), `kind` (text, currently only `commit_deploy`), `status`
+  (text default `proposed`: `proposed|approved|executing|succeeded|failed|denied`),
+  `proposed_by` (text, `marionette`), `intent` (jsonb — machine-executable, e.g.
+  `{service, commit_message}`), `briefing` (text, dormant until steering lands), `result`
+  (jsonb, filled on execution), `supersedes_id` (bigint, lineage — dormant), `created_at`,
+  `updated_at`. Indexes on `status` and `created_at desc`.
+- **Live rows:** id=1 (`commit_deploy`, succeeded), id=2 (denied), id=3 (succeeded) — all
+  terminal. Next new action = id=4.
+- **`marionette/src/actions.ts`** owns all state transitions (reads Postgres directly, same
+  `postgres(DATABASE_URL, {max:2, idle_timeout:20})` pattern as `audit.ts`). Lifecycle:
+  `proposed → approved → executing → succeeded/failed`, or `proposed → denied`.
+  - **Strict guards:** approve/deny only affect a row `where status='proposed'` — a
+    double-tap / retry / race on the second call updates zero rows and reports "not
+    actionable" (surfaces as HTTP 409). No double-execute.
+  - **Fire-and-report:** `approveAction` flips the row to `approved`, then kicks
+    `executeAction` **without awaiting it** (`void executeAction(...)`) and returns a fast
+    ack. The detached execute owns its own try/catch and **always** writes a terminal
+    transition — a silently-stuck `executing` row is the one failure mode this design
+    forbids. The terminal-failure catch marks `failed` even if the DB write itself throws.
+  - **Execute reads deploy's raw response, does not assume its shape** (§1 lesson). Terminal
+    state = `succeeded` if `res.ok` else `failed`.
+- **5 marionette routes** (in `marionette/src/index.ts`, mounted between `/audit/summary` and
+  the action-lifecycle comment block): `POST /actions` (propose → 201), `GET /actions`
+  (optional `?status=`), `GET /actions/:id`, `POST /actions/:id/approve` (→ fires execute,
+  409 on non-proposed), `POST /actions/:id/deny` (→ terminal, 409 on non-proposed).
+- **Telegram Approve/Deny flow** (`apps/api/src/routes/telegram.ts` — significantly expanded
+  from the message-only version):
+  - The webhook now handles **both** `message` updates (text → `/think`, unchanged) **and**
+    `callback_query` updates (button taps). Button `callback_data` is `approve:<id>` /
+    `deny:<id>`, parsed defensively; same single-user allow-list gate as messages.
+  - On a tap it `answerCallbackQuery` first (clears the spinner) **before** hitting
+    marionette, then POSTs `/actions/:id/approve|deny` and reports the outcome in-chat
+    (incl. "already handled" on 409).
+  - **`POST /telegram/surface/:id`** — internal relay: reads the action from marionette (the
+    lifecycle owner), and if it's still `proposed`, pushes it to the allow-listed chat with
+    an inline Approve/Deny keyboard. Optional body `{chat_id}`; defaults to the allow-listed
+    user (whose chat id == user id in a DM).
+- **KNOWN GAP — `action.succeeded` = deploy ACCEPTED (202), not finished.** `executeAction`
+  fires `POST deploy:4000/deploy` and treats a 2xx *accept* as success — but deploy is
+  async (202, then builds/health-checks/rolls-back on its own timeline). So a `succeeded`
+  action row means "deploy accepted the job", NOT "deploy completed and is healthy." The
+  real-completion signal still lives only in deploy's own `deploy.succeeded` audit row. An
+  async-completion push (poll deploy to true finish → "✅/❌" to Telegram via a thin `api`
+  notify endpoint, since marionette can't message out — §9) is the open M4 task B.
+- **Also unwired:** the git-commit half of `commit_deploy` — execute currently just deploys
+  from current repo state; contractor doesn't commit first yet (`TODO(steering/commit)` in
+  `actions.ts`).
+- **Commits:** `3a66aef` (propose/approve/deny/execute lifecycle) + `b13c5ce` (Telegram
+  buttons + surface endpoint).
+
+**Marionette audit-sight — read endpoint done, `/think` integration NOT done:**
+- **`marionette/src/audit-read.ts`** — Mari's read-only "sight" over her own ledger. The
+  read side of `audit.ts`: no new state, no shadow table, only SELECTs from `audit_log`
+  (§2/§9: the one authoritative ledger). Same connection pattern as `audit.ts`.
+- **`auditSummary(windowMinutes=60, recentLimit=15)`** → `{window_minutes, total,
+  by_action[], recent[], failures[]}` in one call (four parallel queries: grouped counts by
+  action+outcome, recent rows, failure rows, total). **Genuine failure = `outcome = 'error'`
+  ONLY** — lifecycle outcomes `queued`/`running` are NOT failures (a prior `outcome <>
+  'success'` filter wrongly flagged in-progress rows; that bug is fixed). `bigint id`
+  coerced to a real number via `coerceRow` (postgres serializes it as a string).
+- **Route:** `GET /audit/summary?window=<min>` in `marionette/src/index.ts` (mounted between
+  `/health` and `/think`). Deployed live via audited `POST /deploy` (job `e44b02f7`,
+  confirmed by `deploy.succeeded` row), verified on the live `bentley-os-marionette-1`
+  container.
+- **NOT YET DONE — the actual payoff:** `/think` does not consume this. A Telegram message
+  like "what have you done today?" still hits `callDeepSeek` with no system-state context
+  and returns a canned "no data" reply (see live rows id=113/125). Wiring `/think` to use
+  audit-sight is the **next task** — the design fork (tool-call loop vs. pre-fetch
+  injection) is captured in §8.
+- **Commit:** `9f3f054` (`feat(marionette): audit-sight read endpoint`).
+
 **Whisper — self-hosted speech-to-text, done end-to-end:**
 - **Server:** `~/bentley-os/whisper/Dockerfile` builds `whisper.cpp` from source
   (`ggerganov/whisper.cpp`, `whisper-server` target) and bundles a `ggml-*.bin` model.
@@ -329,14 +407,14 @@ state).
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `c97ba37`.
-Recent commits: `c97ba37` (feat: Telegram webhook → marionette, Access-bypassed on
-`/telegram/webhook` path) → `369e256` (gcal + gmail ingestion wired into live api via
-node-cron) → `5c020cc` (gcal: populate organizer_id and event_attendees) → `5f28f3f` (fix:
-keystone end-to-end — undici timeout + OpenCode headless permissions) → `35887c2` (docs:
-whisper remote access setup, via GitHub web UI per the long-file workaround) → `26ecab1`
-(whisper: switch model from base to small.en for better accuracy) → `527d877` (whisper:
-revert model from small.en to base for speed).
+Local in sync with `origin/main` at `9f3f054`.
+Recent commits: `9f3f054` (feat(marionette): audit-sight read endpoint — `GET
+/audit/summary`) → `b13c5ce` (feat(m4): Telegram approve/deny buttons + surface endpoint) →
+`3a66aef` (feat(m4): approval-gated action layer — propose/approve/deny/execute lifecycle) →
+`5862496` (docs(bible): rollback-scope resolved; password 'drift' → stale shell-var
+override) → `52c3f72` (fix(deploy): abort rollback for unscoped service instead of repo-wide
+checkout) → `5480fa5` (docs: Telegram integration) → `c97ba37` (feat: Telegram webhook →
+marionette, Access-bypassed on `/telegram/webhook` path).
 
 **Deploy service** (`~/bentley-os/deploy/`): serialized queue, reads last-good commit from
 `audit_log` → build → `up -d` → poll real `/health` over `backend` → success or
@@ -443,9 +521,11 @@ real test event). Milestone 1 is complete; see §6.
 people ──< email_recipients >── emails
 people ──< event_attendees  >── calendar_events
 
-audit_log    (every deploy action, every AI action — reasoning + delegation — regardless
-              of which interface originated the request: direct API call or Telegram)
+audit_log    (append-only ledger: every deploy action, every AI action — reasoning +
+              delegation + action lifecycle — regardless of interface: API call or Telegram)
 sync_state   (source PK, sync_token, updated_at — incremental ingestion cursors)
+actions      (M4: mutable current-state store for proposed side-effecting ops awaiting
+              approval; audit_log stays the ledger, target = actions.id)
 ```
 
 ---
@@ -496,12 +576,19 @@ qdrant/embeddings decision can no longer be deferred. **Telegram is a natural de
 channel for the morning brief once this is built** — worth keeping in mind when designing
 it, though not yet scoped.
 
-**Milestone 4 — Action layer, approval-gated.** New action types (create event, draft reply,
-commit + deploy via contractor) behind one-click approval, all writes through `audit_log`.
-Contractor can already write sandbox code via delegation, but nothing auto-commits,
-isolation-tests, or deploys yet from a delegated task — that pipeline is this milestone's
-job. **Telegram could double as the approval channel** (approve/deny via reply) — worth
-considering when this milestone is scoped, not decided yet.
+**Milestone 4 — Action layer, approval-gated. 🔨 Gate slice done; two tasks remain.**
+- ✅ **Gate slice shipped** (`3a66aef` + `b13c5ce`): `actions` table + strict lifecycle
+  (`marionette/src/actions.ts`), 5 marionette routes, and **Telegram IS the approval
+  channel** — inline Approve/Deny buttons via `callback_query`, plus `POST
+  /telegram/surface/:id` to push a proposed action to chat. Fire-and-report execute with a
+  hard guarantee of a terminal transition. `kind='commit_deploy'` is the only action type so
+  far; all writes audit through `audit_log` (target = action id). See §4.
+- ⏳ **Task A — async-completion push:** `action.succeeded` currently fires on deploy's 202
+  *accept*, not real finish. Poll deploy's job to true completion, push "✅/❌" to Telegram
+  via a thin `api` notify endpoint (marionette can't message out — §9).
+- ⏳ **Task B — commit half of `commit_deploy`:** execute deploys from current repo state;
+  contractor doesn't git-commit first yet (`TODO(steering/commit)` in `actions.ts`).
+- Additional action types (create event, draft reply) are future work within this milestone.
 
 **Milestone 5 — Earned autonomy.** Auto-execute low-risk tier only. **Rollback-scope fix
 done (`52c3f72`) — no longer blocked.**
@@ -673,6 +760,27 @@ system.
 - **Telegram webhook has no rate limiting or replay protection beyond the secret-token
   header and user-ID allow-list.** Low risk at single-user scale with a Bypass-scoped path,
   but worth revisiting if this interface's trust boundary ever expands.
+- **`/think` doesn't use audit-sight yet — THE next task, and a design fork to decide.**
+  `GET /audit/summary` exists and works, but `/think` is still a single blind `callDeepSeek`
+  and returns canned "no data" to system-status questions. Two paths: **(A) tool-call loop**
+  — give DeepSeek a tool spec for `auditSummary`; on request, fetch + call DeepSeek again
+  with the data (more correct/general, 2 model calls, more moving parts); **(B) pre-fetch
+  injection** — detect system-status questions, fetch the summary, inject into the prompt
+  before a single DeepSeek call (cheaper, 1 call, blunter — only "sees" when we guessed she
+  should). Read `marionette/src/deepseek.ts` first to confirm clean tool-calling support
+  before committing to (A). Whichever: prove end-to-end that a real Telegram "what have you
+  done today?" returns a narrated answer, not the canned reply.
+- **M4 action `succeeded` = deploy 202 accept, not real completion.** (Task A above.) The
+  true finish signal lives only in deploy's own `deploy.succeeded` audit row. Needs an
+  async poll → Telegram "✅/❌" push via a thin `api` notify endpoint.
+- **M4 `commit_deploy` git-commit half unwired.** (Task B above.) Execute deploys current
+  repo state; contractor doesn't commit first (`TODO(steering/commit)` in `actions.ts`).
+- **Audit-sight Tier 2 (DB/ingestion influx detection) and Tier 3 (host CPU/mem/disk
+  metrics) not built.** Tier 2 reads `emails`/`calendar_events`/`sync_state` directly (note:
+  ingestion still doesn't write to `audit_log`, so counts come from tables). Tier 3 needs
+  host access, which lives in `api` not marionette (backend-only) — so a thin api-side read
+  endpoint marionette calls, or proper metrics infra (cAdvisor/node-exporter). Decide
+  cheap-path vs proper-infra when reached. Same read-tool pattern as Tier 1.
 
 ---
 
