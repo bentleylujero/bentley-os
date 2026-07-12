@@ -7,6 +7,7 @@ import { audit } from './audit.ts';
 import { SYSTEM_PROMPT } from './prompt.ts';
 import { createAction, listActions, getAction, approveAction, denyAction } from './actions.ts';
 import { auditSummary } from './audit-read.ts';
+import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts';
 
 // contractor's /execute can run long (real OpenCode build tasks, multi-step
 // tool use) — raise past undici's default 5-minute headers/body timeout so
@@ -47,10 +48,23 @@ app.post('/think', async (c) => {
   }
   let decision;
   try {
-    const result = await callDeepSeek([
-      { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: request },
-    ]);
+    // Mari's sight: if this reads as a system-activity question, fetch her own
+    // audit ledger and inject a compact summary as a second system turn. The
+    // prompt (prompt.ts) tells her to narrate from a SYSTEM ACTIVITY block when
+    // present. Keyword-gated so coding/other requests are not polluted with it.
+    const messages = [
+      { role: 'system' as const, content: SYSTEM_PROMPT },
+    ];
+    if (isSystemStatusQuestion(request)) {
+      try {
+        const summary = await auditSummary(60);
+        messages.push({ role: 'system' as const, content: formatAuditForPrompt(summary) });
+      } catch (sightErr) {
+        console.error('[think] audit-sight fetch failed:', sightErr);
+      }
+    }
+    messages.push({ role: 'user' as const, content: request });
+    const result = await callDeepSeek(messages);
     let parsed: unknown;
     try {
       parsed = JSON.parse(result.content);
