@@ -17,15 +17,27 @@ const SERVICE_HEALTH: Record<string, string | null> = {
   // add more as they gain HTTP health endpoints; unknown services are rejected.
 };
 
-// Repo-relative path each service's build context lives under. Rollback must be
-// scoped to ONLY this path -- a repo-wide `git checkout <sha> -- .` would also
-// revert unrelated files (other services, shared config) that happened to change
-// in the same commit range, which is not what "rollback service X" should do.
+// Repo-relative path each service's build context lives under. (Retained for
+// provenance/audit only — see below. Rollback no longer touches the working
+// tree at all; it swaps the preserved image instead.)
 const SERVICE_PATH: Record<string, string> = {
   api: 'apps/api',
   contractor: 'contractor',
   marionette: 'marionette',
 };
+
+// The docker image name each service builds to. Derived from
+// COMPOSE_PROJECT_NAME=bentley-os + the service name (confirmed via
+// `docker images`: bentley-os-api, bentley-os-contractor, bentley-os-marionette).
+// Rollback preservation tags <image>:latest -> <image>:rollback BEFORE building
+// over :latest, so a failed build can be reverted by swapping the tag back —
+// no rebuild, and critically NO `git checkout` of the working tree.
+const IMAGE: Record<string, string> = {
+  api: 'bentley-os-api',
+  contractor: 'bentley-os-contractor',
+  marionette: 'bentley-os-marionette',
+};
+const ROLLBACK_TAG = 'rollback';
 
 // --- types ----------------------------------------------------------------
 export type JobStatus = 'queued' | 'running' | 'success' | 'rolled_back' | 'failed';
@@ -37,8 +49,9 @@ export interface Job {
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;
-  fromCommit?: string; // rollback target captured before build
+  fromCommit?: string; // last known-good commit (provenance/audit only now)
   deployedCommit?: string; // the actual commit that was built/deployed this run
+  rollbackImage?: string; // the preserved <image>:rollback ref, if tagging succeeded
   log: string[];
 }
 
@@ -125,6 +138,8 @@ async function currentCommit(): Promise<string> {
 // The rollback target must be the last commit that was actually verified healthy for
 // THIS service — never "whatever HEAD is right now," since HEAD may already be the
 // broken commit we're deploying. Source of truth: audit_log, not git alone.
+// NOTE: as of the image-swap rollback change this is used for audit/provenance
+// only — the actual recovery mechanism is the preserved image, not this commit.
 async function lastGoodCommit(job: Job, service: string): Promise<string | null> {
   try {
     const res = await pool.query<{ payload: { commit?: string } }>(
@@ -180,6 +195,49 @@ async function buildAndUp(job: Job): Promise<boolean> {
   return true;
 }
 
+// Preserve the current :latest image as :rollback BEFORE we build over :latest.
+// Returns the :rollback ref on success, or null if there's no image to preserve
+// (e.g. first-ever deploy) — in which case this deploy has no image safety net,
+// logged with the same honesty as a missing rollback commit.
+async function preserveImage(job: Job): Promise<string | null> {
+  const image = IMAGE[job.service];
+  if (!image) {
+    line(job, `no IMAGE entry for '${job.service}' — cannot preserve a rollback image`);
+    return null;
+  }
+  const latest = `${image}:latest`;
+  const rollback = `${image}:${ROLLBACK_TAG}`;
+  const code = await run(job, 'docker', ['tag', latest, rollback]);
+  if (code !== 0) {
+    line(job, `could not tag ${latest} -> ${rollback} (exit ${code}) — no image rollback point for this deploy`);
+    return null;
+  }
+  line(job, `preserved rollback image ${rollback}`);
+  return rollback;
+}
+
+// Roll the RUNNING SERVICE back by swapping the preserved image tag back to
+// :latest and restarting — NO rebuild, and NO working-tree git checkout. This
+// is the key property: rollback recovers the artifact without ever touching the
+// repo, so a freshly-committed HEAD is never clobbered by a failed build.
+async function rollbackToImage(job: Job): Promise<boolean> {
+  const image = IMAGE[job.service];
+  const rollback = job.rollbackImage;
+  if (!image || !rollback) return false;
+  const latest = `${image}:latest`;
+  const tagCode = await run(job, 'docker', ['tag', rollback, latest]);
+  if (tagCode !== 0) {
+    line(job, `rollback tag ${rollback} -> ${latest} failed (exit ${tagCode})`);
+    return false;
+  }
+  const upCode = await run(job, 'docker', ['compose', 'up', '-d', '--no-build', job.service]);
+  if (upCode !== 0) {
+    line(job, `rollback up failed (exit ${upCode})`);
+    return false;
+  }
+  return true;
+}
+
 async function runJob(job: Job): Promise<void> {
   job.status = 'running';
   job.startedAt = new Date().toISOString();
@@ -187,9 +245,16 @@ async function runJob(job: Job): Promise<void> {
 
   job.fromCommit = (await lastGoodCommit(job, job.service)) ?? undefined;
   if (job.fromCommit) {
-    line(job, `rollback target (last known-good) = ${job.fromCommit}`);
+    line(job, `last known-good commit (provenance) = ${job.fromCommit}`);
   } else {
-    line(job, 'rollback target = none — this deploy has no safety net if it fails');
+    line(job, 'last known-good commit = none');
+  }
+
+  // Preserve the current image BEFORE building over :latest. This is the
+  // rollback safety net now — not a git checkout.
+  job.rollbackImage = (await preserveImage(job)) ?? undefined;
+  if (!job.rollbackImage) {
+    line(job, 'rollback image = none — this deploy has no safety net if it fails');
   }
 
   job.deployedCommit = (await currentCommit()) || undefined;
@@ -197,7 +262,7 @@ async function runJob(job: Job): Promise<void> {
   await audit('deploy.started', {
     target: job.service,
     outcome: 'running',
-    payload: { job_id: job.id, from_commit: job.fromCommit },
+    payload: { job_id: job.id, from_commit: job.fromCommit, rollback_image: job.rollbackImage ?? null },
   });
 
   const upOk = await buildAndUp(job);
@@ -215,48 +280,41 @@ async function runJob(job: Job): Promise<void> {
     return;
   }
 
-  line(job, 'deploy unhealthy — rolling back');
+  line(job, 'deploy unhealthy — rolling back (image swap)');
   await audit('deploy.rollback.started', {
     target: job.service,
     outcome: 'unhealthy',
-    payload: { job_id: job.id, from_commit: job.fromCommit },
+    payload: { job_id: job.id, from_commit: job.fromCommit, rollback_image: job.rollbackImage ?? null },
   });
 
-  if (!job.fromCommit) {
+  if (!job.rollbackImage) {
     job.status = 'failed';
     job.finishedAt = new Date().toISOString();
-    line(job, 'no rollback commit captured — cannot auto-recover, MANUAL INTERVENTION NEEDED');
+    line(job, 'no rollback image preserved — cannot auto-recover, MANUAL INTERVENTION NEEDED');
     await audit('deploy.rollback.failed', {
       target: job.service,
-      outcome: 'no_rollback_point',
+      outcome: 'no_rollback_image',
       payload: { job_id: job.id },
     });
     return;
   }
 
-  const scopePath = SERVICE_PATH[job.service];
-  if (!scopePath) {
-    job.status = 'failed';
-    job.finishedAt = new Date().toISOString();
-    line(job, `no SERVICE_PATH entry for '${job.service}' — refusing repo-wide rollback, MANUAL INTERVENTION NEEDED`);
-    await audit('deploy.rollback.failed', {
-      target: job.service,
-      outcome: 'no_scope_path',
-      payload: { job_id: job.id, from_commit: job.fromCommit },
-    });
-    return;
-  }
-  await run(job, 'git', ['checkout', job.fromCommit, '--', scopePath]);
-  const recovered = (await buildAndUp(job)) && (await pollHealth(job, healthUrl));
+  const recovered = await rollbackToImage(job) && (await pollHealth(job, healthUrl));
 
   job.finishedAt = new Date().toISOString();
   if (recovered) {
     job.status = 'rolled_back';
-    line(job, 'rolled back to last-good commit — service healthy again');
+    line(job, 'rolled back to preserved image — service healthy again (working tree untouched)');
     await audit('deploy.rolled_back', {
       target: job.service,
       outcome: 'recovered',
-      payload: { job_id: job.id, commit: job.fromCommit },
+      payload: {
+        job_id: job.id,
+        commit: job.fromCommit,
+        rollback_image: job.rollbackImage,
+        deployed_commit: job.deployedCommit,
+        note: 'image-swap rollback; working tree/HEAD left at deployed commit',
+      },
     });
   } else {
     job.status = 'failed';
@@ -264,7 +322,7 @@ async function runJob(job: Job): Promise<void> {
     await audit('deploy.rollback.failed', {
       target: job.service,
       outcome: 'still_unhealthy',
-      payload: { job_id: job.id, commit: job.fromCommit },
+      payload: { job_id: job.id, rollback_image: job.rollbackImage },
     });
   }
 }
