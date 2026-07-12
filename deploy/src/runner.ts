@@ -234,9 +234,17 @@ async function runJob(job: Job): Promise<void> {
     return;
   }
 
-  const scopePath = SERVICE_PATH[job.service] ?? '.';
-  if (scopePath === '.') {
-    line(job, `WARNING: no SERVICE_PATH entry for '${job.service}' -- rollback will be repo-wide`);
+  const scopePath = SERVICE_PATH[job.service];
+  if (!scopePath) {
+    job.status = 'failed';
+    job.finishedAt = new Date().toISOString();
+    line(job, `no SERVICE_PATH entry for '${job.service}' — refusing repo-wide rollback, MANUAL INTERVENTION NEEDED`);
+    await audit('deploy.rollback.failed', {
+      target: job.service,
+      outcome: 'no_scope_path',
+      payload: { job_id: job.id, from_commit: job.fromCommit },
+    });
+    return;
   }
   await run(job, 'git', ['checkout', job.fromCommit, '--', scopePath]);
   const recovered = (await buildAndUp(job)) && (await pollHealth(job, healthUrl));
