@@ -1,1041 +1,2666 @@
-# Bentley OS — The Bible
+Welcome to Ubuntu 26.04 LTS (GNU/Linux 7.0.0-27-generic x86_64)
 
-*The single source of truth. Rules, architecture, project map, current state — all here.
-When this conflicts with anything older, this wins. Regenerate from the repo whenever it
-drifts; don't hand-edit it into staleness.*
+ * Documentation:  https://docs.ubuntu.com
+ * Management:     https://landscape.canonical.com
+ * Support:        https://ubuntu.com/pro
 
-*Last verified: 2026-07-12 (HEAD `b905e4b`. Milestone 2 is now COMPLETE — the "what changed"
-dashboard slice shipped: `apps/api/src/routes/dashboard.ts` now renders a "What changed"
-section (emails/events ingested since the owner last looked, keyed on `created_at`) above the
-existing "Today" + "Recent email" sections, backed by singleton table `dashboard_state`
-(migration `0004`). Live, isolation-tested, deployed via audited `POST /deploy` job
-`63e689a8`, confirmed by `deploy.succeeded`, verified live in-browser. Milestone 4 Task A also
-DONE: async deploy-completion — deploy job polled to true finish, ✅/❌ pushed to Telegram
-(`80298a4`/`8ac171c`). Prior standing state also live: M4 gate slice (`actions` table +
-lifecycle + 5 marionette routes + Telegram Approve/Deny buttons); marionette audit-sight
-(`GET /audit/summary` + `/think` consuming it — Mari narrates real system state from her own
-ledger). `whisper/Dockerfile.bak` now gitignored (`7cb895d`). All confirmed via audited
-`POST /deploy`, verified end-to-end.)*
+ System information as of Sun Jul 12 07:25:47 PM UTC 2026
 
+  System load:  0.11               Temperature:             216.0 C
+  Usage of /:   9.3% of 217.97GB   Processes:               329
+  Memory usage: 18%                Users logged in:         0
+  Swap usage:   0%                 IPv4 address for enp4s0: 172.16.30.4
+
+ * Strictly confined Kubernetes makes edge and IoT secure. Learn how MicroK8s
+   just raised the bar for easy, resilient and secure K8s cluster deployment.
+
+   https://ubuntu.com/engage/secure-kubernetes-at-the-edge
+
+Expanded Security Maintenance for Applications is not enabled.
+
+21 updates can be applied immediately.
+To see these additional updates run: apt list --upgradable
+
+1 additional security update can be applied with ESM Apps.
+Learn more about enabling ESM Apps service at https://ubuntu.com/esm
+
+
+Last login: Sun Jul 12 18:41:02 2026 from 172.19.0.6
+spaghettios@spaghettios:~$ cd ~/bentley-os && git status && git log --oneline -3
+On branch slice1-image-rollback
+Your branch is up to date with 'origin/slice1-image-rollback'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+        modified:   apps/api/src/routes/dashboard.ts
+
+no changes added to commit (use "git add" and/or "git commit -a")
+0cf613e (HEAD -> slice1-image-rollback, origin/slice1-image-rollback) Refactor rollback process to use image preservation
+7cb895d (origin/main, origin/HEAD, main) chore: gitignore whisper/Dockerfile.bak
+403c84b Update THE_BIBLE.md with commit details and notes
+spaghettios@spaghettios:~/bentley-os$ git diff apps/api/src/routes/dashboard.ts
+diff --git a/apps/api/src/routes/dashboard.ts b/apps/api/src/routes/dashboard.ts
+index fe56e5d..285ad0d 100644
+--- a/apps/api/src/routes/dashboard.ts
++++ b/apps/api/src/routes/dashboard.ts
+@@ -23,85 +23,188 @@ function fmtTime(d: Date | null): string {
+   });
+ }
+ 
++function fmtDate(d: Date | null): string {
++  if (!d) return '';
++  const now = new Date();
++  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
++  const val = new Date(d.getFullYear(), d.getMonth(), d.getDate());
++  const diffDays = Math.floor((today.getTime() - val.getTime()) / 86400000);
++  if (diffDays === 0) {
++    return d.toLocaleTimeString('en-US', {
++      hour: 'numeric',
++      minute: '2-digit',
++      timeZone: TZ,
++    });
++  } else if (diffDays === 1) {
++    return 'Yesterday';
++  } else {
++    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: TZ });
++  }
++}
++
++function isNew(receivedAt: Date | null, lastSeen: string | null): boolean {
++  if (!receivedAt) return false;
++  if (lastSeen) {
++    const seen = new Date(lastSeen);
++    return new Date(receivedAt).getTime() > seen.getTime();
++  }
++  return Date.now() - new Date(receivedAt).getTime() < 3600000;
++}
++
+ dashboardRoute.get('/', async (c) => {
+   let events: any[] = [];
+   let emails: any[] = [];
++  let recentEmails: any[] = [];
++  let recentEvents: any[] = [];
+   let dbError = '';
+ 
+   try {
+     const eventsQ = pool.query(
+-      `SELECT title, starts_at, ends_at, location, status
++      SELECT title, starts_at, ends_at, location, status
+          FROM calendar_events
+         WHERE starts_at AT TIME ZONE $1 >= (now() AT TIME ZONE $1)::date
+           AND starts_at AT TIME ZONE $1 <  ((now() AT TIME ZONE $1)::date + interval '1 day')
+-        ORDER BY starts_at ASC`,
++        ORDER BY starts_at ASC,
+       [TZ]
+     );
++
+     const emailsQ = pool.query(
+-      `SELECT subject, snippet, received_at, is_unread
++      SELECT subject, snippet, received_at, is_unread
+          FROM emails
+         ORDER BY received_at DESC NULLS LAST
+-        LIMIT 15`
++        LIMIT 15
++    );
++
++    const recentEmailsQ = pool.query(
++      SELECT subject, snippet, received_at, is_unread
++         FROM emails
++        WHERE created_at > now() - interval '24 hours'
++        ORDER BY created_at DESC
++        LIMIT 10
++    );
++
++    const recentEventsQ = pool.query(
++      SELECT title, starts_at, location
++         FROM calendar_events
++        WHERE created_at > now() - interval '24 hours'
++        ORDER BY created_at DESC
++        LIMIT 10
+     );
+-    const [eventsR, emailsR] = await Promise.all([eventsQ, emailsQ]);
++
++    const [eventsR, emailsR, recentEmailsR, recentEventsR] = await Promise.all([
++      eventsQ, emailsQ, recentEmailsQ, recentEventsQ,
++    ]);
+     events = eventsR.rows;
+     emails = emailsR.rows;
++    recentEmails = recentEmailsR.rows;
++    recentEvents = recentEventsR.rows;
+   } catch (err: any) {
+     dbError = err?.message ?? 'query failed';
+spaghettios@spaghettios:~/bentley-os$ git checkout -- apps/api/src/routes/dashboard.ts
+spaghettios@spaghettios:~/bentley-os$ git status
+On branch slice1-image-rollback
+Your branch is up to date with 'origin/slice1-image-rollback'.
+
+nothing to commit, working tree clean
+spaghettios@spaghettios:~/bentley-os$ git log --oneline --graph --all -15
+* 0cf613e (HEAD -> slice1-image-rollback, origin/slice1-image-rollback) Refactor rollback process to use image preservation
+* 7cb895d (origin/main, origin/HEAD, main) chore: gitignore whisper/Dockerfile.bak
+* 403c84b Update THE_BIBLE.md with commit details and notes
+* ef41370 Update THE_BIBLE.md to remove obsolete information
+* 8ac171c Enhance deploy action completion and Telegram notifications
+* 80298a4 feat(m4): async deploy-completion — poll audit_log to true finish, push ✅/❌ to Telegram
+* 14c063a Revise THE_BIBLE.md for project updates and milestones
+* 7d79632 feat(m2): server-rendered Today dashboard — today's events + recent email from Postgres
+* fa39f5c Integrate audit-sight into marionette for real-time updates
+* 27f18b3 feat(marionette): /think consumes audit-sight — narrates real system state
+* 125de94 Revise documentation for Milestone 4 and Telegram integration
+* 9f3f054 feat(marionette): audit-sight read endpoint (GET /audit/summary)
+* b13c5ce feat(m4): Telegram approve/deny buttons + surface endpoint
+* 3a66aef feat(m4): approval-gated action layer — propose/approve/deny/execute lifecycle
+* 5862496 docs(bible): rollback-scope resolved (52c3f72); correct password 'drift' -> stale shell-var override; note b08a re-exposure
+spaghettios@spaghettios:~/bentley-os$ git show --stat 0cf613e
+commit 0cf613e9aaa32405e87e4794ac0300fd27d0cdc7 (HEAD -> slice1-image-rollback, origin/slice1-image-rollback)
+Author: Bentley Lujero <bentley.lujero@gmail.com>
+Date:   Sun Jul 12 10:47:42 2026 -0500
+
+    Refactor rollback process to use image preservation
+    
+    Refactor rollback mechanism to use preserved images instead of git checkout. Update logging and audit payloads to include rollback image details.
+
+ deploy/src/runner.ts | 118 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++------------------------------
+ 1 file changed, 88 insertions(+), 30 deletions(-)
+spaghettios@spaghettios:~/bentley-os$ git checkout main
+Switched to branch 'main'
+Your branch is up to date with 'origin/main'.
+spaghettios@spaghettios:~/bentley-os$ git fetch origin && git status && git log --oneline -3
+On branch main
+Your branch is up to date with 'origin/main'.
+
+nothing to commit, working tree clean
+7cb895d (HEAD -> main, origin/main, origin/HEAD) chore: gitignore whisper/Dockerfile.bak
+403c84b Update THE_BIBLE.md with commit details and notes
+ef41370 Update THE_BIBLE.md to remove obsolete information
+spaghettios@spaghettios:~/bentley-os$ ls supabase/migrations/ && echo "---" && cat supabase/migrations/0003_actions.sql
+0001_secretary_ontology.sql  0002_sync_state.sql  0003_actions.sql
 ---
+-- 0003_actions.sql
+-- First-class action objects: proposed side-effecting operations awaiting human approval.
+-- Mutable current-state store. audit_log remains the append-only ledger (target = actions.id).
 
-## 0. North Star (the destination, not the current state)
+create table if not exists actions (
+  id            bigint generated always as identity primary key,
+  kind          text not null,                    -- 'commit_deploy' (first + only slice for now)
+  status        text not null default 'proposed', -- proposed|approved|executing|succeeded|failed|denied
+  proposed_by   text not null,                    -- 'marionette'
+  intent        jsonb not null default '{}',      -- machine-executable: {service, commit_message, ...}
+  briefing      text,                             -- marionette's human-facing synthesis (dormant until steering lands)
+  result        jsonb not null default '{}',      -- filled on execution outcome
+  supersedes_id bigint,                           -- lineage pointer (dormant until steering lands)
+  created_at    timestamptz not null default now(),
+  updated_at    timestamptz not null default now()
+);
 
-**One-sentence vision:** a personal, self-hosted data hub with an AI layer on top that
-unifies my digital life (starting with Gmail + Calendar), derives insight from it, and —
-increasingly on its own — classifies, briefs, and acts on my behalf, all commanded from a
-single web dashboard (`bentleyos.me`) **and now also from Telegram**.
+create index if not exists idx_actions_status on actions (status);
+create index if not exists idx_actions_created on actions (created_at desc);
+spaghettios@spaghettios:~/bentley-os$ cat > supabase/migrations/0004_dashboard_state.sql << 'EOF'
+-- 0004_dashboard_state.sql
+-- Singleton state for the dashboard's "what changed" view.
+-- Holds one fact: the last time the owner viewed the dashboard.
+-- Enforced single-row (id pinned to 1) — not a shadow table, one fact stored once.
+create table if not exists dashboard_state (
+  id           smallint primary key default 1 check (id = 1),
+  last_seen_at timestamptz not null default now()
+);
 
-**Three principles that don't bend:**
-1. **Host locally by default.** Everything runs on my box except the AI models themselves
-   (API-only, no local inference — for now). **Exception, deliberately made:** whisper
-   speech-to-text runs locally on the box (`whisper.cpp`), not via an API — a self-hosted
-   model was the right call here since it's a small, well-understood model with no need for
-   frontier quality, and local hosting avoids sending voice audio to a third party.
-2. **One source of truth.** Every fact lives once, attached to the right object, related
-   through typed links. No shadow tables, no duplicated state.
-3. **Autonomy is earned, not assumed.** The path is guardrail-first: suggest → approve →
-   auto, loosened deliberately, never by accident. **Exception, deliberately made:** inside
-   the sandbox zone (contractor/OpenCode), autonomy over the filesystem and build actions is
-   full by design — Bentley doesn't use OpenCode interactively, so there's no
-   human-in-the-loop value to preserve there. Guardrail-first applies to the *production*
-   zone and to anything touching the outside world (see §9). **Adding a new *interface* to
-   existing sandbox capability (e.g. Telegram) is not a loosening of autonomy** — it's a new
-   client of `marionette`'s already-scoped `/think` → `delegate` → contractor path, gated by
-   its own allow-list. It does not grant any new capability marionette didn't already have.
+-- Seed the singleton row. on conflict keeps re-running the migration safe.
+insert into dashboard_state (id, last_seen_at)
+values (1, now())
+on conflict (id) do nothing;
+EOF
+spaghettios@spaghettios:~/bentley-os$ cat supabase/migrations/0004_dashboard_state.sql
+-- 0004_dashboard_state.sql
+-- Singleton state for the dashboard's "what changed" view.
+-- Holds one fact: the last time the owner viewed the dashboard.
+-- Enforced single-row (id pinned to 1) — not a shadow table, one fact stored once.
+create table if not exists dashboard_state (
+  id           smallint primary key default 1 check (id = 1),
+  last_seen_at timestamptz not null default now()
+);
 
-**North-star sequencing:** data in (Gmail + Calendar) → insight out (real dashboard) → AI
-layer (classify, brief, grounded Q&A) → action layer (approval-gated) → earned autonomy
-(low-risk auto) → self-extension (system ships its own tools). **Command interfaces
-(Telegram, eventually the web dashboard) are orthogonal to this sequencing** — they're just
-new front doors to whatever marionette can already do at any given milestone.
+-- Seed the singleton row. on conflict keeps re-running the migration safe.
+insert into dashboard_state (id, last_seen_at)
+values (1, now())
+on conflict (id) do nothing;
+spaghettios@spaghettios:~/bentley-os$ docker exec -i bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off < supabase/migrations/0004_dashboard_state.sql
+CREATE TABLE
+INSERT 0 1
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c "SELECT * FROM dashboard_state;"
+ id |         last_seen_at          
+----+-------------------------------
+  1 | 2026-07-12 19:34:10.699341+00
+(1 row)
 
+spaghettios@spaghettios:~/bentley-os$ cat apps/api/src/routes/dashboard.ts
+import { Hono } from 'hono';
+import { pool } from '../db/pool.js';
+
+export const dashboardRoute = new Hono();
+
+const TZ = 'America/Chicago';
+
+function esc(s: unknown): string {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function fmtTime(d: Date | null): string {
+  if (!d) return '';
+  return d.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: TZ,
+  });
+}
+
+dashboardRoute.get('/', async (c) => {
+  let events: any[] = [];
+  let emails: any[] = [];
+  let dbError = '';
+
+  try {
+    const eventsQ = pool.query(
+      `SELECT title, starts_at, ends_at, location, status
+         FROM calendar_events
+        WHERE starts_at AT TIME ZONE $1 >= (now() AT TIME ZONE $1)::date
+          AND starts_at AT TIME ZONE $1 <  ((now() AT TIME ZONE $1)::date + interval '1 day')
+        ORDER BY starts_at ASC`,
+      [TZ]
+    );
+    const emailsQ = pool.query(
+      `SELECT subject, snippet, received_at, is_unread
+         FROM emails
+        ORDER BY received_at DESC NULLS LAST
+        LIMIT 15`
+    );
+    const [eventsR, emailsR] = await Promise.all([eventsQ, emailsQ]);
+    events = eventsR.rows;
+    emails = emailsR.rows;
+  } catch (err: any) {
+    dbError = err?.message ?? 'query failed';
+  }
+
+  const eventsHtml = dbError
+    ? `<p class="muted">couldn't load events: ${esc(dbError)}</p>`
+    : events.length === 0
+    ? `<p class="muted">Nothing on the calendar today.</p>`
+    : events
+        .map(
+          (e) => `<div class="row">
+        <span class="time">${esc(fmtTime(e.starts_at))}</span>
+        <span class="body"><b>${esc(e.title) || '(untitled)'}</b>${
+            e.location ? `<span class="sub"> · ${esc(e.location)}</span>` : ''
+          }</span>
+      </div>`
+        )
+        .join('');
+
+  const emailsHtml = dbError
+    ? ''
+    : emails.length === 0
+    ? `<p class="muted">No emails yet.</p>`
+    : emails
+        .map(
+          (m) => `<div class="row">
+        <span class="time">${esc(fmtTime(m.received_at))}</span>
+        <span class="body">${m.is_unread ? '<span class="unread">●</span> ' : ''}<b>${
+            esc(m.subject) || '(no subject)'
+          }</b>${m.snippet ? `<span class="sub"> — ${esc(m.snippet)}</span>` : ''}</span>
+      </div>`
+        )
+        .join('');
+
+  return c.html(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bentley OS</title>
+<style>
+  body{background:#0b0e14;color:#e6e6e6;font-family:ui-monospace,Menlo,monospace;margin:0;padding:2rem;}
+  .wrap{max-width:680px;margin:0 auto;}
+  h1{font-size:1.4rem;letter-spacing:.02em;}
+  h2{font-size:.95rem;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin:1.5rem 0 .5rem;}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#3fb950;margin-right:8px;}
+  .card{background:#151a23;border:1px solid #222b38;border-radius:10px;padding:1rem 1.25rem;margin:.5rem 0;}
+  .row{display:flex;gap:.9rem;padding:.45rem 0;border-bottom:1px solid #1c2431;}
+  .row:last-child{border-bottom:none;}
+  .time{color:#8b949e;font-size:.85rem;min-width:64px;white-space:nowrap;}
+  .body{flex:1;overflow:hidden;}
+  .sub{color:#8b949e;font-weight:normal;}
+  .unread{color:#58a6ff;}
+  a{color:#58a6ff;text-decoration:none;} a:hover{text-decoration:underline;}
+  .muted{color:#8b949e;font-size:.85rem;}
+</style></head>
+<body><div class="wrap">
+  <h1><span class="dot"></span>Bentley OS</h1>
+
+  <h2>Today</h2>
+  <div class="card">${eventsHtml}</div>
+
+  <h2>Recent email</h2>
+  <div class="card">${emailsHtml}</div>
+
+  <p class="muted"><a href="/health">/health</a> · <span id="time"></span></p>
+</div>
+<script>document.getElementById('time').textContent = new Date().toLocaleString();</script>
+</body></html>`);
+});
+spaghettios@spaghettios:~/bentley-os$ git pull origin main
+remote: Enumerating objects: 13, done.
+remote: Counting objects: 100% (13/13), done.
+remote: Compressing objects: 100% (6/6), done.
+remote: Total 7 (delta 5), reused 0 (delta 0), pack-reused 0 (from 0)
+Unpacking objects: 100% (7/7), 2.58 KiB | 1.29 MiB/s, done.
+From github.com:bentleylujero/bentley-os
+ * branch            main       -> FETCH_HEAD
+   7cb895d..5955d8d  main       -> origin/main
+Updating 7cb895d..5955d8d
+Fast-forward
+ apps/api/src/routes/dashboard.ts | 109 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 104 insertions(+), 5 deletions(-)
+spaghettios@spaghettios:~/bentley-os$ grep -n "dashboard_state\|newEmailsQ\|What changed\|last_seen_at" apps/api/src/routes/dashboard.ts
+50:      `SELECT last_seen_at FROM dashboard_state WHERE id = 1`
+52:    lastSeen = seenR.rows[0]?.last_seen_at ?? null;
+72:    // "What changed" = rows ingested (created_at) since the owner last looked.
+74:    const newEmailsQ = lastSeen
+98:      newEmailsQ,
+113:    .query(`UPDATE dashboard_state SET last_seen_at = now() WHERE id = 1`)
+178:      ? `What changed <span class="count">${changedCount}</span>`
+179:      : `What changed`;
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git status && git rev-parse HEAD
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+        supabase/migrations/0004_dashboard_state.sql
+
+nothing added to commit but untracked files present (use "git add" to track)
+5955d8d8f3c90d7b9ab8ffb35872c492e315879f
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && docker build -t api-isotest -f apps/api/Dockerfile .
+[+] Building 2.6s (7/10)                                                                                                                                                  docker:default
+ => [internal] load build definition from Dockerfile                                                                                                                                0.0s
+ => => transferring dockerfile: 300B                                                                                                                                                0.0s
+ => [internal] load metadata for docker.io/library/node:22-alpine                                                                                                                   0.0s
+ => [internal] load .dockerignore                                                                                                                                                   0.0s
+ => => transferring context: 2B                                                                                                                                                     0.0s
+ => [1/6] FROM docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2                                                             0.0s
+ => => resolve docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2                                                             0.0s
+ => [internal] load build context                                                                                                                                                   2.4s
+ => => transferring context: 349.22MB                                                                                                                                               2.3s
+ => CACHED [2/6] WORKDIR /usr/src/app                                                                                                                                               0.0s
+ => ERROR [3/6] COPY package.json ./                                                                                                                                                0.0s
+------
+ > [3/6] COPY package.json ./:
+------
+Dockerfile:4
+--------------------
+   2 |     WORKDIR /usr/src/app
+   3 |     
+   4 | >>> COPY package.json ./
+   5 |     RUN npm install
+   6 |     
+--------------------
+ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref kfoe8a2ed40wx15i83lxonog4::excg7lqdacutza2k20slk9g8e: "/package.json": not found
+spaghettios@spaghettios:~/bentley-os$ cat /home/spaghettios/bentley-os/apps/api/Dockerfile
+FROM node:22-alpine AS base
+WORKDIR /usr/src/app
+
+COPY package.json ./
+RUN npm install
+
+COPY . .
+
+RUN npm run build
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
+  CMD wget -qO- http://localhost:3000/health || exit 1
+
+CMD ["npm", "start"]
+spaghettios@spaghettios:~/bentley-os$ ls /home/spaghettios/bentley-os/apps/api/package.json /home/spaghettios/bentley-os/package.json 2>&1
+ls: cannot access '/home/spaghettios/bentley-os/package.json': No such file or directory
+/home/spaghettios/bentley-os/apps/api/package.json
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && docker build -t api-isotest apps/api
+[+] Building 8.3s (11/11) FINISHED                                                                                                                                        docker:default
+ => [internal] load build definition from Dockerfile                                                                                                                                0.0s
+ => => transferring dockerfile: 300B                                                                                                                                                0.0s
+ => [internal] load metadata for docker.io/library/node:22-alpine                                                                                                                   0.0s
+ => [internal] load .dockerignore                                                                                                                                                   0.0s
+ => => transferring context: 69B                                                                                                                                                    0.0s
+ => [1/6] FROM docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2                                                             0.0s
+ => => resolve docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2                                                             0.0s
+ => [internal] load build context                                                                                                                                                   0.0s
+ => => transferring context: 17.20kB                                                                                                                                                0.0s
+ => CACHED [2/6] WORKDIR /usr/src/app                                                                                                                                               0.0s
+ => CACHED [3/6] COPY package.json ./                                                                                                                                               0.0s
+ => CACHED [4/6] RUN npm install                                                                                                                                                    0.0s
+ => [5/6] COPY . .                                                                                                                                                                  0.1s
+ => [6/6] RUN npm run build                                                                                                                                                         7.5s
+ => exporting to image                                                                                                                                                              0.4s 
+ => => exporting layers                                                                                                                                                             0.2s 
+ => => exporting manifest sha256:29111bf3aebc5a6e2755fbf2eaff00bb87398113cd8c1464d1653fbd9a96c381                                                                                   0.0s
+ => => exporting config sha256:588d7c9881f4bea4d48d6aaafeb3cd83b5abdaeb3fbb5f7d97732c7b8e5adf74                                                                                     0.0s
+ => => exporting attestation manifest sha256:f1f3d1358100b22076b10bc6b357c8042fb49fb0f31f8a961fbc4c7a28376368                                                                       0.0s
+ => => exporting manifest list sha256:7976482371b6d035e557b7e08fb5797578d6707b2baae5c5a947a0da44ab03d2                                                                              0.0s
+ => => naming to docker.io/library/api-isotest:latest                                                                                                                               0.0s
+ => => unpacking to docker.io/library/api-isotest:latest                                                                                                                            0.1s
+spaghettios@spaghettios:~/bentley-os$ spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && docker build -t api-isotest apps/api
+[+] Building 8.3s (11/11) FINISHED                                                                                                                                        docker:default
+ => [internal] load build definition from Dockerfile                                                                                                                                0.0s
+ => => transferring dockerfile: 300B                                                                                                                                                0.0s
+ => [internal] load metadata for docker.io/library/node:22-alpine                                                                                                                   0.0s
+ => [internal] load .dockerignore                                                                                                                                                   0.0s
+ => => transferring context: 69B                                                                                                                                                    0.0s
+ => [1/6] FROM docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2                                                             0.0s
+ => => resolve docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2                                                             0.0s
+ => [internal] load build context                                                                                                                                                   0.0s
+ => => transferring context: 17.20kB                                                                                                                                                0.0s
+ => CACHED [2/6] WORKDIR /usr/src/app                                                                                                                                               0.0s
+ => CACHED [3/6] COPY package.json ./                                                                                                                                               0.0s
+ => CACHED [4/6] RUN npm install                                                                                                                                                    0.0s
+ => [5/6] COPY . .                                                                                                                                                                  0.1s
+ => [6/6] RUN npm run build                                                                                                                                                         7.5s
+ => exporting to image                                                                                                                                                              0.4s  
+ => => exporting layers                                                                                                                                                             0.2s  
+ => => exporting manifest sha256:29111bf3aebc5a6e2755fbf2eaff00bb87398113cd8c1464d1653fbd9a96c381                                                                                   0.0s
+ => => exporting config sha256:588d7c9881f4bea4d48d6aaafeb3cd83b5abdaeb3fbb5f7d97732c7b8e5adf74                                                                                     0.0s
+ => => exporting attestation manifest sha256:f1f3d1358100b22076b10bc6b357c8042fb49fb0f31f8a961fbc4c7a28376368                                                                       0.0s
+ => => exporting manifest list sha256:7976482371b6d035e557b7e08fb5797578d6707b2baae5c5a947a0da44ab03d2                                                                              0.0s
+ => => naming to docker.io/library/api-isotest:latest                                                                                                                               0.0s
+ => => unpacking to docker.io/library/api-isotest:latest                                                                                                                            0.1s
+spaghettios@spaghettios:~/bentley-os$ 
+-bash: spaghettios@spaghettios:~/bentley-os$: No such file or directory
+-bash: syntax error near unexpected token `('
+=: command not found
+=: command not found
+=: command not found
+=: command not found
+=: command not found
+-bash: [1/6]: No such file or directory
+=: command not found
+=: command not found
+=: command not found
+=: command not found
+=: command not found
+=: command not found
+-bash: [5/6]: No such file or directory
+-bash: [6/6]: No such file or directory
+=: command not found
+=: command not found
+=: command not found
+=: command not found
+=: command not found
+=: command not found
+=: command not found
+=: command not found
+-bash: spaghettios@spaghettios:~/bentley-os$: No such file or directory
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && docker run -d --rm --name api-isotest-run --network bentley-os_backend --env-file .env api-isotest
+7ba0f3391b1530545e8d33bf75ad8c7492f7c2c7078f1f7fe07e3c16f1c89958
+spaghettios@spaghettios:~/bentley-os$ sleep 3 && docker exec api-isotest-run node -e "fetch('http://localhost:3000/health').then(r=>r.text()).then(t=>console.log('HEALTH:',t)).catch(e=>console.log('ERR:',e.message))"
+HEALTH: {"status":"ok","db":"connected","service":"bentley-os-api"}
+spaghettios@spaghettios:~/bentley-os$ docker exec api-isotest-run node -e "fetch('http://localhost:3000/').then(r=>r.text()).then(t=>console.log(t.slice(0,2500))).catch(e=>console.log('ERR:',e.message))"
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bentley OS</title>
+<style>
+  body{background:#0b0e14;color:#e6e6e6;font-family:ui-monospace,Menlo,monospace;margin:0;padding:2rem;}
+  .wrap{max-width:680px;margin:0 auto;}
+  h1{font-size:1.4rem;letter-spacing:.02em;}
+  h2{font-size:.95rem;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin:1.5rem 0 .5rem;}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#3fb950;margin-right:8px;}
+  .card{background:#151a23;border:1px solid #222b38;border-radius:10px;padding:1rem 1.25rem;margin:.5rem 0;}
+  .row{display:flex;gap:.9rem;padding:.45rem 0;border-bottom:1px solid #1c2431;}
+  .row:last-child{border-bottom:none;}
+  .time{color:#8b949e;font-size:.85rem;min-width:88px;white-space:nowrap;}
+  .body{flex:1;overflow:hidden;}
+  .sub{color:#8b949e;font-weight:normal;}
+  .unread{color:#58a6ff;}
+  .tag{display:inline-block;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;border:1px solid #2a3441;border-radius:4px;padding:0 5px;margin-right:4px;}
+  .count{display:inline-block;background:#238636;color:#fff;font-size:.7rem;border-radius:9px;padding:0 7px;margin-left:6px;vertical-align:middle;}
+  a{color:#58a6ff;text-decoration:none;} a:hover{text-decoration:underline;}
+  .muted{color:#8b949e;font-size:.85rem;}
+</style></head>
+<body><div class="wrap">
+  <h1><span class="dot"></span>Bentley OS</h1>
+  <h2>What changed <span class="count">1</span></h2>
+  <div class="card"><div class="row">
+        <span class="time">Jul 12, 2:40 PM</span>
+        <span class="body"><span class="tag">email</span> <span class="unread">●</span> <b>Phi Cu paid your $60.00 request</b><span class="sub"> — Bentley Lujero paid you $60.00 Phi Cu paid you $ 60 . 00 Coffee See transaction Money credited to your Venmo account. Transaction details Date Jul 12, 2026 Transaction ID 4639882118796926157 Sent to @</span></span>
+      </div></div>
+  <h2>Today</h2>
+  <div class="card"><div class="row">
+        <span class="time">9:30 AM</span>
+        <span class="body"><b>Exercise</b></span>
+      </div><div class="row">
+        <span class="time">1:00 PM</span>
+        <span class="body"><b>stroke practice - ignore this</b></span>
+      </div></div>
+  <h2>Recent email</h2>
+  <div class="card"><div class="row">
+        <span class="time">2:37 PM</span>
+        <span class="body"><span class="unread">●</span> <
+spaghettios@spaghettios:~/bentley-os$ docker rm -f api-isotest-run
+api-isotest-run
+spaghettios@spaghettios:~/bentley-os$ spaghettios@spaghettios:~/bentley-os$ docker rm -f api-isotest-run
+api-isotest-run
+spaghettios@spaghettios:~/bentley-os$ 
+-bash: spaghettios@spaghettios:~/bentley-os$: No such file or directory
+api-isotest-run: command not found
+-bash: spaghettios@spaghettios:~/bentley-os$: No such file or directory
+spaghettios@spaghettios:~/bentley-os$ curl -s -X POST http://127.0.0.1:4000/deploy -H 'Content-Type: application/json' -d '{"service":"api"}'
+{"job_id":"63e689a8-2574-413c-bfa2-f830df92e9e9","status":"running","service":"api"}spaghettios@spaghettios:~/bentley-os$ spaghettios@spaghettios:~/bentley-os$ curl -s -X POST http://127.0.0.1:4000/deploy -H 'Content-Type: spaghettios@spaghettios:~/bentley-os$ curl -s -X POST http://127.0.0.1:4000/deploy -H 'Content-Type: application/json' -d '{"service":"api"}'
+{"job_id":"63e689a8-2574-413c-bfa2-f830df92e9e9","status":"running","service":"api"}spaghettios@spaghettios:~/bentley-os$ 
+-bash: spaghettios@spaghettios:~/bentley-os$: No such file or directory
+-bash: job_id:63e689a8-2574-413c-bfa2-f830df92e9e9spaghettios@spaghettios:~/bentley-os$: No such file or directory
+spaghettios@spaghettios:~/bentley-os$ sleep 25 && docker exec bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c "select at, action, outcome from audit_log where payload->>'job_id' = '63e689a8-2574-413c-bfa2-f830df92e9e9' order by at;"
+              at               |      action      | outcome 
+-------------------------------+------------------+---------
+ 2026-07-12 19:40:58.723613+00 | deploy.enqueued  | queued
+ 2026-07-12 19:40:58.739614+00 | deploy.started   | running
+ 2026-07-12 19:41:20.488798+00 | deploy.succeeded | success
+(3 rows)
+
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git add supabase/migrations/0004_dashboard_state.sql && git status
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+        new file:   supabase/migrations/0004_dashboard_state.sql
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+        =
+        CACHED
+        [internal]
+        exporting
+        naming
+        resolve
+        transferring
+        unpacking
+
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git commit -m "migration: 0004_dashboard_state singleton for 'what changed' last-seen tracking"
+[main b905e4b] migration: 0004_dashboard_state singleton for 'what changed' last-seen tracking
+ 1 file changed, 13 insertions(+)
+ create mode 100644 supabase/migrations/0004_dashboard_state.sql
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git push origin main
+Enumerating objects: 8, done.
+Counting objects: 100% (8/8), done.
+Delta compression using up to 16 threads
+Compressing objects: 100% (4/4), done.
+Writing objects: 100% (5/5), 775 bytes | 775.00 KiB/s, done.
+Total 5 (delta 2), reused 0 (delta 0), pack-reused 0 (from 0)
+remote: Resolving deltas: 100% (2/2), completed with 2 local objects.
+To github.com:bentleylujero/bentley-os.git
+   5955d8d..b905e4b  main -> main
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && rm -f -- '=' CACHED '[internal]' exporting naming resolve transferring unpacking && git status
+On branch main
+Your branch is up to date with 'origin/main'.
+
+nothing to commit, working tree clean
+spaghettios@spaghettios:~/bentley-os$ docker rmi api-isotest
+Untagged: api-isotest:latest
+Deleted: sha256:7976482371b6d035e557b7e08fb5797578d6707b2baae5c5a947a0da44ab03d2
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git log --oneline 7d79632..b905e4b
+b905e4b (HEAD -> main, origin/main, origin/HEAD) migration: 0004_dashboard_state singleton for 'what changed' last-seen tracking
+5955d8d feat(m2): "what changed" dashboard view — deltas since last look
+7cb895d chore: gitignore whisper/Dockerfile.bak
+403c84b Update THE_BIBLE.md with commit details and notes
+ef41370 Update THE_BIBLE.md to remove obsolete information
+8ac171c Enhance deploy action completion and Telegram notifications
+80298a4 feat(m4): async deploy-completion — poll audit_log to true finish, push ✅/❌ to Telegram
+14c063a Revise THE_BIBLE.md for project updates and milestones
+spaghettios@spaghettios:~/bentley-os$ cat /home/spaghettios/bentley-os/supabase/migrations/0004_dashboard_state.sql
+-- 0004_dashboard_state.sql
+-- Singleton state for the dashboard's "what changed" view.
+-- Holds one fact: the last time the owner viewed the dashboard.
+-- Enforced single-row (id pinned to 1) — not a shadow table, one fact stored once.
+create table if not exists dashboard_state (
+  id           smallint primary key default 1 check (id = 1),
+  last_seen_at timestamptz not null default now()
+);
+
+-- Seed the singleton row. on conflict keeps re-running the migration safe.
+insert into dashboard_state (id, last_seen_at)
+values (1, now())
+on conflict (id) do nothing;
+spaghettios@spaghettios:~/bentley-os$ sed -n '1,90p' /home/spaghettios/bentley-os/apps/api/src/routes/dashboard.ts
+import { Hono } from 'hono';
+import { pool } from '../db/pool.js';
+
+export const dashboardRoute = new Hono();
+
+const TZ = 'America/Chicago';
+
+function esc(s: unknown): string {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function fmtTime(d: Date | null): string {
+  if (!d) return '';
+  return d.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: TZ,
+  });
+}
+
+// Compact "Jul 12, 3:04 PM" for cross-day deltas in the What-changed feed.
+function fmtStamp(d: Date | null): string {
+  if (!d) return '';
+  return d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: TZ,
+  });
+}
+
+dashboardRoute.get('/', async (c) => {
+  let events: any[] = [];
+  let emails: any[] = [];
+  let newEmails: any[] = [];
+  let newEvents: any[] = [];
+  let lastSeen: Date | null = null;
+  let dbError = '';
+
+  // Read the singleton last-seen marker first. Its own guard: if this fails,
+  // the What-changed section simply shows nothing new — the rest still renders.
+  try {
+    const seenR = await pool.query(
+      `SELECT last_seen_at FROM dashboard_state WHERE id = 1`
+    );
+    lastSeen = seenR.rows[0]?.last_seen_at ?? null;
+  } catch {
+    lastSeen = null;
+  }
+
+  try {
+    const eventsQ = pool.query(
+      `SELECT title, starts_at, ends_at, location, status
+         FROM calendar_events
+        WHERE starts_at AT TIME ZONE $1 >= (now() AT TIME ZONE $1)::date
+          AND starts_at AT TIME ZONE $1 <  ((now() AT TIME ZONE $1)::date + interval '1 day')
+        ORDER BY starts_at ASC`,
+      [TZ]
+    );
+    const emailsQ = pool.query(
+      `SELECT subject, snippet, received_at, is_unread
+         FROM emails
+        ORDER BY received_at DESC NULLS LAST
+        LIMIT 15`
+    );
+    // "What changed" = rows ingested (created_at) since the owner last looked.
+    // created_at, not received_at: an old email newly synced still counts as new to us.
+    const newEmailsQ = lastSeen
+      ? pool.query(
+          `SELECT subject, snippet, received_at, created_at, is_unread
+             FROM emails
+            WHERE created_at > $1
+            ORDER BY created_at DESC
+            LIMIT 20`,
+          [lastSeen]
+        )
+      : Promise.resolve({ rows: [] as any[] });
+    const newEventsQ = lastSeen
+      ? pool.query(
+          `SELECT title, starts_at, location, created_at
+             FROM calendar_events
+            WHERE created_at > $1
+            ORDER BY created_at DESC
+            LIMIT 20`,
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git status && git log --oneline -3
+On branch main
+Your branch is up to date with 'origin/main'.
+
+nothing to commit, working tree clean
+b905e4b (HEAD -> main, origin/main, origin/HEAD) migration: 0004_dashboard_state singleton for 'what changed' last-seen tracking
+5955d8d feat(m2): "what changed" dashboard view — deltas since last look
+7cb895d chore: gitignore whisper/Dockerfile.bak
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c "\d emails"
+                               Table "public.emails"
+   Column    |           Type           | Collation | Nullable |      Default      
+-------------+--------------------------+-----------+----------+-------------------
+ id          | uuid                     |           | not null | gen_random_uuid()
+ source      | text                     |           | not null | 'gmail'::text
+ source_id   | text                     |           | not null | 
+ thread_id   | text                     |           |          | 
+ sender_id   | uuid                     |           |          | 
+ subject     | text                     |           |          | 
+ snippet     | text                     |           |          | 
+ received_at | timestamp with time zone |           |          | 
+ is_unread   | boolean                  |           |          | 
+ category    | text                     |           |          | 
+ importance  | smallint                 |           |          | 
+ created_at  | timestamp with time zone |           | not null | now()
+Indexes:
+    "emails_pkey" PRIMARY KEY, btree (id)
+    "emails_source_source_id_key" UNIQUE CONSTRAINT, btree (source, source_id)
+    "idx_emails_received_at" btree (received_at DESC)
+    "idx_emails_sender" btree (sender_id)
+Foreign-key constraints:
+    "emails_sender_id_fkey" FOREIGN KEY (sender_id) REFERENCES people(id)
+Referenced by:
+    TABLE "email_recipients" CONSTRAINT "email_recipients_email_id_fkey" FOREIGN KEY (email_id) REFERENCES emails(id) ON DELETE CASCADE
+
+spaghettios@spaghettios:~/bentley-os$ grep -rn "importance\|category" apps/api/src/routes/dashboard.ts marionette/src/ 2>/dev/null
+spaghettios@spaghettios:~/bentley-os$ cat apps/api/src/ingestion/gmail.ts
+import { google } from 'googleapis';
+import { readFileSync } from 'node:fs';
+import { pool } from '../db/pool.js';
+
+const SECRET_PATH = process.env.GOOGLE_CLIENT_SECRET_PATH || '/secrets/client_secret.json';
+const TOKEN_PATH = process.env.GOOGLE_TOKEN_PATH || '/secrets/token.json';
+
+function makeGmailClient() {
+  const { installed } = JSON.parse(readFileSync(SECRET_PATH, 'utf8'));
+  const token = JSON.parse(readFileSync(TOKEN_PATH, 'utf8'));
+  const oauth2 = new google.auth.OAuth2(
+    installed.client_id,
+    installed.client_secret,
+    installed.redirect_uris[0],
+  );
+  oauth2.setCredentials(token);
+  return google.gmail({ version: 'v1', auth: oauth2 });
+}
+
+export interface GmailSyncResult {
+  fetched: number;
+  upserted: number;
+  nextHistoryId: string | null;
+  fullResync: boolean;
+}
+
+interface Addr {
+  email: string;
+  name: string | null;
+}
+
+// Parse a raw header value like: "Foo Bar <foo@x.com>, baz@y.com"
+function parseAddresses(raw: string | undefined): Addr[] {
+  if (!raw) return [];
+  const out: Addr[] = [];
+  for (const part of raw.split(',')) {
+    const s = part.trim();
+    if (!s) continue;
+    const m = s.match(/^(.*?)<([^>]+)>$/);
+    if (m) {
+      const name = m[1].trim().replace(/^"|"$/g, '') || null;
+      const email = m[2].trim().toLowerCase();
+      if (email) out.push({ email, name });
+    } else {
+      const email = s.toLowerCase();
+      if (email.includes('@')) out.push({ email, name: null });
+    }
+  }
+  return out;
+}
+
+function header(headers: any[], name: string): string | undefined {
+  const h = headers.find((x) => x.name?.toLowerCase() === name.toLowerCase());
+  return h?.value ?? undefined;
+}
+
+async function upsertPerson(client: any, addr: Addr): Promise<string> {
+  const res = await client.query(
+    `INSERT INTO people (email, display_name)
+     VALUES ($1, $2)
+     ON CONFLICT (email) DO UPDATE SET
+       display_name = COALESCE(people.display_name, EXCLUDED.display_name),
+       updated_at = now()
+     RETURNING id`,
+    [addr.email, addr.name],
+  );
+  return res.rows[0].id;
+}
+
+// Returns 1 if a new email row was inserted, 0 if it already existed.
+async function upsertMessage(msg: Record<string, any>): Promise<number> {
+  const payload = msg.payload ?? {};
+  const headers = payload.headers ?? [];
+
+  const fromAddrs = parseAddresses(header(headers, 'From'));
+  const toAddrs = parseAddresses(header(headers, 'To'));
+  const ccAddrs = parseAddresses(header(headers, 'Cc'));
+
+  const subject = header(headers, 'Subject') ?? null;
+  const snippet = msg.snippet ?? null;
+  const threadId = msg.threadId ?? null;
+  const internalMs = msg.internalDate ? Number(msg.internalDate) : null;
+  const receivedAt = internalMs ? new Date(internalMs).toISOString() : null;
+  const labels: string[] = msg.labelIds ?? [];
+  const isUnread = labels.includes('UNREAD');
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const senderId = fromAddrs[0] ? await upsertPerson(client, fromAddrs[0]) : null;
+
+    const emailRes = await client.query(
+      `INSERT INTO emails (source, source_id, thread_id, sender_id, subject, snippet, received_at, is_unread)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (source, source_id) DO UPDATE SET
+         thread_id = EXCLUDED.thread_id,
+         sender_id = EXCLUDED.sender_id,
+         subject = EXCLUDED.subject,
+         snippet = EXCLUDED.snippet,
+         received_at = EXCLUDED.received_at,
+         is_unread = EXCLUDED.is_unread
+       RETURNING id, (xmax = 0) AS inserted`,
+      ['gmail', msg.id, threadId, senderId, subject, snippet, receivedAt, isUnread],
+    );
+    const emailId: string = emailRes.rows[0].id;
+    const inserted: boolean = emailRes.rows[0].inserted;
+
+    // Rebuild recipients for this email (idempotent on re-sync).
+    await client.query(`DELETE FROM email_recipients WHERE email_id = $1`, [emailId]);
+
+    const seen = new Set<string>();
+    for (const [kind, addrs] of [['to', toAddrs], ['cc', ccAddrs]] as const) {
+      for (const addr of addrs) {
+        const dedupeKey = `${kind}:${addr.email}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        const personId = await upsertPerson(client, addr);
+        await client.query(
+          `INSERT INTO email_recipients (email_id, person_id, kind)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (email_id, person_id, kind) DO NOTHING`,
+          [emailId, personId, kind],
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+    return inserted ? 1 : 0;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+async function fetchMessage(gmail: any, id: string): Promise<Record<string, any>> {
+  const res = await gmail.users.messages.get({
+    userId: 'me',
+    id,
+    format: 'metadata',
+    metadataHeaders: ['From', 'To', 'Cc', 'Subject'],
+  });
+  return res.data;
+}
+
+// Full backfill: last 30 days of messages.
+async function fullSync(gmail: any): Promise<GmailSyncResult> {
+  let pageToken: string | undefined;
+  let fetched = 0;
+  let upserted = 0;
+  let maxHistoryId = 0n;
+
+  do {
+    const list = await gmail.users.messages.list({
+      userId: 'me',
+      q: 'newer_than:30d',
+      maxResults: 100,
+      pageToken,
+    });
+    const ids = (list.data.messages ?? []).map((m: any) => m.id);
+    for (const id of ids) {
+      const msg = await fetchMessage(gmail, id);
+      fetched += 1;
+      upserted += await upsertMessage(msg);
+      if (msg.historyId) {
+        const h = BigInt(msg.historyId);
+        if (h > maxHistoryId) maxHistoryId = h;
+      }
+    }
+    pageToken = list.data.nextPageToken ?? undefined;
+  } while (pageToken);
+
+  return {
+    fetched,
+    upserted,
+    nextHistoryId: maxHistoryId > 0n ? maxHistoryId.toString() : null,
+    fullResync: true,
+  };
+}
+
+// Incremental: history since startHistoryId. Throws {code:404} if too old.
+async function incrementalSync(gmail: any, startHistoryId: string): Promise<GmailSyncResult> {
+  let pageToken: string | undefined;
+  let fetched = 0;
+  let upserted = 0;
+  let maxHistoryId = BigInt(startHistoryId);
+  const changedIds = new Set<string>();
+
+  do {
+    const res = await gmail.users.history.list({
+      userId: 'me',
+      startHistoryId,
+      historyTypes: ['messageAdded'],
+      maxResults: 500,
+      pageToken,
+    });
+    for (const h of res.data.history ?? []) {
+      if (h.id) {
+        const hid = BigInt(h.id);
+        if (hid > maxHistoryId) maxHistoryId = hid;
+      }
+      for (const added of h.messagesAdded ?? []) {
+        if (added.message?.id) changedIds.add(added.message.id);
+      }
+    }
+    pageToken = res.data.nextPageToken ?? undefined;
+  } while (pageToken);
+
+  for (const id of changedIds) {
+    try {
+      const msg = await fetchMessage(gmail, id);
+      fetched += 1;
+      upserted += await upsertMessage(msg);
+    } catch (e: any) {
+      if (e?.code === 404) continue; // message deleted between history read and fetch
+      throw e;
+    }
+  }
+
+  return {
+    fetched,
+    upserted,
+    nextHistoryId: maxHistoryId.toString(),
+    fullResync: false,
+  };
+}
+
+export async function runGmailSync(): Promise<GmailSyncResult> {
+  const gmail = makeGmailClient();
+
+  const stateRes = await pool.query(
+    `SELECT sync_token FROM sync_state WHERE source = $1`,
+    ['gmail'],
+  );
+  const startHistoryId: string | undefined = stateRes.rows[0]?.sync_token ?? undefined;
+
+  let result: GmailSyncResult;
+  if (startHistoryId) {
+    try {
+      result = await incrementalSync(gmail, startHistoryId);
+    } catch (e: any) {
+      if (e?.code === 404) {
+        result = await fullSync(gmail); // cursor expired — self-heal
+      } else {
+        throw e;
+      }
+    }
+  } else {
+    result = await fullSync(gmail);
+  }
+
+  if (result.nextHistoryId) {
+    await pool.query(
+spaghettios@spaghettios:~/bentley-os$ cat > apps/api/src/ingestion/gmail.ts << 'EOF'
+import { google } from 'googleapis';
+import { readFileSync } from 'node:fs';
+import { pool } from '../db/pool.js';
+
+const SECRET_PATH = process.env.GOOGLE_CLIENT_SECRET_PATH || '/secrets/client_secret.json';
+const TOKEN_PATH = process.env.GOOGLE_TOKEN_PATH || '/secrets/token.json';
+
+function makeGmailClient() {
+  const { installed } = JSON.parse(readFileSync(SECRET_PATH, 'utf8'));
+  const token = JSON.parse(readFileSync(TOKEN_PATH, 'utf8'));
+  const oauth2 = new google.auth.OAuth2(
+    installed.client_id,
+    installed.client_secret,
+    installed.redirect_uris[0],
+  );
+  oauth2.setCredentials(token);
+  return google.gmail({ version: 'v1', auth: oauth2 });
+}
+
+export interface GmailSyncResult {
+  fetched: number;
+  upserted: number;
+  nextHistoryId: string | null;
+  fullResync: boolean;
+}
+
+interface Addr {
+  email: string;
+  name: string | null;
+}
+
+// Parse a raw header value like: "Foo Bar <foo@x.com>, baz@y.com"
+function parseAddresses(raw: string | undefined): Addr[] {
+  if (!raw) return [];
+  const out: Addr[] = [];
+  for (const part of raw.split(',')) {
+    const s = part.trim();
+    if (!s) continue;
+    const m = s.match(/^(.*?)<([^>]+)>$/);
+    if (m) {
+      const name = m[1].trim().replace(/^"|"$/g, '') || null;
+      const email = m[2].trim().toLowerCase();
+      if (email) out.push({ email, name });
+    } else {
+      const email = s.toLowerCase();
+      if (email.includes('@')) out.push({ email, name: null });
+    }
+  }
+  return out;
+}
+
+function header(headers: any[], name: string): string | undefined {
+  const h = headers.find((x) => x.name?.toLowerCase() === name.toLowerCase());
+  return h?.value ?? undefined;
+}
+
+// --- Body extraction ---------------------------------------------------------
+// Gmail bodies are a nested MIME tree; parts are base64url-encoded.
+// Prefer text/plain; fall back to stripped text/html. Never throws — a body
+// extraction failure must not break ingestion (which is /health-adjacent).
+
+function decodeB64Url(data: string): string {
+  try {
+    return Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function extractBody(payload: any): string | null {
+  if (!payload) return null;
+
+  let plain: string | null = null;
+  let html: string | null = null;
+
+  function walk(part: any) {
+    if (!part) return;
+    const mime = part.mimeType ?? '';
+    const data = part.body?.data;
+    if (data) {
+      if (mime === 'text/plain' && plain === null) plain = decodeB64Url(data);
+      else if (mime === 'text/html' && html === null) html = decodeB64Url(data);
+    }
+    for (const child of part.parts ?? []) walk(child);
+  }
+  walk(payload);
+
+  if (plain && plain.trim()) return plain.trim();
+  if (html && html.trim()) return stripHtml(html);
+  return null;
+}
+
+async function upsertPerson(client: any, addr: Addr): Promise<string> {
+  const res = await client.query(
+    `INSERT INTO people (email, display_name)
+     VALUES ($1, $2)
+     ON CONFLICT (email) DO UPDATE SET
+       display_name = COALESCE(people.display_name, EXCLUDED.display_name),
+       updated_at = now()
+     RETURNING id`,
+    [addr.email, addr.name],
+  );
+  return res.rows[0].id;
+}
+
+// Returns 1 if a new email row was inserted, 0 if it already existed.
+async function upsertMessage(msg: Record<string, any>): Promise<number> {
+  const payload = msg.payload ?? {};
+  const headers = payload.headers ?? [];
+
+  const fromAddrs = parseAddresses(header(headers, 'From'));
+  const toAddrs = parseAddresses(header(headers, 'To'));
+  const ccAddrs = parseAddresses(header(headers, 'Cc'));
+
+  const subject = header(headers, 'Subject') ?? null;
+  const snippet = msg.snippet ?? null;
+  const body = extractBody(payload);
+  const threadId = msg.threadId ?? null;
+  const internalMs = msg.internalDate ? Number(msg.internalDate) : null;
+  const receivedAt = internalMs ? new Date(internalMs).toISOString() : null;
+  const labels: string[] = msg.labelIds ?? [];
+  const isUnread = labels.includes('UNREAD');
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const senderId = fromAddrs[0] ? await upsertPerson(client, fromAddrs[0]) : null;
+
+    const emailRes = await client.query(
+      `INSERT INTO emails (source, source_id, thread_id, sender_id, subject, snippet, body, received_at, is_unread)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (source, source_id) DO UPDATE SET
+         thread_id = EXCLUDED.thread_id,
+         sender_id = EXCLUDED.sender_id,
+         subject = EXCLUDED.subject,
+         snippet = EXCLUDED.snippet,
+         body = EXCLUDED.body,
+         received_at = EXCLUDED.received_at,
+         is_unread = EXCLUDED.is_unread
+       RETURNING id, (xmax = 0) AS inserted`,
+      ['gmail', msg.id, threadId, senderId, subject, snippet, body, receivedAt, isUnread],
+    );
+    const emailId: string = emailRes.rows[0].id;
+    const inserted: boolean = emailRes.rows[0].inserted;
+
+    // Rebuild recipients for this email (idempotent on re-sync).
+    await client.query(`DELETE FROM email_recipients WHERE email_id = $1`, [emailId]);
+
+    const seen = new Set<string>();
+    for (const [kind, addrs] of [['to', toAddrs], ['cc', ccAddrs]] as const) {
+      for (const addr of addrs) {
+        const dedupeKey = `${kind}:${addr.email}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        const personId = await upsertPerson(client, addr);
+        await client.query(
+          `INSERT INTO email_recipients (email_id, person_id, kind)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (email_id, person_id, kind) DO NOTHING`,
+          [emailId, personId, kind],
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+    return inserted ? 1 : 0;
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+async function fetchMessage(gmail: any, id: string): Promise<Record<string, any>> {
+  const res = await gmail.users.messages.get({
+    userId: 'me',
+    id,
+    format: 'full',
+  });
+  return res.data;
+}
+
+// Full backfill: last 30 days of messages.
+async function fullSync(gmail: any): Promise<GmailSyncResult> {
+  let pageToken: string | undefined;
+  let fetched = 0;
+  let upserted = 0;
+  let maxHistoryId = 0n;
+
+  do {
+    const list = await gmail.users.messages.list({
+      userId: 'me',
+      q: 'newer_than:30d',
+      maxResults: 100,
+      pageToken,
+    });
+    const ids = (list.data.messages ?? []).map((m: any) => m.id);
+    for (const id of ids) {
+      const msg = await fetchMessage(gmail, id);
+      fetched += 1;
+      upserted += await upsertMessage(msg);
+      if (msg.historyId) {
+        const h = BigInt(msg.historyId);
+        if (h > maxHistoryId) maxHistoryId = h;
+      }
+    }
+    pageToken = list.data.nextPageToken ?? undefined;
+  } while (pageToken);
+
+  return {
+    fetched,
+    upserted,
+    nextHistoryId: maxHistoryId > 0n ? maxHistoryId.toString() : null,
+    fullResync: true,
+  };
+}
+
+// Incremental: history since startHistoryId. Throws {code:404} if too old.
+async function incrementalSync(gmail: any, startHistoryId: string): Promise<GmailSyncResult> {
+  let pageToken: string | undefined;
+  let fetched = 0;
+  let upserted = 0;
+  let maxHistoryId = BigInt(startHistoryId);
+  const changedIds = new Set<string>();
+
+  do {
+    const res = await gmail.users.history.list({
+      userId: 'me',
+      startHistoryId,
+      historyTypes: ['messageAdded'],
+      maxResults: 500,
+      pageToken,
+    });
+    for (const h of res.data.history ?? []) {
+      if (h.id) {
+        const hid = BigInt(h.id);
+        if (hid > maxHistoryId) maxHistoryId = hid;
+      }
+      for (const added of h.messagesAdded ?? []) {
+        if (added.message?.id) changedIds.add(added.message.id);
+      }
+    }
+    pageToken = res.data.nextPageToken ?? undefined;
+  } while (pageToken);
+
+  for (const id of changedIds) {
+    try {
+      const msg = await fetchMessage(gmail, id);
+      fetched += 1;
+      upserted += await upsertMessage(msg);
+    } catch (e: any) {
+      if (e?.code === 404) continue; // message deleted between history read and fetch
+      throw e;
+    }
+  }
+
+  return {
+    fetched,
+    upserted,
+    nextHistoryId: maxHistoryId.toString(),
+    fullResync: false,
+  };
+}
+
+export async function runGmailSync(): Promise<GmailSyncResult> {
+  const gmail = makeGmailClient();
+
+  const stateRes = await pool.query(
+    `SELECT sync_token FROM sync_state WHERE source = $1`,
+    ['gmail'],
+  );
+  const startHistoryId: string | undefined = stateRes.rows[0]?.sync_token ?? undefined;
+
+  let result: GmailSyncResult;
+  if (startHistoryId) {
+    try {
+      result = await incrementalSync(gmail, startHistoryId);
+    } catch (e: any) {
+      if (e?.code === 404) {
+        result = await fullSync(gmail); // cursor expired — self-heal
+      } else {
+        throw e;
+      }
+    }
+  } else {
+    result = await fullSync(gmail);
+  }
+
+  if (result.nextHistoryId) {
+    await pool.query(
+      `INSERT INTO sync_state (source, sync_token, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (source) DO UPDATE SET
+         sync_token = EXCLUDED.sync_token,
+         updated_at = now()`,
+      ['gmail', result.nextHistoryId],
+    );
+  }
+
+  return result;
+}
+EOF
+spaghettios@spaghettios:~/bentley-os$ grep -n "format: 'full'\|extractBody\|body," apps/api/src/ingestion/gmail.ts && wc -l apps/api/src/ingestion/gmail.ts
+86:function extractBody(payload: any): string | null {
+133:  const body = extractBody(payload);
+147:      `INSERT INTO emails (source, source_id, thread_id, sender_id, subject, snippet, body, received_at, is_unread)
+154:         body = EXCLUDED.body,
+158:      ['gmail', msg.id, threadId, senderId, subject, snippet, body, receivedAt, isUnread],
+196:    format: 'full',
+319 apps/api/src/ingestion/gmail.ts
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git status
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+        modified:   apps/api/src/ingestion/gmail.ts
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+        supabase/migrations/0005_email_intelligence.sql
+
+no changes added to commit (use "git add" and/or "git commit -a")
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && docker build -t bentley-api-test apps/api
+[+] Building 8.1s (10/10) FINISHED                                                                                                                                        docker:default
+ => [internal] load build definition from Dockerfile                                                                                                                                0.0s
+ => => transferring dockerfile: 300B                                                                                                                                                0.0s
+ => [internal] load metadata for docker.io/library/node:22-alpine                                                                                                                   0.0s
+ => [internal] load .dockerignore                                                                                                                                                   0.0s
+ => => transferring context: 69B                                                                                                                                                    0.0s
+ => [1/6] FROM docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2                                                             0.0s
+ => => resolve docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2                                                             0.0s
+ => [internal] load build context                                                                                                                                                   0.0s
+ => => transferring context: 10.63kB                                                                                                                                                0.0s
+ => CACHED [2/6] WORKDIR /usr/src/app                                                                                                                                               0.0s
+ => CACHED [3/6] COPY package.json ./                                                                                                                                               0.0s
+ => CACHED [4/6] RUN npm install                                                                                                                                                    0.0s
+ => [5/6] COPY . .                                                                                                                                                                  0.0s
+ => ERROR [6/6] RUN npm run build                                                                                                                                                   7.9s
+------                                                                                                                                                                                   
+ > [6/6] RUN npm run build:                                                                                                                                                              
+0.382                                                                                                                                                                                    
+0.382 > @bentley-os/api@0.1.0 build                                                                                                                                                      
+0.382 > tsc -p tsconfig.json                                                                                                                                                             
+0.382 
+7.737 src/ingestion/gmail.ts(104,22): error TS2339: Property 'trim' does not exist on type 'never'.
+7.737 src/ingestion/gmail.ts(104,43): error TS2339: Property 'trim' does not exist on type 'never'.
+7.737 src/ingestion/gmail.ts(105,20): error TS2339: Property 'trim' does not exist on type 'never'.
+------
+Dockerfile:9
+--------------------
+   7 |     COPY . .
+   8 |     
+   9 | >>> RUN npm run build
+  10 |     
+  11 |     EXPOSE 3000
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c npm run build" did not complete successfully: exit code: 2
+spaghettios@spaghettios:~/bentley-os$ sed -n '80,130p' apps/api/src/ingestion/gmail.ts
+    .replace(/&quot;/gi, '"')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function extractBody(payload: any): string | null {
+  if (!payload) return null;
+
+  let plain: string | null = null;
+  let html: string | null = null;
+
+  function walk(part: any) {
+    if (!part) return;
+    const mime = part.mimeType ?? '';
+    const data = part.body?.data;
+    if (data) {
+      if (mime === 'text/plain' && plain === null) plain = decodeB64Url(data);
+      else if (mime === 'text/html' && html === null) html = decodeB64Url(data);
+    }
+    for (const child of part.parts ?? []) walk(child);
+  }
+  walk(payload);
+
+  if (plain && plain.trim()) return plain.trim();
+  if (html && html.trim()) return stripHtml(html);
+  return null;
+}
+
+async function upsertPerson(client: any, addr: Addr): Promise<string> {
+  const res = await client.query(
+    `INSERT INTO people (email, display_name)
+     VALUES ($1, $2)
+     ON CONFLICT (email) DO UPDATE SET
+       display_name = COALESCE(people.display_name, EXCLUDED.display_name),
+       updated_at = now()
+     RETURNING id`,
+    [addr.email, addr.name],
+  );
+  return res.rows[0].id;
+}
+
+// Returns 1 if a new email row was inserted, 0 if it already existed.
+async function upsertMessage(msg: Record<string, any>): Promise<number> {
+  const payload = msg.payload ?? {};
+  const headers = payload.headers ?? [];
+
+  const fromAddrs = parseAddresses(header(headers, 'From'));
+  const toAddrs = parseAddresses(header(headers, 'To'));
+  const ccAddrs = parseAddresses(header(headers, 'Cc'));
+
+spaghettios@spaghettios:~/bentley-os$ sed -i "s/  let plain: string | null = null;/  let plain: string | null = null as string | null;/" apps/api/src/ingestion/gmail.ts
+spaghettios@spaghettios:~/bentley-os$ sed -i "s/  let html: string | null = null;/  let html: string | null = null as string | null;/" apps/api/src/ingestion/gmail.ts
+spaghettios@spaghettios:~/bentley-os$ sed -n '87,88p' apps/api/src/ingestion/gmail.ts
+  if (!payload) return null;
+
+spaghettios@spaghettios:~/bentley-os$ grep -n "let plain\|let html" apps/api/src/ingestion/gmail.ts
+89:  let plain: string | null = null as string | null;
+90:  let html: string | null = null as string | null;
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && docker build -t bentley-api-test apps/api
+[+] Building 8.0s (11/11) FINISHED                                                                                                                                        docker:default
+ => [internal] load build definition from Dockerfile                                                                                                                                0.0s
+ => => transferring dockerfile: 300B                                                                                                                                                0.0s
+ => [internal] load metadata for docker.io/library/node:22-alpine                                                                                                                   0.0s
+ => [internal] load .dockerignore                                                                                                                                                   0.0s
+ => => transferring context: 69B                                                                                                                                                    0.0s
+ => [1/6] FROM docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2                                                             0.0s
+ => => resolve docker.io/library/node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2                                                             0.0s
+ => [internal] load build context                                                                                                                                                   0.0s
+ => => transferring context: 10.66kB                                                                                                                                                0.0s
+ => CACHED [2/6] WORKDIR /usr/src/app                                                                                                                                               0.0s
+ => CACHED [3/6] COPY package.json ./                                                                                                                                               0.0s
+ => CACHED [4/6] RUN npm install                                                                                                                                                    0.0s
+ => [5/6] COPY . .                                                                                                                                                                  0.0s
+ => [6/6] RUN npm run build                                                                                                                                                         7.3s
+ => exporting to image                                                                                                                                                              0.4s 
+ => => exporting layers                                                                                                                                                             0.2s 
+ => => exporting manifest sha256:0848fd49aeb365c0ef8b8c572ebffc6fea59789c0502a9af286bec896fc207eb                                                                                   0.0s
+ => => exporting config sha256:2500f3b0b5b15763d9141a59e186b398fcfb9a305a3cea7851647bd6262575e7                                                                                     0.0s
+ => => exporting attestation manifest sha256:d0a4baad141954d4dd66d475fe7cf03b66dc7e046c2042da9ede75e466181719                                                                       0.0s
+ => => exporting manifest list sha256:f254d67f21537214de5593560893d0b2e326e6cc9ff630eb0f1db3108e2219d5                                                                              0.0s
+ => => naming to docker.io/library/bentley-api-test:latest                                                                                                                          0.0s
+ => => unpacking to docker.io/library/bentley-api-test:latest                                                                                                                       0.1s
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c "SELECT source, left(sync_token, 20) AS token_prefix, updated_at FROM sync_state WHERE source='gmail';"
+ source | token_prefix |          updated_at           
+--------+--------------+-------------------------------
+ gmail  | 3925311      | 2026-07-12 20:20:00.701394+00
+(1 row)
+
+spaghettios@spaghettios:~/bentley-os$ grep -n "sync_token\|newer_than\|historyId\|history.list\|messages.list\|q:" apps/api/src/ingestion/gmail.ts
+209:    const list = await gmail.users.messages.list({
+211:      q: 'newer_than:30d',
+220:      if (msg.historyId) {
+221:        const h = BigInt(msg.historyId);
+245:    const res = await gmail.users.history.list({
+287:    `SELECT sync_token FROM sync_state WHERE source = $1`,
+290:  const startHistoryId: string | undefined = stateRes.rows[0]?.sync_token ?? undefined;
+309:      `INSERT INTO sync_state (source, sync_token, updated_at)
+312:         sync_token = EXCLUDED.sync_token,
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c "UPDATE sync_state SET sync_token = NULL WHERE source='gmail'; SELECT source, sync_token FROM sync_state WHERE source='gmail';"
+UPDATE 1
+ source | sync_token 
+--------+------------
+ gmail  | 
+(1 row)
+
+spaghettios@spaghettios:~/bentley-os$ grep -n "runGmailSync\|export" apps/api/src/ingestion/gmail.ts | head -20
+20:export interface GmailSyncResult {
+283:export async function runGmailSync(): Promise<GmailSyncResult> {
+spaghettios@spaghettios:~/bentley-os$ docker run --rm bentley-api-test sh -c "ls dist && echo '---' && ls dist/ingestion"
+db
+index.js
+ingestion
+routes
 ---
-
-## 1. Operating rules (how we work together)
-
-**The most important fact:** Bentley runs everything on the server; Claude cannot. No
-network access to the box (private LAN, `172.16.30.4`). The loop:
-1. Claude gives exact, copy-pasteable commands or files.
-2. Bentley runs them (SSH or browser terminal at `ssh.bentleyos.me`) and pastes back raw
-   output.
-3. Claude reads the actual output — never assumes it worked — and gives the next step.
-
-**Believe the output, not the prior.** If pasted output contradicts expectation, the output
-is truth. **This includes this doc's own prior claims** — the marionette→contractor
-delegate path was marked "verified end-to-end" here once already, on the strength of a
-trivial no-tool-call reply. It wasn't actually proven until a real multi-step task was run
-and two real bugs surfaced. A "verified" claim in this doc is only as good as what was
-actually tested. **Same lesson repeated during the Telegram build:** a "webhook registered"
-API response from Telegram (`{"ok":true}`) said nothing about whether delivery actually
-worked — `getWebhookInfo`'s `last_error_message` was the only source of truth, and even that
-required a real send/receive cycle (not just a config check) to confirm the full round trip.
-
-**Ground truth beats vision.** Ground every proposal in current state (this doc, §4). If
-unsure whether something exists on the box, give the one command to check — don't assume.
-
-**Working discipline:**
-- One step at a time in the terminal. Don't dump ten commands if step 3 depends on step 2.
-- Concise, code-forward. Next correct move, not essays.
-- Follow the roadmap (§6). Don't skip milestones — N's "done when" must pass before N+1.
-- When tempted to jump ahead, log it in Open Questions (§8) and steer back.
-- Isolation-test before every commit: throwaway `docker run` to catch bugs before deploy.
-- Commit at natural checkpoints; scoped messages; always `git push origin main` after.
-- When something finishes, update this doc.
-- **When a request will run long (real OpenCode agent work, not a trivial round-trip), give
-  it real wall-clock time before concluding it's stuck.** Check `audit_log`, not stdout logs
-  (services here don't log per-request) and not a short-lived test client's own timeout —
-  the server-side call can still be running after the test client gives up. **Same applies
-  to Docker builds:** a `docker compose up --build` can sit on "exporting to image" /
-  "unpacking" for 10+ minutes on slow disk I/O with zero visible progress — check
-  `docker info` responsiveness and system load before assuming the daemon is hung (see §7).
-- **When a downstream response shape is assumed rather than confirmed, confirm it.** The
-  first Telegram integration attempt silently failed to send replies because
-  `marionette`'s `/think` response was assumed to be `{decision, message, reasoning}` at the
-  top level; it's actually `{decision: {decision, message, reasoning}}`. The bug produced no
-  error — `sendMessage` just sent `undefined` as text — and was only caught by directly
-  curling the upstream service and diffing the real JSON against the code's assumption.
-  Don't guess a response shape from a route name; hit the real endpoint and look.
-
-**File-creation quirk:** the browser terminal has bracketed-paste issues. Short heredocs
-(`cat > file << 'EOF'`) are fine. **For long files — like this one — heredoc in the browser
-terminal reliably fails. Generate the file elsewhere (Claude's sandbox) and commit it via
-the GitHub web UI instead** (paste into the online editor, or drag-and-drop upload to
-replace the file). Don't keep retrying heredoc/scp on something this doc has already
-flagged as failure-prone.
-
+gcal.js
+gmail.js
+scheduler.js
+test-gcal-sync.js
+test-gmail-sync.js
+spaghettios@spaghettios:~/bentley-os$ spaghettios@spaghettios:~/bentley-os$ docker run --rm bentley-api-test sh -c "ls dist && echo '---' && ls dist/ingestion"
+db
+index.js
+ingestion
+routes
 ---
+gcal.js
+gmail.js
+scheduler.js
+test-gcal-sync.js
+test-gmail-sync.js
+spaghettios@spaghettios:~/bentley-os$ 
+-bash: spaghettios@spaghettios:~/bentley-os$: No such file or directory
+db: command not found
+index.js: command not found
+ingestion: command not found
+Command 'routes' not found, did you mean:
+  command 'route' from deb net-tools (2.10-2ubuntu1)
+  command 'routel' from deb iproute2 (6.19.0-1ubuntu1.1)
+Try: sudo apt install <deb name>
+---: command not found
+gcal.js: command not found
+gmail.js: command not found
+scheduler.js: command not found
+test-gcal-sync.js: command not found
+test-gmail-sync.js: command not found
+-bash: spaghettios@spaghettios:~/bentley-os$: No such file or directory
+spaghettios@spaghettios:~/bentley-os$ docker inspect bentley-os-api-1 --format '{{range .Mounts}}{{.Source}} -> {{.Destination}} ({{.Mode}}){{println}}{{end}}'
+/home/spaghettios/bentley-os/token.json -> /secrets/token.json (ro)
+/home/spaghettios/bentley-os/client_secret.json -> /secrets/client_secret.json (ro)
 
-## 2. Non-negotiable design rules
+spaghettios@spaghettios:~/bentley-os$ docker run --rm \
+  --network bentley-os_backend \
+  --env-file /home/spaghettios/bentley-os/.env \
+  -v /home/spaghettios/bentley-os/token.json:/secrets/token.json:ro \
+  -v /home/spaghettios/bentley-os/client_secret.json:/secrets/client_secret.json:ro \
+  bentley-api-test \
+  node -e "import('./dist/ingestion/gmail.js').then(m=>m.runGmailSync()).then(r=>{console.log('SYNC RESULT:',JSON.stringify(r));process.exit(0)}).catch(e=>{console.error('SYNC ERROR:',e);process.exit(1)})"
+SYNC RESULT: {"fetched":718,"upserted":0,"nextHistoryId":"3925311","fullResync":true}
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c "SELECT count(*) FILTER (WHERE body IS NOT NULL) AS with_body, count(*) AS total, max(length(body)) AS max_len, round(avg(length(body))) AS avg_len FROM emails;"
+ with_body | total | max_len | avg_len 
+-----------+-------+---------+---------
+       718 |   765 |   27372 |    5082
+(1 row)
 
-1. **Ontology-first.** Every feature maps to an object type, a link type, or an action —
-   never a parallel ad-hoc table. Flag anything (Claude's suggestions included) that
-   duplicates a fact or creates shadow state.
-2. **Store each fact once.**
-3. **Schema changes are versioned migrations** in `supabase/migrations/` (sequential numeric
-   prefix, plain SQL, e.g. `0001_secretary_ontology.sql`) — never ad-hoc production edits.
-4. **Host locally; AI is API-only, except small local-model utilities like whisper.** No
-   local LLM inference. Do not reintroduce a local embeddings/LLM service. Whisper (speech-
-   to-text) is a deliberate, narrow exception — see §0.
-5. **Autonomy is earned — except inside the sandbox, and never for external comms.** Any AI
-   action capability that touches the *production* zone or the outside world ships
-   approval-gated first. Never wire autonomous actions onto real Gmail without a guardrail.
-   Inside the sandbox zone, contractor/OpenCode gets full filesystem/build autonomy by
-   design (see §9) — but no email/messaging/external-comms tool is ever wired to contractor,
-   full stop, regardless of zone. **Telegram is an inbound command interface only** — it
-   lets a human (allow-listed, single user) direct marionette; it does not give marionette
-   or contractor any new outbound-comms capability. The distinction is direction: a human
-   messaging in is fine, marionette autonomously messaging out to arbitrary
-   contacts/services is exactly what rule 5 forbids.
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c "SELECT subject, left(body, 300) AS body_preview FROM emails WHERE body IS NOT NULL ORDER BY received_at DESC LIMIT 1;"
+                            subject                            |                                                                             body_preview                                                                              
+---------------------------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ $18.6M Health Brand + 4.6-star Baking App + 300th The Exit Ep | Inside: 48% repeat customer rate health ecommerce brand, $4.3M annual revenue lego Shopify brand, and a 16-year-old logistics SaaS.\r                                +
+                                                               | \r                                                                                                                                                                   +
+                                                               | Need legal, finance or due diligence services for your next deal? Explore Flippa’s M&A network > (https://l.flippa.com/e3t/Ctc/RJ+113/d2q1V504/VXgH-w31KnqjW2BC0Tq9bK
+(1 row)
 
-**Code conventions:**
-- TypeScript + Hono for the API/app. Python only if genuinely unavoidable (basically never).
-- Match the codebase: named Hono route exports, mounted via `routes.route('/', x)`.
-- **Import extensions depend on the service** — see the strip-types lesson (§7). Compiled-TS
-  services (`api`) use `.js`; strip-types services (`deploy`, `contractor`, `marionette`) use
-  `.ts`.
-- After any api code change: `cd ~/bentley-os && docker compose up -d --build api` (running
-  container keeps serving until the new build succeeds). For known services, prefer the
-  deploy service (`POST /deploy {"service":"api"}`) over raw compose. **Services outside
-  `deploy`'s `SERVICE_HEALTH` map (e.g. `whisper`) must be rebuilt directly via
-  `docker compose up -d --build <service>`** — there's no audited path for them yet.
-- Never ship a change that could take down `/health` without saying so and giving the
-  rollback.
-- **Any process making outbound calls to a service that can legitimately run long (OpenCode
-  agent tasks) must set an explicit timeout via `undici`'s `setGlobalDispatcher`** — Node's
-  fetch default (5 min headers/body timeout) is too short and fails silently as a generic
-  `fetch failed` with no diagnosable cause unless `err.cause` is explicitly captured.
-- **`sed -i` syntax differs by platform.** GNU sed (the box, Ubuntu): `sed -i 's/x/y/' file`.
-  BSD/macOS sed (laptop): `sed -i '' 's/x/y/' file` (empty string arg required for the
-  backup-suffix parameter). Using the wrong form fails silently or errors — always confirm
-  which machine you're on before reaching for `sed -i`.
-- **Never assume a downstream JSON response shape — curl it directly and read the real
-  keys before writing code that parses it.** See §1's Telegram lesson.
-- **HTML rendered from DB fields must be escaped.** The dashboard route escapes all
-  user/data-derived strings (`esc()` helper) before interpolating into the HTML template —
-  email subjects/snippets and event titles are third-party content and must never be
-  injected raw. Any new server-rendered view follows the same rule.
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git add supabase/migrations/0005_email_intelligence.sql apps/api/src/ingestion/gmail.ts && git status
+On branch main
+Your branch is up to date with 'origin/main'.
 
----
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+        modified:   apps/api/src/ingestion/gmail.ts
+        new file:   supabase/migrations/0005_email_intelligence.sql
 
-## 3. System map — who does what
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git commit -m "feat(m3): full-body gmail ingestion + email intelligence schema
 
-One `docker-compose.yml`, two networks (`backend` for services, `monitoring` for ops
-tooling). Every service has exactly one job. **If a new feature doesn't obviously belong to
-one row, stop and decide before coding — don't let it leak into two services.**
+- 0005_email_intelligence.sql: add body/reason/confidence/classified_at to emails + partial idx_emails_unclassified for the classifier queue
+- gmail.ts: fetch format 'full' (metadata mode has no body), extractBody walks MIME tree (prefer text/plain, fallback stripped html), backfills bodies via EXCLUDED.body on re-sync" && git push origin main
+[main 1dcf68a] feat(m3): full-body gmail ingestion + email intelligence schema
+ 2 files changed, 75 insertions(+), 5 deletions(-)
+ create mode 100644 supabase/migrations/0005_email_intelligence.sql
+To github.com:bentleylujero/bentley-os.git
+ ! [rejected]        main -> main (fetch first)
+error: failed to push some refs to 'github.com:bentleylujero/bentley-os.git'
+hint: Updates were rejected because the remote contains work that you do not
+hint: have locally. This is usually caused by another repository pushing to
+hint: the same ref. If you want to integrate the remote changes, use
+hint: 'git pull' before pushing again.
+hint: See the 'Note about fast-forwards' in 'git push --help' for details.
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git fetch origin && git log --oneline origin/main -5 && echo '--- LOCAL ---' && git log --oneline main -5
+remote: Enumerating objects: 5, done.
+remote: Counting objects: 100% (5/5), done.
+remote: Compressing objects: 100% (3/3), done.
+remote: Total 3 (delta 2), reused 0 (delta 0), pack-reused 0 (from 0)
+Unpacking objects: 100% (3/3), 5.79 KiB | 741.00 KiB/s, done.
+From github.com:bentleylujero/bentley-os
+   b905e4b..79bea75  main       -> origin/main
+79bea75 (origin/main, origin/HEAD) Add 'What changed' section to dashboard and improve notifications
+b905e4b migration: 0004_dashboard_state singleton for 'what changed' last-seen tracking
+5955d8d feat(m2): "what changed" dashboard view — deltas since last look
+7cb895d chore: gitignore whisper/Dockerfile.bak
+403c84b Update THE_BIBLE.md with commit details and notes
+--- LOCAL ---
+1dcf68a (HEAD -> main) feat(m3): full-body gmail ingestion + email intelligence schema
+b905e4b migration: 0004_dashboard_state singleton for 'what changed' last-seen tracking
+5955d8d feat(m2): "what changed" dashboard view — deltas since last look
+7cb895d chore: gitignore whisper/Dockerfile.bak
+403c84b Update THE_BIBLE.md with commit details and notes
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git pull --rebase origin main
+From github.com:bentleylujero/bentley-os
+ * branch            main       -> FETCH_HEAD
+Successfully rebased and updated refs/heads/main.
+spaghettios@spaghettios:~/bentley-os$ cd /home/spaghettios/bentley-os && git push origin main && git log --oneline -3
+Enumerating objects: 18, done.
+Counting objects: 100% (18/18), done.
+Delta compression using up to 16 threads
+Compressing objects: 100% (8/8), done.
+Writing objects: 100% (10/10), 2.21 KiB | 2.21 MiB/s, done.
+Total 10 (delta 5), reused 0 (delta 0), pack-reused 0 (from 0)
+remote: Resolving deltas: 100% (5/5), completed with 5 local objects.
+To github.com:bentleylujero/bentley-os.git
+   79bea75..4c39435  main -> main
+4c39435 (HEAD -> main, origin/main, origin/HEAD) feat(m3): full-body gmail ingestion + email intelligence schema
+79bea75 Add 'What changed' section to dashboard and improve notifications
+b905e4b migration: 0004_dashboard_state singleton for 'what changed' last-seen tracking
+spaghettios@spaghettios:~/bentley-os$ cd ~/bentley-os && git fetch origin && git status && git rev-parse HEAD
+On branch main
+Your branch is up to date with 'origin/main'.
 
-| Service | Port | Owns | Does NOT own |
-|---|---|---|---|
-| **postgres** | 5432 (LAN only) | All persisted state — ontology, sync tokens, audit log | Vector search (qdrant) |
-| **qdrant** | 6333 (LAN only) | Vector storage for embeddings (Milestone 3+) | Currently **unused** — nothing writes to it |
-| **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
-| **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
-| **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
-| **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
-| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, **now consumed by `/think`**: system-status questions trigger an in-process `auditSummary(60)` read, injected into the reasoning prompt so Mari narrates real activity instead of claiming blindness** | Ingestion (api's job), deploy (deploy's job) |
-| **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `base` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
-| **cloudflared** | — | Public tunnel, gated on `api` health | — |
-| **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
+nothing to commit, working tree clean
+4c394350e0466581c3ec8dadba5f0829f5d4b2d1
+spaghettios@spaghettios:~/bentley-os$ curl -s -X POST http://127.0.0.1:4000/deploy \
+  -H 'Content-Type: application/json' \
+  -d '{"service":"api"}'
+{"job_id":"1bbc12fd-9cb2-4ee1-8990-10723fa08b93","status":"running","service":"api"}spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c \      docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c \
+"select at, action, outcome, payload->>'job_id' as job_id from audit_log where payload->>'job_id' = '1bbc12fd-9cb2-4ee1-8990-10723fa08b93' order by at;"
+              at               |     action      | outcome |                job_id                
+-------------------------------+-----------------+---------+--------------------------------------
+ 2026-07-12 20:34:21.616813+00 | deploy.enqueued | queued  | 1bbc12fd-9cb2-4ee1-8990-10723fa08b93
+ 2026-07-12 20:34:21.625104+00 | deploy.started  | running | 1bbc12fd-9cb2-4ee1-8990-10723fa08b93
+(2 rows)
 
-**Rule of thumb:** ingestion + read APIs (incl. dashboard views) live in `api`; AI reasoning
-lives in `marionette`; anything touching `docker compose` or git lives in `deploy`. Task
-mentions two of these → split the ticket. **Telegram fits this rule cleanly: it's just
-another HTTP surface on `api`, forwarding to marionette's existing reasoning endpoint — no
-new reasoning logic was added anywhere.** **The dashboard fits it cleanly too: it's a pure
-read view over Postgres in `api`, no reasoning — any future "insight" that requires
-classification/generation belongs in marionette, not the dashboard route.**
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c \
+"select at, action, outcome, payload->>'job_id' as job_id from audit_log where payload->>'job_id' = '1bbc12fd-9cb2-4ee1-8990-10723fa08b93' order by at;"
+              at               |      action      | outcome |                job_id                
+-------------------------------+------------------+---------+--------------------------------------
+ 2026-07-12 20:34:21.616813+00 | deploy.enqueued  | queued  | 1bbc12fd-9cb2-4ee1-8990-10723fa08b93
+ 2026-07-12 20:34:21.625104+00 | deploy.started   | running | 1bbc12fd-9cb2-4ee1-8990-10723fa08b93
+ 2026-07-12 20:34:43.343137+00 | deploy.succeeded | success | 1bbc12fd-9cb2-4ee1-8990-10723fa08b93
+(3 rows)
 
-**Cloudflare/networking gotcha:** `cloudflared` runs in a container on `backend`. It reaches
-app services by container name (`http://api:3000`), host services (SSH) by LAN IP
-(`172.16.30.4:22`). It **cannot** use `localhost` to mean the host.
+spaghettios@spaghettios:~/bentley-os$ curl -s http://127.0.0.1:3000/health && echo && \
+docker compose ps api && \
+docker inspect -f '{{.Created}}' $(docker compose ps -q api)
+{"status":"ok","db":"connected","service":"bentley-os-api"}
+NAME               IMAGE            COMMAND                  SERVICE   CREATED          STATUS                    PORTS
+bentley-os-api-1   bentley-os-api   "docker-entrypoint.s…"   api       24 seconds ago   Up 22 seconds (healthy)   127.0.0.1:3000->3000/tcp
+2026-07-12T20:34:36.599887331Z
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c "\d emails"
+                                Table "public.emails"
+    Column     |           Type           | Collation | Nullable |      Default      
+---------------+--------------------------+-----------+----------+-------------------
+ id            | uuid                     |           | not null | gen_random_uuid()
+ source        | text                     |           | not null | 'gmail'::text
+ source_id     | text                     |           | not null | 
+ thread_id     | text                     |           |          | 
+ sender_id     | uuid                     |           |          | 
+ subject       | text                     |           |          | 
+ snippet       | text                     |           |          | 
+ received_at   | timestamp with time zone |           |          | 
+ is_unread     | boolean                  |           |          | 
+ category      | text                     |           |          | 
+ importance    | smallint                 |           |          | 
+ created_at    | timestamp with time zone |           | not null | now()
+ body          | text                     |           |          | 
+ reason        | text                     |           |          | 
+ confidence    | smallint                 |           |          | 
+ classified_at | timestamp with time zone |           |          | 
+Indexes:
+    "emails_pkey" PRIMARY KEY, btree (id)
+    "emails_source_source_id_key" UNIQUE CONSTRAINT, btree (source, source_id)
+    "idx_emails_received_at" btree (received_at DESC)
+    "idx_emails_sender" btree (sender_id)
+    "idx_emails_unclassified" btree (received_at DESC) WHERE classified_at IS NULL
+Foreign-key constraints:
+    "emails_sender_id_fkey" FOREIGN KEY (sender_id) REFERENCES people(id)
+Referenced by:
+    TABLE "email_recipients" CONSTRAINT "email_recipients_email_id_fkey" FOREIGN KEY (email_id) REFERENCES emails(id) ON DELETE CASCADE
 
-**Same gotcha class:** `contractor` reaches the real systemd OpenCode server via LAN IP
-`172.16.30.4:4096`, never `127.0.0.1` — a service bound to loopback only is unreachable from
-any other container regardless of shared network.
+spaghettios@spaghettios:~/bentley-os$ cat ~/bentley-os/marionette/src/deepseek.ts
+// deepseek.ts — thin client for the DeepSeek chat-completions API.
+// Proven working against api.deepseek.com/chat/completions (JSON mode, deepseek-v4-pro).
+// Model is configurable via MARIONETTE_MODEL so we can test cheaply against
+// deepseek-v4-flash and reserve deepseek-v4-pro for real decisions.
 
----
+const API_URL = 'https://api.deepseek.com/chat/completions';
+const DEFAULT_MODEL = 'deepseek-v4-pro';
+const TIMEOUT_MS = 60_000;
 
-## 4. Current state (living — what actually exists on the box right now)
+export interface ChatMessage {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
 
-Running on the box at `~/bentley-os` (Ubuntu, LAN IP `172.16.30.4`). Absolute path is
-`/home/spaghettios/bentley-os` — always exact, never an alias (see §7 bind-mount lesson).
+export interface DeepSeekResult {
+  content: string;
+  model: string;
+  usage: unknown;
+  finishReason: string | undefined;
+}
 
-**Infrastructure — all up:** api (healthy, 3000), postgres (healthy, 5432), redis (6379),
-qdrant (6333/6334 — reachable, zero collections, unused), cloudflared, dozzle (8080),
-portainer (9000/8000/9443), uptime-kuma (healthy, 3001), deploy (healthy, 4000 /
-127.0.0.1), contractor (healthy, 4100, backend only), marionette (healthy, 4200, backend
-only), whisper (healthy, 4300, backend only, `base` model).
+// Calls DeepSeek in JSON mode. Returns the raw string content (expected to be a
+// JSON object) plus metadata. Throws on network failure, non-2xx, or missing content.
+export async function callDeepSeek(messages: ChatMessage[]): Promise<DeepSeekResult> {
+  const key = process.env.DEEPSEEK_API_KEY;
+  if (!key) throw new Error('DEEPSEEK_API_KEY not set in environment');
 
-**No `embedder` service exists** — confirmed absent. Embeddings deferred to a local model
-(not yet built).
+  const model = process.env.MARIONETTE_MODEL || DEFAULT_MODEL;
 
-**Repo:** private, confirmed via `gh repo view`. `.env`/`client_secret.json`/`token.json`
-confirmed never tracked (checked full git history for leaked values, not just current
-state).
+  const res = await fetch(API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer ' + key,
+    },
+    body: JSON.stringify({
+      model,
+      messages,
+      response_format: { type: 'json_object' },
+      stream: false,
+    }),
+    signal: AbortSignal.timeout(TIMEOUT_MS),
+  });
 
-**Database (Postgres `bentley` db):** ontology schema loaded. Tables: `people`, `emails`,
-`email_recipients`, `calendar_events`, `event_attendees`, `audit_log`, plus `sync_state`
-(from `0002_sync_state.sql`), `actions` (from `0003_actions.sql`, M4 — see below), and
-`dashboard_state` (from `0004_dashboard_state.sql`, M2 "what changed" — see below), all
-applied live.
-- `emails` **already has** unused `category` + `importance` columns — the future classifier
-  writes to these, no new migration needed. Don't recreate them. Live columns confirmed:
-  `id` (uuid), `source`, `source_id`, `thread_id`, `sender_id` (→ people), `subject`,
-  `snippet`, `received_at` (indexed DESC), `is_unread`, `category`, `importance`,
-  `created_at`.
-- `calendar_events` live columns confirmed: `id` (uuid), `source`, `source_id`, `title`,
-  `description`, `location`, `starts_at` (indexed), `ends_at`, `organizer_id` (→ people),
-  `status`, `created_at`, `updated_at`. `organizer_id` and `event_attendees` are now
-  **populated** — see Milestone 1 status below.
-- `audit_log` columns: `id` (bigint identity), `at` (timestamptz, default now()), `actor`,
-  `action`, `target` (nullable), `outcome` (nullable), `payload` (jsonb, default `{}`).
-  Indexes on `action` and `at DESC`. Real rows now exist from deploy activity,
-  `marionette.think`, `marionette.delegate`, and `contractor.execute` — **including rows
-  originating from Telegram messages**, indistinguishable in `audit_log` from any other
-  `/think` caller (the audit trail doesn't currently tag which interface originated a
-  request — see §8). Ingestion (gcal/gmail) does **not** currently write to `audit_log` —
-  stdout only. Open item.
-- **psql inside the container:** use `-h 127.0.0.1` to force TCP+password auth (peer auth
-  fails on the Unix socket):
-```bash
-  docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c "..."
-```
-  **Always pass `-P pager=off`** — the container has no `less` installed, so psql's default
-  pager silently breaks output display.
+  if (!res.ok) {
+    const body = await res.text().catch(() => '<unreadable>');
+    throw new Error(`DeepSeek HTTP ${res.status}: ${body.slice(0, 500)}`);
+  }
 
-**Access / security:**
-- `ssh.bentleyos.me` + `spaghettios.bentleyos.me` behind Cloudflare Access, policy **"Me"**
-  (email = `bentley.lujero@gmail.com`).
-- MFA enforced on the `ssh` app (TOTP via Apple Passwords), configured on that app's own MFA
-  tab, not the global org toggle.
-- Verify Access changes in **incognito** — existing sessions give false "still open"
-  readings.
-- **`Telegram Webhook Bypass` Access Application** — scoped to
-  `spaghettios.bentleyos.me/telegram/webhook` specifically (a narrower path-level app, not a
-  new subdomain), policy Action **Bypass** (not Allow — Bypass skips the auth challenge
-  entirely, which is required since Telegram's webhook POST can't complete a Cloudflare
-  Access login flow). Path-scoped apps take precedence over the broader hostname-level
-  `Bentley OS API` app. **First creation attempt pointed at the wrong hostname
-  (`tele.bentleyos.me`, a nonexistent subdomain) instead of `spaghettios.bentleyos.me` with a
-  path — always screenshot/confirm the exact domain field before saving an Access app.**
-  Auth for this specific endpoint is instead enforced at the application layer: a
-  `secret_token` header check (Telegram's native webhook-secret mechanism) plus a
-  single-user allow-list check against `TELEGRAM_ALLOWED_USER_ID`.
+  const data = await res.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string') {
+    throw new Error('DeepSeek returned no message content');
+  }
 
-**Milestone 2 — "Today" dashboard slice — done, live:**
-- **`apps/api/src/routes/dashboard.ts`** replaced the static status card with a
-  server-rendered dashboard that reads Postgres directly via api's existing `pg` pool
-  (`apps/api/src/db/pool.ts`, `pool.query(text, params)`). Two sections:
-  - **Today** — today's `calendar_events`, computed in Postgres with
-    `AT TIME ZONE 'America/Chicago'` (Bentley's Central tz — explicit to avoid a UTC-midnight
-    bug), `starts_at` within `[today, today+1day)`, ordered ascending. Renders time + title
-    (+ location if present).
-  - **Recent email** — last 15 `emails` by `received_at DESC NULLS LAST`, unread-flagged with
-    a blue dot. Renders time + subject + snippet.
-- **All DB-derived strings escaped** via an `esc()` helper before interpolation (§2 rule —
-  subjects/snippets/titles are third-party content). Time formatting via
-  `toLocaleTimeString('en-US', {timeZone: 'America/Chicago'})`.
-- **Graceful degradation:** both queries run in `Promise.all` inside a try/catch; a DB error
-  renders a muted "couldn't load" note instead of throwing. Empty states ("Nothing on the
-  calendar today." / "No emails yet.") render cleanly. Existing dark styling preserved.
-- **`/health` untouched** — zero risk to the health check / tunnel gating. `routes/index.ts`
-  already imports+mounts `dashboardRoute` (`./dashboard.js`, compiled-TS `.js` convention) —
-  no mount change needed.
-- **Isolation-tested** (throwaway `docker run` on `bentley-os_backend` + `.env`, probed
-  `/health` + `/` body, confirmed real event+email rows render) **before** deploy. Deployed
-  via audited `POST /deploy {"service":"api"}` (job `b3da007c`, confirmed by `deploy.succeeded`
-  audit row, full enqueued→started→succeeded lifecycle, no rollback).
-- **KNOWN COSMETIC GAP:** Gmail marketing snippets carry zero-width padding characters
-  (`‌` etc.) that bleed into the rendered snippet. Harmless; strip/truncate in a later
-  dashboard polish. Still open.
-- **Commit:** `7d79632` (`feat(m2): server-rendered Today dashboard — today's events +
-  recent email from Postgres`).
+  return {
+    content,
+    model,
+    usage: data?.usage,
+    finishReason: data?.choices?.[0]?.finish_reason,
+  };
+}
+spaghettios@spaghettios:~/bentley-os$ cat ~/bentley-os/marionette/src/index.ts
+echo "===== AUDIT ====="
+cat ~/bentley-os/marionette/src/audit.ts
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
+import { Agent, setGlobalDispatcher } from 'undici';
+import { callDeepSeek } from './deepseek.ts';
+import { normalizeDecision } from './schema.ts';
+import { audit } from './audit.ts';
+import { SYSTEM_PROMPT } from './prompt.ts';
+import { createAction, listActions, getAction, approveAction, denyAction } from './actions.ts';
+import { auditSummary } from './audit-read.ts';
+import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts';
 
-**Milestone 2 — "What changed" slice — done, live (M2 now COMPLETE):**
-- **Same file, `apps/api/src/routes/dashboard.ts`** (full rewrite, `5955d8d`) — adds a
-  **"What changed" section that renders FIRST**, above "Today", with a green count badge.
-  Shows emails + calendar_events ingested since the owner last viewed the dashboard.
-- **`dashboard_state` singleton** (migration `0004_dashboard_state.sql`, applied live) holds
-  exactly one fact: `last_seen_at`. Single-row-enforced (`id smallint primary key default 1
-  check (id = 1)`), seeded with one row via `insert ... on conflict (id) do nothing`.
-  **Ontology-correct, not a shadow table** — "since *I* last looked" is a fact about the
-  owner, stored server-side once (chosen deliberately over client-side/localStorage, since
-  it's an owner fact not a browser fact).
-- **"New" is keyed on `created_at` (ingest time), NOT `received_at`/`starts_at`** — an old
-  email newly synced still counts as new to us. Queries: `emails WHERE created_at > $1` and
-  `calendar_events WHERE created_at > $1` (both `LIMIT 20`, `ORDER BY created_at DESC`),
-  `$1 = last_seen_at`.
-- **The GET advances `last_seen_at = now()` fire-and-forget, AFTER computing the deltas** —
-  so the current load shows what's new and the NEXT load resets to "nothing new". Own guard
-  (`void pool.query(...).catch(()=>{})`), never blocks or sinks the response.
-- **Singleton read has its own try/catch** — if it fails, `lastSeen = null`, the delta
-  queries short-circuit to empty (`Promise.resolve({rows:[]})`), and the "What changed"
-  section just shows the empty state while the rest of the page renders. Same
-  graceful-degradation pattern as the "Today" slice. Empty-state copy: "Nothing new since
-  you last looked."
-- **Compact cross-day timestamp** (`fmtStamp` → "Jul 12, 2:40 PM") used in the delta feed,
-  since new rows can span days; the "Today"/"Recent email" sections keep the time-only
-  `fmtTime`. Same `esc()` escaping on all DB-derived strings.
-- **`/health` untouched.** Change stayed in `api` → `.js` imports (`../db/pool.js`), correct
-  for compiled-TS.
-- **Isolation-tested** (throwaway `docker run` on `bentley-os_backend` + `.env`, probed
-  `/health` + `/` body via in-container `node -e fetch(...)` — no curl in `node:22-alpine`;
-  confirmed the "What changed" section renders with a real delta row) **before** deploy.
-  Deployed via audited `POST /deploy {"service":"api"}` (job `63e689a8`, confirmed by
-  `deploy.succeeded` audit row, full enqueued→started→succeeded lifecycle, no rollback).
-  Verified live in-browser at `spaghettios.bentleyos.me` (empty state, as expected — the
-  isolation test + first live load had already advanced `last_seen_at`; correct behavior).
-- **Note:** the isolation test hits the *live* `dashboard_state` via `.env`, so it advances
-  the real `last_seen_at` — expect "nothing new" on the first live load after any isolation
-  test. Not a bug.
-- **Commits:** `5955d8d` (`feat(m2): "what changed" dashboard view — deltas since last
-  look`) + `b905e4b` (`migration: 0004_dashboard_state singleton for 'what changed'
-  last-seen tracking` — the migration file itself, committed after the fact; it had been
-  applied live by hand before being tracked).
+// contractor's /execute can run long (real OpenCode build tasks, multi-step
+// tool use) — raise past undici's default 5-minute headers/body timeout so
+// a legitimately slow build isn't mistaken for a dead connection.
+setGlobalDispatcher(new Agent({
+  headersTimeout: 600_000,
+  bodyTimeout: 600_000,
+}));
 
-**Telegram integration — done end-to-end:**
-- **Bot:** `@spaghettios_bot`, created via BotFather. Token stored only in `.env`
-  (`TELEGRAM_BOT_TOKEN`) — **the first-issued token was pasted in plaintext in chat and was
-  rotated immediately** (same leak pattern flagged for whisper/Postgres/DeepSeek, but this
-  one *was* actually rotated right away — see §8 for the ones still pending).
-- **Route:** `apps/api/src/routes/telegram.ts`, mounted in `routes/index.ts` alongside
-  `opencodeRoute`. `POST /telegram/webhook`:
-  1. Rejects unless `x-telegram-bot-api-secret-token` header matches
-     `TELEGRAM_WEBHOOK_SECRET` (env var, random 32-byte hex, generated via
-     `openssl rand -hex 32`).
-  2. Always returns `200 {ok:true}` to Telegram regardless of downstream outcome (Telegram
-     retries aggressively on non-2xx, which isn't the desired behavior for auth/parse
-     failures — same pattern would apply to any future bot-API integration).
-  3. Silently drops any message where `from.id` doesn't match `TELEGRAM_ALLOWED_USER_ID`
-     (env var, Bentley's numeric Telegram user ID, obtained via `@userinfobot`) — the
-     single-user allow-list.
-  4. Forwards `message.text` to `http://marionette:4200/think` as `{"request": text}`.
-  5. Reads the response as `{decision: {decision, message, reasoning}}` (nested — confirmed
-     by direct curl, see §1) and sends `decision.message` back via Telegram's `sendMessage`
-     API to the original `chat.id`.
-- **Env vars** (in `.env`, flow through automatically via `api`'s existing `env_file: .env`
-  compose directive — no compose changes needed): `TELEGRAM_BOT_TOKEN`,
-  `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_ALLOWED_USER_ID`.
-- **Webhook registration:** `POST https://api.telegram.org/bot<token>/setWebhook` with
-  `url: https://spaghettios.bentleyos.me/telegram/webhook` and
-  `secret_token: <TELEGRAM_WEBHOOK_SECRET>`. Check delivery health any time via
-  `GET https://api.telegram.org/bot<token>/getWebhookInfo` — `last_error_message` is the
-  fastest signal something's broken (was `405 Method Not Allowed` when the URL initially
-  pointed at the wrong hostname `bentleyos.me` instead of `spaghettios.bentleyos.me`, then
-  `302 Found` once the URL was right but Cloudflare Access was still gating the path).
-- **Confirmed working end-to-end with a real task**, not just a trivial reply: message sent
-  from the Telegram app → `api` → `marionette` → `delegate` → `contractor` → OpenCode →
-  real answer (directory listing) → reply delivered back in the Telegram app.
-- **Commit:** `c97ba37` — `feat: Telegram webhook -> marionette, Access-bypassed on
-  /telegram/webhook path`.
+const app = new Hono();
+app.get('/health', (c) => c.json({ status: 'ok' }));
 
-**Milestone 4 — approval-gated action layer (gate slice) — done, live:**
-- **Migration `0003_actions.sql` applied live.** `actions` table — a mutable current-state
-  store for proposed side-effecting operations awaiting human approval. `audit_log` remains
-  the append-only ledger (`target` = the action's id); the two do not overlap in role.
-  Columns: `id` (bigint identity), `kind` (text, currently only `commit_deploy`), `status`
-  (text default `proposed`: `proposed|approved|executing|succeeded|failed|denied`),
-  `proposed_by` (text, `marionette`), `intent` (jsonb — machine-executable, e.g.
-  `{service, commit_message}`), `briefing` (text, dormant until steering lands), `result`
-  (jsonb, filled on execution), `supersedes_id` (bigint, lineage — dormant), `created_at`,
-  `updated_at`. Indexes on `status` and `created_at desc`.
-- **Live rows:** id=1 (`commit_deploy`, succeeded), id=2 (denied), id=3 (succeeded) — all
-  terminal. Next new action = id=4.
-- **`marionette/src/actions.ts`** owns all state transitions (reads Postgres directly, same
-  `postgres(DATABASE_URL, {max:2, idle_timeout:20})` pattern as `audit.ts`). Lifecycle:
-  `proposed → approved → executing → succeeded/failed`, or `proposed → denied`.
-  - **Strict guards:** approve/deny only affect a row `where status='proposed'` — a
-    double-tap / retry / race on the second call updates zero rows and reports "not
-    actionable" (surfaces as HTTP 409). No double-execute.
-  - **Fire-and-report:** `approveAction` flips the row to `approved`, then kicks
-    `executeAction` **without awaiting it** (`void executeAction(...)`) and returns a fast
-    ack. The detached execute owns its own try/catch and **always** writes a terminal
-    transition — a silently-stuck `executing` row is the one failure mode this design
-    forbids. The terminal-failure catch marks `failed` even if the DB write itself throws.
-  - **Execute reads deploy's raw response, does not assume its shape** (§1 lesson). Terminal
-    state = `succeeded` if `res.ok` else `failed`.
-- **5 marionette routes** (in `marionette/src/index.ts`, mounted between `/audit/summary` and
-  the action-lifecycle comment block): `POST /actions` (propose → 201), `GET /actions`
-  (optional `?status=`), `GET /actions/:id`, `POST /actions/:id/approve` (→ fires execute,
-  409 on non-proposed), `POST /actions/:id/deny` (→ terminal, 409 on non-proposed).
-- **Telegram Approve/Deny flow** (`apps/api/src/routes/telegram.ts` — significantly expanded
-  from the message-only version):
-  - The webhook now handles **both** `message` updates (text → `/think`, unchanged) **and**
-    `callback_query` updates (button taps). Button `callback_data` is `approve:<id>` /
-    `deny:<id>`, parsed defensively; same single-user allow-list gate as messages.
-  - On a tap it `answerCallbackQuery` first (clears the spinner) **before** hitting
-    marionette, then POSTs `/actions/:id/approve|deny` and reports the outcome in-chat
-    (incl. "already handled" on 409).
-  - **`POST /telegram/surface/:id`** — internal relay: reads the action from marionette (the
-    lifecycle owner), and if it's still `proposed`, pushes it to the allow-listed chat with
-    an inline Approve/Deny keyboard. Optional body `{chat_id}`; defaults to the allow-listed
-    user (whose chat id == user id in a DM).
-- **M4 Task A — async-completion push — DONE** (`80298a4`/`8ac171c`). Previously
-  `executeAction` treated deploy's 202 *accept* as terminal success; now the true-completion
-  signal is surfaced. Deploy's job is polled to real finish (reading `deploy.succeeded` /
-  rollback in `audit_log`, the authoritative ledger — not the 202) and a ✅/❌ is pushed to
-  Telegram via a thin `api` notify endpoint (marionette can't message out itself — §9). So a
-  Telegram Approve tap now gets a follow-up confirming the deploy *actually* finished
-  healthy, not just that it was accepted.
-- **Still unwired — M4 Task B:** the git-commit half of `commit_deploy` — execute currently
-  just deploys from current repo state; contractor doesn't commit first yet
-  (`TODO(steering/commit)` in `actions.ts`).
-- **Commits:** `3a66aef` (propose/approve/deny/execute lifecycle) + `b13c5ce` (Telegram
-  buttons + surface endpoint) + `80298a4`/`8ac171c` (async completion → Telegram push).
+// Mari's sight over her own ledger — read-only view of audit_log.
+app.get('/audit/summary', async (c) => {
+  const w = Number(c.req.query('window')) || 60;
+  try {
+    const summary = await auditSummary(w);
+    return c.json(summary);
+  } catch (err) {
+    console.error('[audit/summary] failed:', err);
+    return c.json({ error: 'audit read failed' }, 500);
+  }
+});
+// POST /think  { "request": "<what you want marionette to reason about>" }
+// Calls DeepSeek, returns a structured Decision, audits the call either way.
+// If the decision is "delegate", hands the spec to contractor and folds the
+// result back into the response before returning.
+app.post('/think', async (c) => {
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'body must be valid JSON' }, 400);
+  }
+  const request = body?.request;
+  if (typeof request !== 'string' || request.trim() === '') {
+    return c.json({ error: 'missing "request" string in body' }, 400);
+  }
+  let decision;
+  try {
+    // Mari's sight: if this reads as a system-activity question, fetch her own
+    // audit ledger and inject a compact summary as a second system turn. The
+    // prompt (prompt.ts) tells her to narrate from a SYSTEM ACTIVITY block when
+    // present. Keyword-gated so coding/other requests are not polluted with it.
+    const messages = [
+      { role: 'system' as const, content: SYSTEM_PROMPT },
+    ];
+    if (isSystemStatusQuestion(request)) {
+      try {
+        const summary = await auditSummary(60);
+        messages.push({ role: 'system' as const, content: formatAuditForPrompt(summary) });
+      } catch (sightErr) {
+        console.error('[think] audit-sight fetch failed:', sightErr);
+      }
+    }
+    messages.push({ role: 'user' as const, content: request });
+    const result = await callDeepSeek(messages);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.content);
+    } catch {
+      parsed = { decision: 'reply', message: result.content, reasoning: '' };
+    }
+    decision = normalizeDecision(parsed);
+    await audit({
+      action: 'marionette.think',
+      outcome: 'success',
+      payload: {
+        request,
+        decision,
+        model: result.model,
+        usage: result.usage,
+        finish_reason: result.finishReason,
+      },
+    });
+  } catch (err: any) {
+    const message = err?.message || String(err);
+    // Failures are first-class audit events — an orchestrator whose failures are
+    // invisible is worse than useless.
+    await audit({
+      action: 'marionette.think',
+      outcome: 'error',
+      payload: { request, error: message },
+    });
+    return c.json({ error: 'think failed', detail: message }, 502);
+  }
+  if (decision.decision !== 'delegate') {
+    return c.json({ decision });
+  }
+  // Delegate branch: hand the spec to contractor, fold its result back in.
+  // A failed delegation is still a successful /think — we return what we
+  // know rather than 502ing a request that reasoned correctly.
+  try {
+    const res = await fetch('http://contractor:4100/execute', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ spec: decision.spec }),
+    });
+    const contractorResult = await res.json();
+    await audit({
+      action: 'marionette.delegate',
+      outcome: res.ok ? 'success' : 'error',
+      target: decision.target_service,
+      payload: { spec: decision.spec, status: res.status, result: contractorResult },
+    });
+    return c.json({ decision, delegation: { status: res.status, result: contractorResult } });
+  } catch (err: any) {
+    const message = err?.message || String(err);
+    const cause = err?.cause?.message || err?.cause || null;
+    await audit({
+      action: 'marionette.delegate',
+      outcome: 'error',
+      target: decision.target_service,
+      payload: { spec: decision.spec, error: message, cause },
+    });
+    return c.json({ decision, delegation: { error: message, cause } });
+  }
+});
 
-**Marionette audit-sight — read endpoint AND `/think` integration both done, live:**
-- **`marionette/src/audit-read.ts`** — Mari's read-only "sight" over her own ledger. The
-  read side of `audit.ts`: no new state, no shadow table, only SELECTs from `audit_log`
-  (§2/§9: the one authoritative ledger). Same connection pattern as `audit.ts`.
-- **`auditSummary(windowMinutes=60, recentLimit=15)`** → `{window_minutes, total,
-  by_action[], recent[], failures[]}` in one call (four parallel queries: grouped counts by
-  action+outcome, recent rows, failure rows, total). **Genuine failure = `outcome = 'error'`
-  ONLY** — lifecycle outcomes `queued`/`running` are NOT failures (a prior `outcome <>
-  'success'` filter wrongly flagged in-progress rows; that bug is fixed). `bigint id`
-  coerced to a real number via `coerceRow` (postgres serializes it as a string).
-- **Route:** `GET /audit/summary?window=<min>` in `marionette/src/index.ts` (mounted between
-  `/health` and `/think`). Deployed live via audited `POST /deploy` (job `e44b02f7`,
-  confirmed by `deploy.succeeded` row), verified on the live `bentley-os-marionette-1`
-  container.
-- **`/think` now consumes audit-sight — the payoff, done.** A Telegram message like "what
-  have you done today?" or "anything failing?" now returns a real narrated summary of
-  `audit_log` activity (deploys, think calls, action lifecycle, failures), not the old
-  canned "no data" reply. **Design fork resolved: (B) pre-fetch injection**, chosen over
-  (A) a tool-call loop — because `deepseek.ts`'s `callDeepSeek` hardcodes
-  `response_format: json_object`, sends no `tools` array, and returns only `.content` (no
-  `tool_calls` surfaced), so a tool-call loop would have meant a whole second code path and
-  a second model call to reconcile with the forced-JSON decision contract. (B) is one call,
-  `callDeepSeek`/`normalizeDecision` left untouched.
-- **`marionette/src/system-sight.ts`** (new) — the bridge between the raw read
-  (`audit-read.ts`) and the reasoning (`/think`). Two pure functions, no DB access of its
-  own:
-  - `isSystemStatusQuestion(request)` — a **keyword gate** (lowercased substring match
-    against a hand-picked phrase list: "what have you done", "done today", "system status",
-    "anything failing", "did the deploy", etc.). Conservative by design: a miss just falls
-    back to the honest "I can't see that" reply — never a wrong answer, only a missed one.
-    Gate does NOT fire on coding/other requests, so they're not polluted with audit noise
-    (verified: "what is 2+2?" returns a plain answer).
-  - `formatAuditForPrompt(summary)` — turns `auditSummary`'s structured output into a
-    **compact** text block (counts by action/outcome + trimmed one-liners per recent/failure
-    row, pulling only useful crumbs like `req`/`job_id`/`error` out of `payload` — NOT the
-    raw jsonb, which is big and noisy).
-- **`/think` wiring** (`marionette/src/index.ts`): builds a `messages` array; if
-  `isSystemStatusQuestion(request)`, does an **in-process** `await auditSummary(60)` (not an
-  HTTP call to its own `/audit/summary` — the function is right there in-process), formats
-  it, and pushes it as a second `system` message before the user turn. **Sight-read failure
-  degrades gracefully** — a `try/catch` around the fetch logs and falls through to the
-  no-sight path rather than sinking the whole `/think`. `callDeepSeek(messages)` then flows
-  into the unchanged `JSON.parse` → `normalizeDecision` path; status questions resolve to
-  `reply`, returning before the delegate branch.
-- **`prompt.ts` widened** to match the new capability (§ rule: widen the prompt with the
-  capability, never ahead of it). Old blanket "you are NOT the source of truth, never
-  present yourself as knowing the state of the homelab" narrowed to the owner's *data*
-  (email/calendar/docs); added a `WHAT YOU CAN SEE NOW` block telling Mari she CAN observe
-  her own audit ledger, and when a `SYSTEM ACTIVITY` block is present she must narrate from
-  it as fact (when absent, fall back to honest limits — don't invent activity).
-- **Verified end-to-end from the actual Telegram app**, not just a container probe: real
-  "what have you done today?" message → narrated reply naming real timestamped events incl.
-  the self-deploy that shipped this very change. Second phrasing ("anything failing?", a
-  different keyword) confirmed against the production container post-deploy.
-- **Commits:** `27f18b3` (`feat(marionette): /think consumes audit-sight — narrates real
-  system state`) on top of `9f3f054` (`feat(marionette): audit-sight read endpoint`).
+// ── Action lifecycle (Milestone 4, gate slice) ──────────────────────────────
+// marionette owns the actions table's state transitions. api/Telegram relay to
+// these endpoints; they do no reasoning of their own. Every transition audits
+// with target = the action id.
+spaghettios@spaghettios:~/bentley-os$ cat > ~/bentley-os/marionette/src/classify.ts << 'EOF'
+// classify.ts — the Clair triage engine. Reads unclassified emails, judges
+// CONSEQUENCE (what happens if this is ignored?), writes importance/category/
+// reason/confidence + classified_at. Two-pass: Pass 1 judges from subject+
+// snippet; Pass 2 re-judges against the full body when Pass 1 is low-confidence
+// or flags high stakes. Uncertainty triggers MORE scrutiny, never silent demotion.
+//
+// Reasoning lives HERE (marionette), never in api's dashboard route. The
+// dashboard only reads the columns this writes.
 
-**Whisper — self-hosted speech-to-text, done end-to-end:**
-- **Server:** `~/bentley-os/whisper/Dockerfile` builds `whisper.cpp` from source
-  (`ggerganov/whisper.cpp`, `whisper-server` target) and bundles a `ggml-*.bin` model.
-  Currently **`ggml-base.bin`** (74MB) — reverted from `ggml-small.en.bin` (487MB) after
-  small.en proved too slow for daily push-to-talk use on CPU-only inference. `CMD` runs
-  `whisper-server -m models/ggml-base.bin --host 0.0.0.0 --port 4300`.
-- **API contract (confirmed via direct testing, not assumed):** `POST /inference`,
-  multipart form, field `file` (audio, wav tested at 16kHz mono), optional
-  `response_format=json` → `{"text": " transcribed words\n"}`. No auth of its own — auth is
-  entirely Cloudflare Access in front of it.
-- **Public route:** `whisper.bentleyos.me` → `http://whisper:4300` (Cloudflare dashboard,
-  token-based tunnel — no local `cloudflared` config file exists on the box; routes/policies
-  live entirely in the Cloudflare dashboard, not the repo).
-- **Access policies on the `whisper` app — two, both required:**
-  1. `Me - Self-Hosted Apps` (renamed, ID `63930902-c6ba-4551-bd30-388383443ac0`) — email
-     gate (`bentley.lujero@gmail.com`) for browser access, shared with `ssh` and
-     `Bentley OS API`.
-  2. **`Whisper Service Token`** (Action: **Service Auth**, Include: Service Token
-     `whisper-laptop`) — added separately, specifically for the Hammerspoon client. **A
-     generated service token is NOT automatically valid against an app** — it must be
-     explicitly included in a Service Auth policy on that specific app, or every request
-     gets bounced to the login redirect with `service_token_status:false` in the JWT meta,
-     even though the token itself is valid. Confirmed the hard way: token worked fine at
-     generation time, still got rejected until this policy existed.
-- **Service token:** `whisper-laptop`, non-expiring, generated for the Hammerspoon
-  push-to-talk client. **Exposed in plaintext in chat multiple times across sessions —
-  rotation still not done** (see §8).
-- **Hammerspoon client (laptop-side, NOT in this repo — lives at `~/.hammerspoon/` on
-  Bentley's MacBook):**
-  - `~/.hammerspoon/whisper_secrets.lua` — holds the Cloudflare Client ID/Secret, `require`d
-    by `init.lua`, kept separate so the token isn't inline in logic that might get pasted
-    elsewhere.
-  - `~/.hammerspoon/init.lua` — push-to-talk: holding **right Command** (keycode 54, watched
-    via `hs.eventtap` `flagsChanged`, distinct from left Command's keycode 55) starts an
-    `hs.task` running `sox -d -r 16000 -c 1 <tmp wav>`; releasing stops the task, waits
-    300ms, then `hs.task` runs `curl` against `whisper.bentleyos.me/inference`, decodes the
-    JSON response, sets the pasteboard, and sends Cmd+V.
-  - Requires **Accessibility** permission granted to Hammerspoon (System Settings → Privacy
-    & Security) — without it, `hs.eventtap:start()` fails silently at startup with
-    `Unable to create eventtap. Is Accessibility enabled?` in the Hammerspoon Console, and
-    the hotkey simply never fires. No crash, no obvious error to the user — check the
-    Console, not assumptions, when a Hammerspoon hotkey "does nothing."
-  - `hs.task` uses absolute binary paths (`/opt/homebrew/bin/sox`, `/usr/bin/curl`) — it does
-    not inherit the shell's `$PATH`.
-  - Confirmed working end-to-end: hold key → speak → release → real transcribed text pasted
-    at cursor.
-- **GPU acceleration — not yet explored.** Box has an AMD Radeon RX 5700 XT (confirmed via
-  `lspci`), currently running whisper on CPU only. `whisper.cpp` supports a Vulkan backend
-  (broader compatibility) or ROCm/HIP (better perf, heavier setup — kernel driver + device
-  passthrough + different cmake target) for AMD acceleration. Scoped as a future task, not
-  started.
+import postgres from 'postgres';
+import { callDeepSeek, type ChatMessage } from './deepseek.ts';
+import { audit } from './audit.ts';
 
-**Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
-`git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `b905e4b`, working tree clean.
-Recent commits (newest first): `b905e4b` (migration: 0004_dashboard_state singleton for
-'what changed' last-seen tracking) → `5955d8d` (feat(m2): "what changed" dashboard view —
-deltas since last look) → `7cb895d` (chore: gitignore whisper/Dockerfile.bak) → `403c84b`
-(Update THE_BIBLE.md with commit details and notes) → `ef41370` (Update THE_BIBLE.md to
-remove obsolete information) → `8ac171c` (Enhance deploy action completion and Telegram
-notifications) → `80298a4` (feat(m4): async deploy-completion — poll audit_log to true
-finish, push ✅/❌ to Telegram) → `14c063a` (Revise THE_BIBLE.md for project updates and
-milestones) → `7d79632` (feat(m2): server-rendered Today dashboard) → `27f18b3`
-(feat(marionette): /think consumes audit-sight) → `9f3f054` (feat(marionette): audit-sight
-read endpoint) → `b13c5ce` (feat(m4): Telegram approve/deny buttons) → `3a66aef` (feat(m4):
-approval-gated action layer) → `52c3f72` (fix(deploy): abort rollback for unscoped service).
+const sql = postgres(process.env.DATABASE_URL || '', {
+  max: 2,
+  idle_timeout: 20,
+});
 
-**Parked branch — `slice1-image-rollback` (`0cf613e`), UNMERGED / UNVERIFIED. Do NOT build
-on it.** An unmerged refactor of `deploy/src/runner.ts` (88+/30−) changing rollback from
-git-checkout to Docker-image-preservation. Pushed to its own origin branch, NOT on `main`,
-NOT isolation-tested, NOT confirmed running. Testing it means deliberately forcing a failed
-deploy — a future dedicated session. Until then, `main`'s deploy still uses the
-scoped-git-checkout rollback (`52c3f72`).
+// Pass 2 triggers: Pass 1 confidence below this, OR importance at/above the
+// high-stakes cutoff (a "you're being evicted" first-glance judgement deserves
+// a full-body second look before we commit it).
+const LOW_CONFIDENCE = 60;
+const HIGH_STAKES = 70;
 
-**Deploy service** (`~/bentley-os/deploy/`): serialized queue, reads last-good commit from
-`audit_log` → build → `up -d` → poll real `/health` over `backend` → success or
-auto-rollback, every step audited. `SERVICE_HEALTH` map covers `api`, `contractor`,
-`marionette` — **not `whisper`**, which must be rebuilt directly via
-`docker compose up -d --build whisper` until it's added to the map. Deploys for covered
-services go through `POST /deploy` — never raw compose for those. Most recently used for the
-M2 dashboard deploy (job `b3da007c`), isolation-tested first, confirmed via `audit_log`'s
-`deploy.succeeded` row rather than trusting the immediate `POST /deploy` response.
-- **Rollback-scope bug — RESOLVED** (`52c3f72`). Previously `git checkout <commit> -- .`
-  reverted the entire repo tree. Now an unscoped/unknown service **aborts** with an audited
-  `deploy.rollback.failed` row instead of running any repo-wide checkout; `SERVICE_PATH`/
-  `SERVICE_HEALTH` both cover only api/contractor/marionette. Isolation-tested (bogus service
-  rejected). **This unblocks Milestones 4 and 5.**
+const CATEGORIES = ['action', 'financial', 'personal', 'work', 'newsletter', 'receipt', 'other'] as const;
+type Category = typeof CATEGORIES[number];
 
-**Contractor service** (`~/bentley-os/contractor/`): the coding/build layer. `POST /execute`
-runs a real `@opencode-ai/sdk` session against the systemd OpenCode server (LAN IP
-`172.16.30.4:4096`), audited (`actor='contractor'`). `WORKDIR /app` (outside the bind
-mount). Reached as `http://contractor:4100`. Now driven both by direct API testing and live
-Telegram-originated tasks — no difference in behavior, since Telegram is purely an inbound
-trigger for the same `/think` → `delegate` path.
-- **`undici.setGlobalDispatcher`** set at process start: `headersTimeout`/`bodyTimeout` =
-  10 min. Node's fetch default (5 min) was killing real multi-step OpenCode tasks before
-  they finished — a trivial "reply with pong" prompt (no tool calls) always worked, masking
-  the bug until a real file-write task was tested.
-- Catch block now captures `err.cause` (not just `err.message`) into the audit payload —
-  `"fetch failed"` alone gave zero diagnostic signal; `err.cause` revealed
-  `HeadersTimeoutError` immediately.
-- Note: `apps/api/src/routes/opencode.ts` (proxy to the real third-party systemd OpenCode
-  server) was **deliberately left unrenamed** — "opencode" there is the actual tool
-  (`@opencode-ai/sdk`, `opencode.json`), not this container. When the container reaches
-  parity, repoint the proxy's `baseUrl` to `http://contractor:4100` in the *same* deploy that
-  retires the systemd unit.
+interface Classification {
+  importance: number;   // 0..100, sort key — pure consequence
+  category: Category;
+  reason: string;       // the one-line "why this matters" — the whole game
+  confidence: number;   // 0..100, self-assessed certainty; low => Pass 2
+}
 
-**Marionette service** (`~/bentley-os/marionette/`): the orchestrator, DeepSeek reasoning.
-- `POST /think {"request":"..."}` → DeepSeek (`deepseek-v4-pro`, JSON mode) → structured
-  `Decision {decision, message, reasoning}` → audited (`actor='marionette'`,
-  `action='marionette.think'`) → returned. **Response envelope is
-  `{"decision": {"decision": ..., "message": ..., "reasoning": ...}}`** — nested one level,
-  not flat. Confirmed by direct curl against `http://marionette:4200/think` from inside the
-  `backend` network; any new client (Telegram included) must read `.decision.message`, not
-  `.message`.
-- `delegate` branch — genuinely verified, not just claimed. `schema.ts` allowlists
-  `target_service='contractor'` only (`DELEGATABLE_SERVICES = ['contractor']` — model can't
-  invent a target). `index.ts` POSTs to `http://contractor:4100/execute`, audits
-  `marionette.delegate`. Same `undici` timeout fix applied here (marionette's own fetch to
-  contractor had no timeout override before — it would just hang indefinitely on a slow
-  contractor call).
-- **Confirmed end-to-end with a real task, twice now**: once via direct API testing (file
-  written to disk, verified with `cat`), and again via a live Telegram-originated request
-  (directory listing, delivered back through `sendMessage`).
-- Failed delegation still returns 200 with the decision + error, never 502s a reasoning
-  success.
-- `MARIONETTE_MODEL` env var (default `deepseek-v4-pro`; set `deepseek-v4-flash` for cheap
-  iteration).
-- **Can now:** narrate her own system activity. `/think` consumes audit-sight — a
-  keyword-gated in-process `auditSummary(60)` read is injected into the reasoning prompt for
-  system-status questions, so Mari answers "what have you done today?" / "anything failing?"
-  from the real `audit_log` (see the audit-sight subsection above). This is *self*-sight over
-  the ledger, NOT general memory — see the limit below.
-- **Still cannot:** no cross-message conversation memory (Qdrant unused, `/think` otherwise
-  stateless — each Telegram message is a fresh request; audit-sight lets her see the *ledger*
-  but not recall what the owner said two messages ago — "the file I just wrote" still means
-  nothing), no delegation targets beyond contractor, no *autonomous* production-zone write
-  actions — the M4 approval-gate layer IS built (propose→approve→deny→execute + Telegram
-  buttons, see M4 subsection), but contractor's own writes remain sandbox-only and nothing
-  auto-commits/auto-deploys from a delegated task without the human approval tap.
+interface EmailRow {
+  id: string;
+  subject: string | null;
+  snippet: string | null;
+  body: string | null;
+}
 
-**OpenCode permission policy** (`~/bentley-os/opencode.json`) — **decided and live**:
-- Bentley doesn't use OpenCode interactively; only marionette/contractor call it, always
-  headlessly via the API.
-- **`"ask"` must never appear anywhere in this config.** It means "pause and show a
-  confirmation prompt in the attached terminal" — headless API calls have no terminal to
-  answer it, so `"ask"` doesn't degrade gracefully, it hangs indefinitely (confirmed: a
-  file-write to `/tmp` hung for the full 10-minute timeout before `external_directory`'s
-  default `"ask"` was identified as the cause and changed to `"allow"`).
-- Current policy: `"*": "allow"`, `external_directory: "allow"`, `doom_loop: "allow"` — full
-  build/filesystem autonomy, matching the sandbox-zone design (§0, §9). `bash` allows
-  everything except a short deny-list of catastrophic `rm -rf` patterns
-  (`rm -rf /`, `rm -rf ~`, `rm -rf /home*`, etc.) — cheap insurance against accidental
-  deletion, acknowledged as a low-probability event.
-- No email/messaging/external-comms tool exists in OpenCode's default toolset, so external
-  comms are blocked by omission today. **If an MCP connector for email/messaging is ever
-  wired to contractor, it must ship behind an explicit deny in this policy — never rely on
-  omission again once the capability exists.** This includes Telegram itself — contractor
-  has no Telegram-sending capability of its own; only the `api` route's `sendMessage` call
-  (a fixed, single-recipient reply-to-sender mechanism, not a general messaging tool) exists.
-- Config is loaded at OpenCode startup, not per-request — `sudo systemctl restart opencode`
-  required after any change to this file.
+const SYSTEM = `You are Clair, a priority-triage engine for one person's inbox.
+Your ONLY job: judge CONSEQUENCE. Ask "what happens to this person if they never see this email?"
+That question — not the sender, not the topic, not human-vs-automated — sets importance.
 
-**Ingestion — scheduled, running in prod:**
-- `apps/api/src/ingestion/scheduler.ts`: `node-cron` job, every 5 minutes, runs
-  `runGcalSync()` then `runGmailSync()` sequentially, guarded against overlap with a
-  `running` flag.
-- OAuth secrets (`client_secret.json`, `token.json`) bind-mounted read-only into the live
-  `api` container at `/secrets/` (exact absolute host path, per §7 bind-mount lesson).
-- Confirmed live: first tick after deploy ran clean, both syncs incremental
-  (`fetched: 0, upserted: 0` — correct, since the isolation test had just consumed the
-  delta). The M2 dashboard reads the rows this cron lands.
+An automated "your account is overdrawn" or "your lease is being terminated" outranks a
+friend's "hey what's up". A newsletter, however interesting, is low consequence.
 
-**Milestone 1 gap — resolved.** `event_attendees` and `organizer_id` population is
-**verified live** (organizer_id populated on real rows, event_attendees confirmed via a
-real test event). Milestone 1 is complete; see §6.
+Rules:
+- importance is 0..100, a pure consequence score. 80-100: real harm/cost/deadline if missed.
+  40-79: matters but not urgent. 0-39: safe to ignore (newsletters, receipts, noise).
+- category is EXACTLY one of: action, financial, personal, work, newsletter, receipt, other.
+- reason is ONE plain-language sentence naming the concrete consequence of ignoring it.
+  Not a summary — the stakes. "Miss this and your flight rebooking window closes tonight."
+- confidence is 0..100: how sure you are given ONLY what you were shown. If subject+snippet
+  are too thin to judge stakes, say so with LOW confidence — do not guess high.
 
----
+Respond ONLY with a JSON object: {"importance": <int>, "category": "<cat>", "reason": "<sentence>", "confidence": <int>}`;
 
-## 5. Data model
+function passUserMsg(email: EmailRow, includeBody: boolean): string {
+  const parts = [
+    `Subject: ${email.subject ?? '(none)'}`,
+    `Snippet: ${email.snippet ?? '(none)'}`,
+  ];
+  if (includeBody) {
+    // Cap body — full marketing emails can be huge; the stakes live near the top.
+    const body = (email.body ?? '').slice(0, 4000);
+    parts.push(`Full body:\n${body || '(empty)'}`);
+  }
+  return parts.join('\n');
+}
 
-```
-people ──< email_recipients >── emails
-people ──< event_attendees  >── calendar_events
+function coerce(raw: unknown): Classification {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  let importance = Math.round(Number(o.importance));
+  if (!Number.isFinite(importance)) importance = 0;
+  importance = Math.max(0, Math.min(100, importance));
 
-audit_log    (append-only ledger: every deploy action, every AI action — reasoning +
-              delegation + action lifecycle — regardless of interface: API call or Telegram)
-sync_state   (source PK, sync_token, updated_at — incremental ingestion cursors)
-actions      (M4: mutable current-state store for proposed side-effecting ops awaiting
-              approval; audit_log stays the ledger, target = actions.id)
-dashboard_state (M2 "what changed": singleton, one row id=1, holds last_seen_at — the one
-              fact of when the owner last viewed the dashboard; not a shadow table)
-```
+  let confidence = Math.round(Number(o.confidence));
+  if (!Number.isFinite(confidence)) confidence = 0;
+  confidence = Math.max(0, Math.min(100, confidence));
 
-The M2 dashboard reads `calendar_events` + `emails`; its only owned state is the
-`dashboard_state` singleton (one owner fact: last-seen time). Delta computation is a read
-over existing ontology rows keyed on `created_at`.
+  let category = String(o.category ?? 'other') as Category;
+  if (!CATEGORIES.includes(category)) category = 'other';
 
----
+  const reason = typeof o.reason === 'string' ? o.reason.slice(0, 500) : '';
 
-## 6. Roadmap (ordered by what unblocks what)
+  return { importance, category, reason, confidence };
+}
 
-**Milestone 0 — Clean the base: ✅ Done.** Embedder removed, ontology schema loaded,
-Cloudflare Access email-locked + MFA on.
+async function classifyOne(email: EmailRow): Promise<{ result: Classification; passes: number }> {
+  // Pass 1 — subject + snippet only.
+  const p1msgs: ChatMessage[] = [
+    { role: 'system', content: SYSTEM },
+    { role: 'user', content: passUserMsg(email, false) },
+  ];
+  const r1 = await callDeepSeek(p1msgs);
+  const c1 = coerce(JSON.parse(r1.content));
 
-**Orchestrator build-order (precedes Milestone 1's remaining work): ✅ Done, and now
-actually proven — including from a live external interface.**
-- Deploy service — ✅ built, rollback-tested + scope bug FIXED (`52c3f72`, see §4).
-- Contractor (OpenCode container) — ✅ built, `/execute` wired to real OpenCode, live in
-  prod, undici-timeout-hardened.
-- Marionette — ✅ built, `/think` reasoning + `delegate` branch to contractor. The
-  build-machine keystone — marionette can direct contractor to write code, not just reason
-  about it — verified against real multi-step tool-call tasks both via direct API testing
-  and via a live Telegram-originated request.
-- **Telegram interface — ✅ built and verified end-to-end.** First working command channel
-  to marionette outside of direct API calls. Single-user allow-listed, webhook-secret
-  gated, Cloudflare-Access-bypassed on its specific path only.
-- Wolverine (fixer) — not built.
-- Local Whisper — ✅ done (self-hosted `whisper.cpp`, `base` model, Cloudflare
-  Access-gated, Hammerspoon push-to-talk client on laptop). Local embeddings — not built.
+  const needsPass2 =
+    (c1.confidence < LOW_CONFIDENCE || c1.importance >= HIGH_STAKES) &&
+    (email.body != null && email.body.trim() !== '');
 
-**Milestone 1 — Data in (Gmail + Calendar): ✅ Done.**
-| Step | Status |
-|---|---|
-| `sync_state` migration | ✅ applied |
-| `gcal.ts` DB writes + token wiring | ✅ isolation-tested |
-| `gmail.ts` (same pattern) | ✅ isolation-tested |
-| Rebuild api image with `googleapis` | ✅ done |
-| node-cron schedule in api | ✅ done, live in prod |
-| Wire `gcal.ts` + `gmail.ts` into running api | ✅ done, live in prod |
-| `event_attendees` / `organizer_id` population | ✅ verified live |
+  if (!needsPass2) {
+    return { result: c1, passes: 1 };
+  }
 
-- **Done when:** new events + emails land in Postgres automatically, with provenance, and
-  `event_attendees`/`organizer_id` are populated. **All conditions met.**
+  // Pass 2 — re-judge against the full body. This is the authoritative answer.
+  const p2msgs: ChatMessage[] = [
+    { role: 'system', content: SYSTEM },
+    { role: 'user', content: passUserMsg(email, true) },
+  ];
+  const r2 = await callDeepSeek(p2msgs);
+  const c2 = coerce(JSON.parse(r2.content));
+  return { result: c2, passes: 2 };
+}
 
-**Milestone 2 — Insight out. ✅ Done.**
-- ✅ **"Today" slice shipped** (`7d79632`): `apps/api/src/routes/dashboard.ts` replaced the
-  static status card with a server-rendered dashboard reading `calendar_events` / `emails`
-  directly via api's `pg` pool. "Today" = today's events (Central tz, ordered); "Recent
-  email" = last 15 by `received_at`, unread-flagged. DB-field escaping, graceful empty/error
-  states, `/health` untouched. Isolation-tested, deployed via audited `POST /deploy` (job
-  `b3da007c`, confirmed `deploy.succeeded`). See §4.
-- ✅ **"What changed" slice shipped** (`5955d8d` + migration `0004`, `b905e4b`): renders
-  FIRST, above Today, with a count badge; shows emails/events ingested since the owner last
-  looked, keyed on `created_at`, backed by the `dashboard_state` singleton (`last_seen_at`,
-  advanced fire-and-forget after computing deltas). Isolation-tested, deployed via audited
-  `POST /deploy` (job `63e689a8`, confirmed `deploy.succeeded`), verified live. See §4.
-- ⏳ **Snippet polish** (optional, cosmetic) — strip Gmail zero-width padding (`‌`) from
-  rendered snippets. Still open; not milestone-blocking.
-- **Done when:** the dashboard shows today's real events + email at a glance AND a "what
-  changed" view surfaces recent deltas. **Both conditions met.**
+// Classify up to `limit` unclassified emails (newest first, via the partial
+// index). Returns a per-email report. Each email audits independently — one
+// bad email must not sink the batch.
+export async function classifyBatch(limit: number): Promise<{
+  processed: number;
+  results: Array<{ id: string; ok: boolean; importance?: number; category?: string; passes?: number; error?: string }>;
+}> {
+  const emails = await sql<EmailRow[]>`
+    select id, subject, snippet, body
+    from emails
+    where classified_at is null
+    order by received_at desc nulls last
+    limit ${limit}
+  `;
 
-**Milestone 3 — AI layer, read-only.** In **marionette**, not api. Classify email → the
-existing `category`/`importance` columns. Morning brief. Grounded Q&A. This is where the
-qdrant/embeddings decision can no longer be deferred. **Telegram is a natural delivery
-channel for the morning brief once this is built; the M2 dashboard is a natural surface for
-classifier output (category/importance badges)** — worth keeping in mind when designing it,
-though neither is yet scoped.
+  const results = [];
+  for (const email of emails) {
+    try {
+      const { result, passes } = await classifyOne(email);
+      await sql`
+        update emails set
+          importance    = ${result.importance},
+          category      = ${result.category},
+          reason        = ${result.reason},
+          confidence    = ${result.confidence},
+          classified_at = now()
+        where id = ${email.id}
+      `;
+      await audit({
+        action: 'marionette.classify',
+        target: email.id,
+        outcome: 'success',
+        payload: {
+          importance: result.importance,
+          category: result.category,
+          confidence: result.confidence,
+          passes,
+        },
+      });
+      results.push({ id: email.id, ok: true, importance: result.importance, category: result.category, passes });
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      await audit({
+        action: 'marionette.classify',
+        target: email.id,
+        outcome: 'error',
+        payload: { error: message },
+      });
+      results.push({ id: email.id, ok: false, error: message });
+    }
+  }
 
-**Milestone 4 — Action layer, approval-gated. 🔨 Gate slice + Task A done; Task B remains.**
-- ✅ **Gate slice shipped** (`3a66aef` + `b13c5ce`): `actions` table + strict lifecycle
-  (`marionette/src/actions.ts`), 5 marionette routes, and **Telegram IS the approval
-  channel** — inline Approve/Deny buttons via `callback_query`, plus `POST
-  /telegram/surface/:id` to push a proposed action to chat. Fire-and-report execute with a
-  hard guarantee of a terminal transition. `kind='commit_deploy'` is the only action type so
-  far; all writes audit through `audit_log` (target = action id). See §4.
-- ✅ **Task A — async-completion push — DONE** (`80298a4`/`8ac171c`): deploy job polled to
-  true completion via `audit_log`, ✅/❌ pushed to Telegram through a thin `api` notify
-  endpoint. An Approve tap now gets a follow-up confirming the deploy actually finished
-  healthy, not just that it was accepted (202). See §4.
-- ⏳ **Task B — commit half of `commit_deploy`:** execute deploys from current repo state;
-  contractor doesn't git-commit first yet (`TODO(steering/commit)` in `actions.ts`).
-- Additional action types (create event, draft reply) are future work within this milestone.
+  return { processed: emails.length, results };
+}
+EOF
+echo "written"
+written
+spaghettios@spaghettios:~/bentley-os$ cd ~/bentley-os && sed -i "s|import { auditSummary } from './audit-read.ts';|import { auditSummary } from './audit-read.ts';\nimport { classifyBatch } from './classify.ts';|" marionette/src/index.ts
+spaghettios@spaghettios:~/bentley-os$ cd ~/bentley-os && cat > /tmp/classify_route.txt << 'EOF'
+// POST /classify  { "limit": 20 }   (default 20)
+// Runs the Clair two-pass triage over unclassified emails. Reasoning lives here;
+// the dashboard only reads the columns this writes. Batch-bounded and manually
+// triggered for now — cron wiring is a later slice once the output is trusted.
+app.post('/classify', async (c) => {
+  let body: any = {};
+  try { body = await c.req.json(); } catch { /* empty body is fine */ }
+  let limit = Number(body?.limit);
+  if (!Number.isInteger(limit) || limit < 1) limit = 20;
+  if (limit > 100) limit = 100;
+  try {
+    const report = await classifyBatch(limit);
+    return c.json(report);
+  } catch (err: any) {
+    return c.json({ error: 'classify batch failed', detail: err?.message || String(err) }, 500);
+  }
+});
 
-**Milestone 5 — Earned autonomy.** Auto-execute low-risk tier only. **Rollback-scope fix
-done (`52c3f72`) — no longer blocked.**
+EOF
+echo "marker written"
+marker written
+spaghettios@spaghettios:~/bentley-os$ grep -n "POST /think" marionette/src/index.ts
+35:// POST /think  { "request": "<what you want marionette to reason about>" }
+spaghettios@spaghettios:~/bentley-os$ grep -n "classifyBatch" marionette/src/index.ts
+10:import { classifyBatch } from './classify.ts';
+spaghettios@spaghettios:~/bentley-os$ cd ~/bentley-os && awk 'NR==35{while((getline line < "/tmp/classify_route.txt")>0) print line; print ""} {print}' marionette/src/index.ts > /tmp/index.new && mv /tmp/index.new marionette/src/index.ts
+spaghettios@spaghettios:~/bentley-os$ grep -n "classifyBatch\|POST /classify\|app.post('/classify'" marionette/src/index.ts
+10:import { classifyBatch } from './classify.ts';
+35:// POST /classify  { "limit": 20 }   (default 20)
+39:app.post('/classify', async (c) => {
+46:    const report = await classifyBatch(limit);
+spaghettios@spaghettios:~/bentley-os$ sed -n '33,54p' marionette/src/index.ts
+  }
+});
+// POST /classify  { "limit": 20 }   (default 20)
+// Runs the Clair two-pass triage over unclassified emails. Reasoning lives here;
+// the dashboard only reads the columns this writes. Batch-bounded and manually
+// triggered for now — cron wiring is a later slice once the output is trusted.
+app.post('/classify', async (c) => {
+  let body: any = {};
+  try { body = await c.req.json(); } catch { /* empty body is fine */ }
+  let limit = Number(body?.limit);
+  if (!Number.isInteger(limit) || limit < 1) limit = 20;
+  if (limit > 100) limit = 100;
+  try {
+    const report = await classifyBatch(limit);
+    return c.json(report);
+  } catch (err: any) {
+    return c.json({ error: 'classify batch failed', detail: err?.message || String(err) }, 500);
+  }
+});
 
-**Milestone 6 — Self-extension.** Tool registry + isolated test + approval + git automation +
-rollback, **reusing `deploy`'s** job/audit machinery — not a parallel build-and-rollback
-system.
 
----
+// POST /think  { "request": "<what you want marionette to reason about>" }
+spaghettios@spaghettios:~/bentley-os$ cd ~/bentley-os && docker build -t marionette-test ./marionette
+[+] Building 0.5s (10/10) FINISHED                                                                                                                                        docker:default
+ => [internal] load build definition from Dockerfile                                                                                                                                0.0s
+ => => transferring dockerfile: 393B                                                                                                                                                0.0s
+ => [internal] load metadata for docker.io/library/node:22-slim                                                                                                                     0.0s
+ => [internal] load .dockerignore                                                                                                                                                   0.0s
+ => => transferring context: 2B                                                                                                                                                     0.0s
+ => [1/5] FROM docker.io/library/node:22-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf                                                               0.0s
+ => => resolve docker.io/library/node:22-slim@sha256:53ada149d435c38b14476cb57e4a7da73c15595aba79bd6971b547ceb6d018bf                                                               0.0s
+ => [internal] load build context                                                                                                                                                   0.0s
+ => => transferring context: 30.42kB                                                                                                                                                0.0s
+ => CACHED [2/5] WORKDIR /app                                                                                                                                                       0.0s
+ => CACHED [3/5] COPY package.json ./                                                                                                                                               0.0s
+ => CACHED [4/5] RUN npm install --omit=dev                                                                                                                                         0.0s
+ => [5/5] COPY src ./src                                                                                                                                                            0.0s
+ => exporting to image                                                                                                                                                              0.2s
+ => => exporting layers                                                                                                                                                             0.1s
+ => => exporting manifest sha256:bbe0527db4e4d3f6e7095259ff498d463bdbd1e96a080eb71deb1285074de44c                                                                                   0.0s
+ => => exporting config sha256:96996b40ee72d504c177ae09c96bbc33eaf5cb11eb6348c36db7b52e91eec9f1                                                                                     0.0s
+ => => exporting attestation manifest sha256:3039f547d0e360b125e4c00e1c149d595988f38f138f384e891de0db21d296c7                                                                       0.0s
+ => => exporting manifest list sha256:e640f65cc3e27f25f7b47748e83fb3663bada7fa87431a3f1f5c3ae59478747a                                                                              0.0s
+ => => naming to docker.io/library/marionette-test:latest                                                                                                                           0.0s
+ => => unpacking to docker.io/library/marionette-test:latest                                                                                                                        0.0s
+spaghettios@spaghettios:~/bentley-os$ cd ~/bentley-os && docker run -d --rm --name marionette-test \
+  --network bentley-os_backend \
+  --env-file .env \
+  marionette-test && sleep 2 && docker logs marionette-test
+9be41536a8de2a03641131ca053622250f1cff2960b14a1326a4d8a66567765d
+marionette listening on :4200
+spaghettios@spaghettios:~/bentley-os$ docker exec marionette-test node -e "fetch('http://localhost:4200/classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:1})}).then(r=>r.json()).then(d=>console.log(JSON.stringify(d,null,2))).catch(e=>console.log('ERR',e.message))"
+{
+  "processed": 1,
+  "results": [
+    {
+      "id": "91246b59-4701-4668-82a0-02792adf5149",
+      "ok": true,
+      "importance": 5,
+      "category": "newsletter",
+      "passes": 1
+    }
+  ]
+}
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c \
+"select subject, importance, category, confidence, reason from emails where id = '91246b59-4701-4668-82a0-02792adf5149';"
+                            subject                            | importance |  category  | confidence |                                   reason                                    
+---------------------------------------------------------------+------------+------------+------------+-----------------------------------------------------------------------------
+ $18.6M Health Brand + 4.6-star Baking App + 300th The Exit Ep |          5 | newsletter |         95 | No direct consequence; this is a business digest and can be safely ignored.
+(1 row)
 
-## 7. Hard-won lessons (don't relearn these)
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c \
+"select at, action, target, outcome, payload from audit_log where action='marionette.classify' order by at desc limit 1;"
+              at               |       action        |                target                | outcome |                                  payload                                   
+-------------------------------+---------------------+--------------------------------------+---------+----------------------------------------------------------------------------
+ 2026-07-12 20:43:05.622437+00 | marionette.classify | 91246b59-4701-4668-82a0-02792adf5149 | success | {"passes": 1, "category": "newsletter", "confidence": 95, "importance": 5}
+(1 row)
 
-- **Bind-mount path must be exact.** Use `/home/spaghettios/bentley-os`, never an alias or
-  `/repo`. A mismatched path made `docker compose config --hash` compute different hashes
-  for *every* service, so deploying one service alone recreated others mid-deploy. Verify
-  with `docker compose config --hash='*'` after any change.
-- **`COMPOSE_PROJECT_NAME=bentley-os` must be pinned** — default basename spawned a
-  duplicate stack.
-- **`WORKDIR` must be `/app`** (not the bind-mounted repo path) or the bind mount overwrites
-  `node_modules` at runtime.
-- **`.js` vs `.ts` imports:** strip-types services (`node --experimental-strip-types`) MUST
-  import internal modules with `.ts` extensions — `.js` throws `ERR_MODULE_NOT_FOUND` at
-  startup. Applies to `deploy`, `contractor`, `marionette`. `api` uses real `tsc` + `.js` —
-  opposite convention, easy to get wrong. (The M2 dashboard change stayed in `api`, so
-  `import { pool } from '../db/pool.js'` — `.js`, correct for compiled-TS.)
-- **Node/npm live only inside Docker** — host has neither. Dependency changes = hand-edit
-  `package.json`, let the build install. **`npx tsc --noEmit` isn't available on the host
-  for the same reason** — the closest pre-deploy check is a full isolation build
-  (`docker build` + throwaway `docker run` + `/health` hit), not a host-side typecheck.
-- **Isolation-test before any commit** — throwaway `docker run`, confirm the real path and
-  audit row before deploying.
-- **audit_log is authoritative** for deployment and orchestration state — not raw git
-  history, and not stdout logs (services here don't log per-request at all; `audit_log` is
-  the only place to see what actually happened).
-- **Incognito required** for accurate Cloudflare Access verification.
-- **`-h 127.0.0.1`** required for `psql` TCP auth inside the postgres container; **`-P
-  pager=off`** required too — no `less` in the container image.
-- **Contractor reaches OpenCode via LAN IP, never `127.0.0.1`** — a loopback-bound service
-  is unreachable from any other container regardless of shared network.
-- **`undici`'s default fetch timeout (5 min headers/body) is too short for real OpenCode
-  agent tasks.** A trivial no-tool-call prompt ("reply with pong") always finishes in
-  seconds and will mask this bug — only a real multi-step task (file write, bash command)
-  exposes it. Set `setGlobalDispatcher(new Agent({ headersTimeout, bodyTimeout }))`
-  explicitly in any service that calls one that can run long.
-- **Always capture `err.cause` in catch blocks that audit-log a fetch failure**, not just
-  `err.message`. `"fetch failed"` alone is undiagnosable; `err.cause` (e.g.
-  `HeadersTimeoutError`) tells you what actually happened.
-- **OpenCode's `"ask"` permission hangs forever in headless/API contexts** — there's no
-  attached terminal to answer the prompt. `external_directory` and `doom_loop` default to
-  `"ask"`; any tool call that trips them from an API caller will hang until the client's own
-  timeout fires, with a generic, undiagnosable error. Any headless OpenCode caller's config
-  must resolve every permission to `allow` or `deny` only.
-- **Long file pastes break the browser terminal.** Beyond a short heredoc, generate the file
-  in Claude's sandbox and commit it via the GitHub web UI (paste into the online editor, or
-  drag-and-drop upload to replace the file) rather than fighting heredoc/scp limits.
-- **The api image's build context is `apps/api/`, not the repo root.** `apps/api/Dockerfile`
-  does `COPY package.json ./` / `COPY . .` with no monorepo pathing — there is NO
-  `package.json` at repo root (it's a monorepo; api's lives at `apps/api/package.json`). So
-  to build it by hand for an isolation test, the command is `docker build -t <tag> apps/api`
-  (context = the directory), NOT `docker build -f apps/api/Dockerfile .` (which sets context
-  to root and fails at `COPY package.json ./` with "not found"). The deploy service already
-  gets this right; it only bites manual/isolation builds.
-- **`node:22-alpine` (the api base image) has no curl** — same class as the `node:22-slim`
-  no-curl/no-apk lesson. Isolation-probe a running api container via
-  `docker exec <c> node -e "fetch('http://localhost:3000/...').then(r=>r.text()).then(console.log)"`,
-  not curl.
-- **Don't paste prior terminal output back into the shell.** Twice this session, previous
-  command output (prompt lines + build log) was accidentally pasted into bash, which tried
-  to execute each line — harmless (`command not found` noise) but it also created stray
-  files named for tokens in the output (`=`, `CACHED`, `[internal]`, `exporting`, etc.) that
-  had to be `rm`'d before the tree was clean. When copy-pasting a command, copy only the
-  command line, not the leading `spaghettios@…$` prompt or the output above it.
-- **A Cloudflare Access service token is not automatically valid against an app just because
-  it was generated.** It must be explicitly attached via a separate **Service Auth** policy
-  on that specific application (Action: Service Auth, Include: Service Token). Without it,
-  every request bounces to the login redirect with `service_token_status:false` buried in
-  the JWT `meta` payload — the token itself can be completely valid and still get rejected.
-  Confirmed by testing: generating the token and using correct headers still failed until
-  this policy existed.
-- **A path-scoped Cloudflare Access Application is not the same as a new subdomain, and it's
-  easy to create the wrong one by accident.** When adding an app meant to carve an exception
-  into an existing hostname's Access policy (e.g. a webhook endpoint that can't complete an
-  Access login), the domain field must be set to the *exact same hostname* as the existing
-  app, with the narrower scope coming from the **path** field — not a different subdomain
-  typed into the domain box. Symptom of getting it wrong: the new app's Destinations column
-  shows an unexpected/truncated hostname, and the target endpoint keeps 302-redirecting to
-  Access login exactly as before. Always confirm the Destinations column (or a screenshot of
-  the edit form) shows the intended full hostname + path before relying on it.
-- **Bypass and Allow are different Cloudflare Access policy actions.** Allow still requires
-  passing an identity check; only **Bypass** skips the Access challenge entirely. A
-  webhook-style caller (Telegram, or any other server-to-server POST with no browser/login
-  flow available) needs Bypass, not Allow.
-- **A downstream JSON response shape should never be assumed from a route name or a "looks
-  about right" guess — confirm it with a real curl.** `marionette`'s `/think` response is
-  nested (`{decision: {decision, message, reasoning}}`), not flat. The bug this caused
-  (`sendMessage` silently sent `undefined` as the message text) produced no error anywhere
-  in the stack — Telegram's API happily accepted and "delivered" a message, it just had no
-  visible content. The only way this surfaced was noticing the user received nothing,
-  which is a much slower feedback loop than just curling the endpoint first.
-- **HTML rendered from DB fields must be escaped.** The M2 dashboard interpolates email
-  subjects/snippets and event titles — all third-party content — into an HTML template. An
-  `esc()` helper escapes `& < > "` on every DB-derived value. Skipping this is a stored-XSS
-  vector even at single-user scale (a crafted email subject could inject markup). Any new
-  server-rendered view does the same.
-- **Postgres `AT TIME ZONE` is the right place to compute "today", not the app layer.** The
-  dashboard's "today" window is computed in SQL with `AT TIME ZONE 'America/Chicago'` so the
-  day boundary is Central, not UTC — computing it from `new Date()` in Node would have keyed
-  off the container's clock/tz and drifted the boundary. Be explicit about tz; don't rely on
-  the container defaulting to anything.
-- **`sed -i` syntax is platform-specific.** GNU sed (Linux/the box) takes no argument after
-  `-i` for in-place editing without a backup. BSD/macOS sed requires an explicit (even if
-  empty) backup-suffix argument: `sed -i '' 's/x/y/'`. Using the Linux form on macOS or vice
-  versa either errors outright or silently no-ops — always confirm which machine a command
-  is about to run on.
-- **A Docker build sitting at "exporting to image" / "unpacking" for 10+ minutes isn't
-  necessarily hung.** On slow disk I/O, large layers (e.g. a ~500MB model file) can take
-  a very long time to unpack with the progress line appearing frozen. Before assuming
-  `dockerd` is stuck: check `docker info` responds within a timeout, check `uptime`/load
-  average, check for processes in D-state (`ps aux | awk '$8 ~ /D/'`). If the daemon itself
-  is responsive and load is low, it's probably just slow — the build in this repo's history
-  took ~800s longer than expected and completed successfully once left alone.
-- **Interrupting a `docker compose up --build` with Ctrl+C after the image has already built
-  but before the container swap can leave the new image sitting unused.** Check
-  `docker images` for the freshly-built image and `docker compose ps` for what's actually
-  running — if the image exists but the running container's `CREATED` timestamp predates it,
-  a plain `docker compose up -d <service>` (no `--build`) will pick up the already-built
-  image quickly, no rebuild needed.
-- **An exported shell var silently overrides `.env` in `docker compose` interpolation.** A
-  stale `export POSTGRES_PASSWORD=...` in the interactive shell beat the `.env` value for
-  every `${POSTGRES_PASSWORD}` compose interpolates — poisoning the built `DATABASE_URL` for
-  services whose URL is composed from it, while the plain `POSTGRES_PASSWORD` env stayed
-  correct, producing a baffling per-service split. Symptom: `docker compose config | grep
-  DATABASE_URL` shows a password string that isn't in `.env`. **`docker compose config` is
-  the interpolation truth check** — always diff it against `.env` before touching the DB
-  role. This masqueraded as "password drift" across two sessions; the DB role was always the
-  real `.env` value, and the attempted "fix" (`ALTER ROLE` to the phantom value) was the
-  actual damage each time. Fix: `unset POSTGRES_PASSWORD`, restore the role to the true
-  `.env` value, recreate. Corollaries: (1) a `trust`-path `psql` (`-h 127.0.0.1`)
-  authenticates regardless of the password sent — only `-h postgres` (the scram network
-  path) actually proves a password matches; a loopback `select 1` is a false positive. (2)
-  `.env.bak` sitting in the working tree is a reinfection hazard (holds the stale secret) —
-  deleted.
+spaghettios@spaghettios:~/bentley-os$ docker rm -f marionette-test && docker rmi marionette-test 2>/dev/null; echo "cleaned"
+marionette-test
+Untagged: marionette-test:latest
+Deleted: sha256:e640f65cc3e27f25f7b47748e83fb3663bada7fa87431a3f1f5c3ae59478747a
+cleaned
+spaghettios@spaghettios:~/bentley-os$ cd ~/bentley-os && git add marionette/src/classify.ts marionette/src/index.ts && git status
+On branch main
+Your branch is up to date with 'origin/main'.
 
----
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+        new file:   marionette/src/classify.ts
+        modified:   marionette/src/index.ts
 
-## 8. Open questions (decided-when-we-get-there, not blocking)
+spaghettios@spaghettios:~/bentley-os$ cd ~/bentley-os && git commit -m "feat(m3): Clair two-pass email triage classifier — POST /classify" && git push origin main
+[main 5d45b8d] feat(m3): Clair two-pass email triage classifier — POST /classify
+ 2 files changed, 191 insertions(+)
+ create mode 100644 marionette/src/classify.ts
+Enumerating objects: 10, done.
+Counting objects: 100% (10/10), done.
+Delta compression using up to 16 threads
+Compressing objects: 100% (6/6), done.
+Writing objects: 100% (6/6), 3.58 KiB | 3.58 MiB/s, done.
+Total 6 (delta 4), reused 0 (delta 0), pack-reused 0 (from 0)
+remote: Resolving deltas: 100% (4/4), completed with 4 local objects.
+To github.com:bentleylujero/bentley-os.git
+   4c39435..5d45b8d  main -> main
+spaghettios@spaghettios:~/bentley-os$ curl -s -X POST http://127.0.0.1:4000/deploy \
+  -H 'Content-Type: application/json' \
+  -d '{"service":"marionette"}'
+{"job_id":"8acb31a7-4560-4d3b-98d8-71aa10dca17b","status":"running","service":"marionette"}spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c \
+"select at, action, outcome from audit_log where payload->>'job_id' = '8acb31a7-4560-4d3b-98d8-71aa10dca17b' order by at;"
+              at               |     action      | outcome 
+-------------------------------+-----------------+---------
+ 2026-07-12 21:00:49.416439+00 | deploy.enqueued | queued
+ 2026-07-12 21:00:49.430279+00 | deploy.started  | running
+(2 rows)
 
-- **Docs cleanup:** old `.md` files (`00_NORTH_STAR`, `01_CURRENT_STATE`, `02_DECISIONS`,
-  `03_ROADMAP`) retired in favor of this Bible. Remove from the project once trusted.
-- **Rollback scope — RESOLVED** (`52c3f72`): unscoped service aborts, no repo-wide checkout.
-  Unblocks Milestones 4 and 5.
-- **OpenCode duplication:** the systemd OpenCode server and the `contractor` container are
-  **not the same thing yet** — contractor calls the systemd server via SDK, doesn't replace
-  it. When the container reaches parity, repoint `apps/api/src/routes/opencode.ts`'s
-  `baseUrl` to `http://contractor:4100` in the *same* deploy that retires the systemd unit.
-- **Postgres password rotation** — flagged (pasted plaintext into a chat), still not done.
-  **Re-exposed again during the shell-var/`ALTER ROLE` debugging session** — the real
-  `b08a...` value was pasted multiple times. Rotate whenever the batch rotation happens.
-- **DeepSeek API key fragment** — a masked fragment printed into a chat, not usable alone,
-  noted alongside the Postgres rotation. Both still pending.
-- **Shared audit module** — deploy + marionette + contractor each duplicate `audit_log`
-  write logic; unify eventually. Ingestion (gcal/gmail) still doesn't write to `audit_log`
-  at all — not a blocker for the shipped "what changed" view (it keys off each row's own
-  `created_at` ingest timestamp, not an audit trail), but revisit if a future view needs a
-  true "last synced" signal.
-- **Embeddings provider** — resolved to "local model" but not built.
-- **`whisper-laptop` Cloudflare service token exposed in plaintext in chat multiple times
-  across sessions** (initial setup, then again during the Service Auth policy debugging).
-  Not rotated yet — same pattern as the Postgres/DeepSeek leaks, now the most-repeated
-  instance of this issue. Rotate in the Cloudflare dashboard and update
-  `~/.hammerspoon/whisper_secrets.lua` on the laptop when done. Consider moving the laptop
-  script's credentials to macOS Keychain instead of a plaintext Lua file while at it.
-- **Whisper deploy path** — `whisper` isn't in `deploy`'s `SERVICE_HEALTH` map, so it has no
-  audited deploy/rollback path and must be rebuilt via raw `docker compose up -d --build`.
-  Decide whether it's worth adding, given it's a low-churn service.
-- **Whisper GPU acceleration** — box has an AMD RX 5700 XT, currently unused; whisper runs
-  CPU-only. Vulkan or ROCm/HIP backend would speed up larger models significantly. Not
-  started — scoped as a future task if `base`'s CPU latency becomes annoying in daily
-  use.
-- **Log aggregation** specifics — not decided.
-- **`marionette/src/schema.ts`** has one leftover comment mentioning "opencode"
-  conceptually — cosmetic, not fixed.
-- **`whisper/Dockerfile.bak` — RESOLVED** (`7cb895d`): now gitignored, so it can't sneak
-  into a commit. The broader discipline still holds — **`git add` by explicit path, never
-  `-A`** — but this specific reinfection hazard is defused.
-- **Telegram bot token — rotated once already, mid-build.** The first-issued token was
-  pasted in plaintext in chat before the integration was even wired up; it was rotated
-  immediately via BotFather and the new token went straight into `.env` without being
-  pasted here. Worth normalizing this reflex (rotate-on-exposure, never wait) for any future
-  credential handling.
-- **`audit_log` doesn't tag request origin/interface.** A `marionette.think` row looks
-  identical whether it came from a direct API call, a test script, or a Telegram message.
-  Not a problem yet at single-user scale, but worth a `source` or `channel` field in the
-  audit payload before there's ever more than one command interface or user to disambiguate.
-- **No conversation memory across Telegram messages.** Each message is a fresh, stateless
-  `/think` call — marionette has no way to know "the file I just wrote" refers to something
-  from two messages ago. Fine for one-shot commands today; will need addressing (likely via
-  Qdrant, already deferred to Milestone 3) before Telegram can support multi-turn tasks.
-- **Telegram webhook has no rate limiting or replay protection beyond the secret-token
-  header and user-ID allow-list.** Low risk at single-user scale with a Bypass-scoped path,
-  but worth revisiting if this interface's trust boundary ever expands.
-- **`/think` audit-sight integration — RESOLVED** (`27f18b3`). Design fork decided in favor
-  of **(B) pre-fetch injection** over (A) a tool-call loop, because `deepseek.ts`'s
-  `callDeepSeek` hardcodes `response_format: json_object`, sends no `tools` array, and
-  surfaces no `tool_calls` — (A) would have needed a whole second code path + a second model
-  call. Keyword gate (`system-sight.ts`) → in-process `auditSummary(60)` → compact injected
-  block → single `callDeepSeek`, existing `normalizeDecision` untouched, sight-read failure
-  degrades gracefully. Verified end-to-end from the Telegram app. See §4. **Follow-on worth
-  noting** (not blocking): the keyword gate is blunt — a system-status question phrased
-  outside the pattern list falls back to the honest "can't see" reply. Widen the list or
-  revisit (A) if that becomes annoying. (A) remains a clean future upgrade if Mari should
-  ever decide *for herself* when to look — nothing here forecloses it.
-- **M4 action `succeeded` = deploy 202 accept — RESOLVED** (M4 Task A, `80298a4`/`8ac171c`).
-  Deploy job now polled to true completion via `audit_log`; ✅/❌ pushed to Telegram via a
-  thin `api` notify endpoint. The confirmation now reflects real deploy finish, not just
-  acceptance.
-- **M4 `commit_deploy` git-commit half unwired.** (M4 Task B — STILL OPEN.) Execute deploys
-  current repo state; contractor doesn't commit first (`TODO(steering/commit)` in
-  `actions.ts`).
-- **M2 "what changed" view — RESOLVED** (`5955d8d` + `0004`/`b905e4b`, M2 now complete). The
-  Gmail zero-width-padding **snippet polish still remains** — cosmetic, not blocking, applies
-  to both the "Recent email" and "What changed" feeds.
-- **Parked branch `slice1-image-rollback` (`0cf613e`) — UNMERGED, UNVERIFIED.** Refactor of
-  `deploy/src/runner.ts` swapping git-checkout rollback for Docker-image-preservation. On its
-  own origin branch, not `main`, not isolation-tested, not confirmed running. Do NOT build on
-  it. Verifying it requires deliberately forcing a failed deploy — a future dedicated
-  session. `main` still uses the scoped-git-checkout rollback (`52c3f72`).
-- **Audit-sight Tier 2 (DB/ingestion influx detection) and Tier 3 (host CPU/mem/disk
-  metrics) not built.** Tier 2 reads `emails`/`calendar_events`/`sync_state` directly (note:
-  ingestion still doesn't write to `audit_log`, so counts come from tables) — same read-tool
-  pattern as Tier 1, and overlaps naturally with the M2 "what changed" view. Tier 3 needs
-  host access, which lives in `api` not marionette (backend-only) — so a thin api-side read
-  endpoint marionette calls, or proper metrics infra (cAdvisor/node-exporter). Decide
-  cheap-path vs proper-infra when reached.
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c \
+"select at, action, outcome from audit_log where payload->>'job_id' = '8acb31a7-4560-4d3b-98d8-71aa10dca17b' order by at;"
+              at               |      action      | outcome 
+-------------------------------+------------------+---------
+ 2026-07-12 21:00:49.416439+00 | deploy.enqueued  | queued
+ 2026-07-12 21:00:49.430279+00 | deploy.started   | running
+ 2026-07-12 21:01:10.678303+00 | deploy.succeeded | success
+(3 rows)
 
----
+spaghettios@spaghettios:~/bentley-os$ curl -s -X POST http://127.0.0.1:3000/opencode/../marionette 2>/dev/null; \
+docker exec bentley-os-marionette-1 node -e "fetch('http://localhost:4200/classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:20})}).then(r=>r.json()).then(d=>console.log(JSON.stringify(d,null,2))).catch(e=>console.log('ERR',e.message))"
+404 Not Found^Cspaghettios@spaghettioscurl -s -X POST http://127.0.0.1:3000/opencode/../marionette 2>/dev/null; \ 2>/dev/null; \
+docker exec bentley-os-marionette-1 node -e "fetch('http://localhost:4200/classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:20})}).then(r=>r.json()).then(d=>console.log(JSON.stringify(d,null,2))).catch(e=>console.log('ERR',e.message))"
+404 Not Founddocker exec bentley-os-marionette-1 node -e "fetch('http://localhost:4200/classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:20})}).then(r=>r.json()).then(d=>console.log(JSON.stringify(d,null,2))).catch(e=>console.log('ERR',e.messagspaghettios@spaghettios:~/bentley-os$ docker exec bentley-os-marionette-1 node -e "fetch('http://localhost:4200/classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:20})}).then(r=>r.json()).then(d=>console.log(JSON.stringify(d,null,2))).catch(e=>console.log('ERR',e.message))"age))"
+spaghettios@spaghettios:~/bentley-os$ docker exec bentley-os-marionette-1 node -e "fetch('http://localhost:4200/classify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({limit:20})}).then(r=>r.json()).then(d=>console.log(JSON.stringify(d,null,2))).catch(e=>console.log('ERR',e.message))")"
+{
+  "processed": 20,
+  "results": [
+    {
+      "id": "4dc33bc0-b5b0-406c-bc9d-8680c6d319b7",
+      "ok": true,
+      "importance": 5,
+      "category": "other",
+      "passes": 1
+    },
+    {
+      "id": "c0595064-41ea-45ae-b199-7127ea5036e5",
+      "ok": true,
+      "importance": 10,
+      "category": "newsletter",
+      "passes": 1
+    },
+    {
+      "id": "f77e190c-feab-4c6d-80fa-9a36520902d5",
+      "ok": true,
+      "importance": 85,
+      "category": "action",
+      "passes": 2
+    },
+    {
+      "id": "9d854d68-feb3-45a7-8645-7236d40c299f",
+      "ok": true,
+      "importance": 85,
+      "category": "action",
+      "passes": 2
+    },
+    {
+      "id": "de5e752e-d7ce-4163-8ca1-6a3039200472",
+      "ok": true,
+      "importance": 15,
+      "category": "newsletter",
+      "passes": 1
+    },
+    {
+      "id": "a554516d-4fc6-4edf-95b8-8bf2c13da803",
+      "ok": true,
+      "importance": 10,
+      "category": "newsletter",
+      "passes": 1
+    },
+    {
+      "id": "e41f2e08-e9cc-485f-af56-18af8a8dabdc",
+      "ok": true,
+      "importance": 10,
+      "category": "newsletter",
+      "passes": 1
+    },
+    {
+      "id": "10c216b0-ae78-4415-997c-9f389102d792",
+      "ok": true,
+      "importance": 10,
+      "category": "newsletter",
+      "passes": 1
+    },
+    {
+      "id": "fd6ec8ca-bf61-4d1e-8806-9894e1e84210",
+      "ok": true,
+      "importance": 50,
+      "category": "action",
+      "passes": 1
+    },
+    {
+      "id": "8c1e03e5-7679-4a95-97cd-ddc1f6dfc29d",
+      "ok": true,
+      "importance": 30,
+      "category": "work",
+      "passes": 1
+    },
+    {
+      "id": "b9fab254-83e2-4e7b-a35f-10332818f636",
+      "ok": true,
+      "importance": 25,
+      "category": "newsletter",
+      "passes": 1
+    },
+    {
+      "id": "c708cbdb-141f-497b-b861-2b17f4a92427",
+      "ok": true,
+      "importance": 10,
+      "category": "newsletter",
+      "passes": 1
+    },
+    {
+      "id": "e2986aa4-d233-44b8-8192-7fb65ea75b2c",
+      "ok": true,
+      "importance": 5,
+      "category": "newsletter",
+      "passes": 1
+    },
+    {
+      "id": "98663bba-2335-4c98-8f51-170988dbf2fa",
+      "ok": true,
+      "importance": 20,
+      "category": "work",
+      "passes": 1
+    },
+    {
+      "id": "43e92fff-6351-4c7d-90b3-05263a6afd8e",
+      "ok": true,
+      "importance": 10,
+      "category": "newsletter",
+      "passes": 1
+    },
+    {
+      "id": "7c4bcdc7-1c01-48e4-a9c8-a1ea4103e2e2",
+      "ok": true,
+      "importance": 0,
+      "category": "other",
+      "passes": 1
+    },
+    {
+      "id": "b14f67a5-c880-4101-8b78-43e998298131",
+      "ok": true,
+      "importance": 10,
+      "category": "other",
+      "passes": 1
+    },
+    {
+      "id": "c5724301-0c84-4ebd-b039-2a029d6754a8",
+      "ok": true,
+      "importance": 10,
+      "category": "newsletter",
+      "passes": 1
+    },
+    {
+      "id": "9d19766e-4213-492c-bcfb-32076f8c7695",
+      "ok": true,
+      "importance": 10,
+      "category": "newsletter",
+      "passes": 1
+    },
+    {
+      "id": "12c2d73b-ed54-42f3-abe2-34176436020f",
+      "ok": true,
+      "importance": 25,
+      "category": "work",
+      "passes": 1
+    }
+  ]
+}
+spaghettios@spaghettios:~/bentley-os$ docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c \
+"select importance, category, left(subject,45) as subject, reason from emails where classified_at is not null order by importance desc limit 8;"
+ importance | category |                    subject                    |                                                              reason                                                               
+------------+----------+-----------------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------
+         90 | action   | [GitHub] Your personal access token (classic) | If ignored, the token expires and any service using it (e.g., CI/CD, scripts) will break, causing workflow interruptions.
+         85 | action   | Security alert                                | Miss this and an unauthorized person could access your Google account, potentially leading to data theft or financial loss.
+         65 | action   | Order Destination Change Needed!              | Ignoring this email means your order may ship to the wrong address, causing delays or loss.
+         65 | action   | Order Destination Change Needed!              | You might not know if the address change fails, causing the order to ship to the wrong destination.
+         65 | action   | Re: Order Destination Change Needed!          | If ignored, the order might ship to the wrong address, causing delivery failure or loss.
+         60 | action   | Order Destination Change Needed!              | Miss this and the customer may lose access to the delivery address, risking a lost package and negative service experience.
+         55 | action   | Remember to Register a Backup MFA Verificatio | Without a backup MFA method, losing access to your primary method could lock you out of your account, requiring lengthy recovery.
+         50 | action   | [Action needed] Complete your billing setup f | Missing this could prevent you from using the Gemini API, potentially disrupting any projects relying on it.
+(8 rows)
 
-## 9. Guardrails to prevent contradiction/duplication
+spaghettios@spaghettios:~/bentley-os$ cd ~/bentley-os && ls *.md && git log --oneline -8
+THE_BIBLE.md
+5d45b8d (HEAD -> main, origin/main, origin/HEAD) feat(m3): Clair two-pass email triage classifier — POST /classify
+4c39435 feat(m3): full-body gmail ingestion + email intelligence schema
+79bea75 Add 'What changed' section to dashboard and improve notifications
+b905e4b migration: 0004_dashboard_state singleton for 'what changed' last-seen tracking
+5955d8d feat(m2): "what changed" dashboard view — deltas since last look
+7cb895d chore: gitignore whisper/Dockerfile.bak
+403c84b Update THE_BIBLE.md with commit details and notes
+ef41370 Update THE_BIBLE.md to remove obsolete information
+spaghettios@spaghettios:~/bentley-os$ cd ~/bentley-os && ls *.md && git log --oneline -8
+THE_BIBLE.md
+5d45b8d (HEAD -> main, origin/main, origin/HEAD) feat(m3): Clair two-pass email triage classifier — POST /classify
+4c39435 feat(m3): full-body gmail ingestion + email intelligence schema
+79bea75 Add 'What changed' section to dashboard and improve notifications
+b905e4b migration: 0004_dashboard_state singleton for 'what changed' last-seen tracking
+5955d8d feat(m2): "what changed" dashboard view — deltas since last look
+7cb895d chore: gitignore whisper/Dockerfile.bak
+403c84b Update THE_BIBLE.md with commit details and notes
+ef41370 Update THE_BIBLE.md to remove obsolete information
+spaghettios@spaghettios:~/bentley-os$ echo "===== DASHBOARD ROUTE ====="
+cat apps/api/src/routes/dashboard.ts
+echo "===== 0004 ====="
+cat supabase/migrations/0004_dashboard_state.sql
+echo "===== 0005 ====="
+cat supabase/migrations/0005_email_intelligence.sql
+===== DASHBOARD ROUTE =====
+import { Hono } from 'hono';
+import { pool } from '../db/pool.js';
 
-1. **One AI brain.** All classification/reasoning/generation goes in `marionette`. A
-   prompt-calling function in `apps/api` belongs in marionette instead, with api calling
-   marionette's HTTP endpoint. **Whisper is not an exception** — it does pure transcription
-   only, no interpretation; any future step that reasons about transcribed text belongs in
-   marionette, not in the whisper service or the Hammerspoon client. **Telegram is not an
-   exception either** — the webhook route in `api` does no reasoning of its own; it's a thin
-   forward-and-relay to marionette's existing `/think`, identical in spirit to how
-   `opencode.ts` proxies to the OpenCode server rather than reimplementing anything. **The
-   M2 dashboard is not an exception** — it's a pure read/render over Postgres; the moment a
-   view needs classification or a generated summary, that logic lives in marionette and the
-   dashboard calls it, never a prompt-caller in `api`.
-2. **One build/deploy system.** `deploy` already has queueing, health polling, audit-backed
-   rollback. Milestone 6's git automation is an *extension* of `deploy`, not a parallel
-   service.
-3. **Schema before code.** Check `0001_secretary_ontology.sql` before adding a column —
-   `emails.category`/`importance` already exist. (The M2 dashboard added no columns — pure
-   read.)
-4. **`audit_log` is the one ledger.** Deploy actions and AI actions both write here — this
-   includes Telegram-originated requests, since they flow through the same
-   `marionette.think`/`marionette.delegate` audit points as any other caller. No second "AI
-   decisions" table, and no separate "Telegram log."
-5. **Local vs. pushed state.** `git status` at the start of every session.
-6. **Two-zone autonomy, refined:**
-   - **Sandbox zone** (marionette → contractor → OpenCode): full filesystem/build autonomy
-     by design. Bentley doesn't use OpenCode interactively, so there's no
-     human-in-the-loop cost to preserving. Enforced today via `opencode.json`'s permission
-     policy (§4) — allow everything except a short deny-list of catastrophic `rm -rf`
-     patterns. **Telegram is a new front door into this same zone, not a new zone** — a
-     message from the allow-listed user has exactly the same reach as a direct `/think` API
-     call, no more, no less.
-   - **Production zone** (real Gmail, real deploys, anything outside the sandbox):
-     default-deny for side-effecting actions, governed by an explicit allow/deny list
-     (Milestone 4). Contractor writing a file today is sandbox; nothing auto-promotes that
-     to production without the Milestone 4 approval gate. This is unaffected by the
-     Telegram interface — commanding marionette from Telegram doesn't unlock any
-     production-zone capability that didn't already exist. **The M2 dashboard is read-only —
-     it surfaces production data but takes no side-effecting action, so it sits outside the
-     autonomy question entirely.**
-   - **External comms are never in scope for autonomy, in either zone.** No
-     email/messaging/external-comms MCP or tool is wired to contractor. If one ever is, it
-     ships with an explicit deny in the permission policy from day one — never relying on
-     "it just doesn't have that tool" once the tool exists. **Telegram's `sendMessage` call
-     in `api` is not an exception to this rule** — it is a fixed, single-recipient
-     reply-to-the-allow-listed-sender mechanism embedded in one route, not a general-purpose
-     messaging capability exposed to contractor or marionette's decision-making. Marionette
-     cannot choose to message anyone; it can only return a `message` string that `api`
-     relays back to whoever sent the original request.
+export const dashboardRoute = new Hono();
+
+const TZ = 'America/Chicago';
+
+function esc(s: unknown): string {
+  if (s === null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function fmtTime(d: Date | null): string {
+  if (!d) return '';
+  return d.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: TZ,
+  });
+}
+
+// Compact "Jul 12, 3:04 PM" for cross-day deltas in the What-changed feed.
+function fmtStamp(d: Date | null): string {
+  if (!d) return '';
+  return d.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZone: TZ,
+  });
+}
+
+dashboardRoute.get('/', async (c) => {
+  let events: any[] = [];
+  let emails: any[] = [];
+  let newEmails: any[] = [];
+  let newEvents: any[] = [];
+  let lastSeen: Date | null = null;
+  let dbError = '';
+
+  // Read the singleton last-seen marker first. Its own guard: if this fails,
+  // the What-changed section simply shows nothing new — the rest still renders.
+  try {
+    const seenR = await pool.query(
+      `SELECT last_seen_at FROM dashboard_state WHERE id = 1`
+    );
+    lastSeen = seenR.rows[0]?.last_seen_at ?? null;
+  } catch {
+    lastSeen = null;
+  }
+
+  try {
+    const eventsQ = pool.query(
+      `SELECT title, starts_at, ends_at, location, status
+         FROM calendar_events
+        WHERE starts_at AT TIME ZONE $1 >= (now() AT TIME ZONE $1)::date
+          AND starts_at AT TIME ZONE $1 <  ((now() AT TIME ZONE $1)::date + interval '1 day')
+        ORDER BY starts_at ASC`,
+      [TZ]
+    );
+    const emailsQ = pool.query(
+      `SELECT subject, snippet, received_at, is_unread
+         FROM emails
+        ORDER BY received_at DESC NULLS LAST
+        LIMIT 15`
+    );
+    // "What changed" = rows ingested (created_at) since the owner last looked.
+    // created_at, not received_at: an old email newly synced still counts as new to us.
+    const newEmailsQ = lastSeen
+      ? pool.query(
+          `SELECT subject, snippet, received_at, created_at, is_unread
+             FROM emails
+            WHERE created_at > $1
+            ORDER BY created_at DESC
+            LIMIT 20`,
+          [lastSeen]
+        )
+      : Promise.resolve({ rows: [] as any[] });
+    const newEventsQ = lastSeen
+      ? pool.query(
+          `SELECT title, starts_at, location, created_at
+             FROM calendar_events
+            WHERE created_at > $1
+            ORDER BY created_at DESC
+            LIMIT 20`,
+          [lastSeen]
+        )
+      : Promise.resolve({ rows: [] as any[] });
+
+    const [eventsR, emailsR, newEmailsR, newEventsR] = await Promise.all([
+      eventsQ,
+      emailsQ,
+      newEmailsQ,
+      newEventsQ,
+    ]);
+    events = eventsR.rows;
+    emails = emailsR.rows;
+    newEmails = newEmailsR.rows;
+    newEvents = newEventsR.rows;
+  } catch (err: any) {
+    dbError = err?.message ?? 'query failed';
+  }
+
+  // Advance the marker to now — fire-and-forget, after the deltas above are
+  // already captured, so THIS view still shows what was new and the NEXT resets.
+  // Own guard: a failed update must never break the response.
+  void pool
+    .query(`UPDATE dashboard_state SET last_seen_at = now() WHERE id = 1`)
+    .catch(() => {});
+
+  const changedCount = newEmails.length + newEvents.length;
+  const changedHtml = dbError
+    ? ''
+    : !lastSeen
+    ? `<p class="muted">First look — nothing to compare against yet.</p>`
+    : changedCount === 0
+    ? `<p class="muted">Nothing new since you last looked.</p>`
+    : [
+        ...newEvents.map(
+          (e) => `<div class="row">
+        <span class="time">${esc(fmtStamp(e.created_at))}</span>
+        <span class="body"><span class="tag">event</span> <b>${
+            esc(e.title) || '(untitled)'
+          }</b>${
+            e.location ? `<span class="sub"> · ${esc(e.location)}</span>` : ''
+          }</span>
+      </div>`
+        ),
+        ...newEmails.map(
+          (m) => `<div class="row">
+        <span class="time">${esc(fmtStamp(m.created_at))}</span>
+        <span class="body"><span class="tag">email</span> ${
+            m.is_unread ? '<span class="unread">●</span> ' : ''
+          }<b>${esc(m.subject) || '(no subject)'}</b>${
+            m.snippet ? `<span class="sub"> — ${esc(m.snippet)}</span>` : ''
+          }</span>
+      </div>`
+        ),
+      ].join('');
+
+  const eventsHtml = dbError
+    ? `<p class="muted">couldn't load events: ${esc(dbError)}</p>`
+    : events.length === 0
+    ? `<p class="muted">Nothing on the calendar today.</p>`
+    : events
+        .map(
+          (e) => `<div class="row">
+        <span class="time">${esc(fmtTime(e.starts_at))}</span>
+        <span class="body"><b>${esc(e.title) || '(untitled)'}</b>${
+            e.location ? `<span class="sub"> · ${esc(e.location)}</span>` : ''
+          }</span>
+      </div>`
+        )
+        .join('');
+
+  const emailsHtml = dbError
+    ? ''
+    : emails.length === 0
+    ? `<p class="muted">No emails yet.</p>`
+    : emails
+        .map(
+          (m) => `<div class="row">
+        <span class="time">${esc(fmtTime(m.received_at))}</span>
+        <span class="body">${m.is_unread ? '<span class="unread">●</span> ' : ''}<b>${
+            esc(m.subject) || '(no subject)'
+          }</b>${m.snippet ? `<span class="sub"> — ${esc(m.snippet)}</span>` : ''}</span>
+      </div>`
+        )
+        .join('');
+
+  const changedHeading =
+    !dbError && lastSeen && changedCount > 0
+      ? `What changed <span class="count">${changedCount}</span>`
+      : `What changed`;
+
+  return c.html(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bentley OS</title>
+<style>
+  body{background:#0b0e14;color:#e6e6e6;font-family:ui-monospace,Menlo,monospace;margin:0;padding:2rem;}
+  .wrap{max-width:680px;margin:0 auto;}
+  h1{font-size:1.4rem;letter-spacing:.02em;}
+  h2{font-size:.95rem;color:#8b949e;text-transform:uppercase;letter-spacing:.08em;margin:1.5rem 0 .5rem;}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:#3fb950;margin-right:8px;}
+  .card{background:#151a23;border:1px solid #222b38;border-radius:10px;padding:1rem 1.25rem;margin:.5rem 0;}
+  .row{display:flex;gap:.9rem;padding:.45rem 0;border-bottom:1px solid #1c2431;}
+  .row:last-child{border-bottom:none;}
+  .time{color:#8b949e;font-size:.85rem;min-width:88px;white-space:nowrap;}
+  .body{flex:1;overflow:hidden;}
+  .sub{color:#8b949e;font-weight:normal;}
+  .unread{color:#58a6ff;}
+  .tag{display:inline-block;font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:#8b949e;border:1px solid #2a3441;border-radius:4px;padding:0 5px;margin-right:4px;}
+  .count{display:inline-block;background:#238636;color:#fff;font-size:.7rem;border-radius:9px;padding:0 7px;margin-left:6px;vertical-align:middle;}
+  a{color:#58a6ff;text-decoration:none;} a:hover{text-decoration:underline;}
+  .muted{color:#8b949e;font-size:.85rem;}
+</style></head>
+<body><div class="wrap">
+  <h1><span class="dot"></span>Bentley OS</h1>
+  <h2>${changedHeading}</h2>
+  <div class="card">${changedHtml}</div>
+  <h2>Today</h2>
+  <div class="card">${eventsHtml}</div>
+  <h2>Recent email</h2>
+  <div class="card">${emailsHtml}</div>
+  <p class="muted"><a href="/health">/health</a> · <span id="time"></span></p>
+</div>
+<script>document.getElementById('time').textContent = new Date().toLocaleString();</script>
+</body></html>`);
+});
+===== 0004 =====
+-- 0004_dashboard_state.sql
+-- Singleton state for the dashboard's "what changed" view.
+-- Holds one fact: the last time the owner viewed the dashboard.
+-- Enforced single-row (id pinned to 1) — not a shadow table, one fact stored once.
+create table if not exists dashboard_state (
+  id           smallint primary key default 1 check (id = 1),
+  last_seen_at timestamptz not null default now()
+);
+
+-- Seed the singleton row. on conflict keeps re-running the migration safe.
+insert into dashboard_state (id, last_seen_at)
+values (1, now())
+on conflict (id) do nothing;
+===== 0005 =====
+-- 0005_email_intelligence.sql
+-- M3: email body storage + triage classification fields.
+-- body: full decoded text/plain (or stripped html) — feeds Pass-2 classification,
+--   embeddings, and future pattern detection (unsubscribe suggestions, Q&A).
+-- reason: marionette's one-line "why this matters" consequence assessment.
+-- confidence: marionette's Pass-1 self-reported certainty (0-100); low values
+--   trigger Pass-2 full-body re-classification.
+-- classified_at: null = never judged; classifier only touches WHERE classified_at IS NULL.
+
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS body          text;
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS reason        text;
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS confidence    smallint;
+ALTER TABLE emails ADD COLUMN IF NOT EXISTS classified_at timestamptz;
+
+CREATE INDEX IF NOT EXISTS idx_emails_unclassified
+  ON emails (received_at DESC)
+  WHERE classified_at IS NULL;
+spaghettios@spaghettios:~/bentley-os$ 
