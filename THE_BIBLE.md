@@ -908,9 +908,6 @@ system.
   too — but a persistent 400 (the bigint bug above) exhausts all retries, which is how that
   bug surfaced.
   ever decide *for herself* when to look — nothing here forecloses it.
-- **M4 action `succeeded` = deploy 202 accept, not real completion.** (M4 Task A.) The
-  true finish signal lives only in deploy's own `deploy.succeeded` audit row. Needs an
-  async poll → Telegram "✅/❌" push via a thin `api` notify endpoint.
 - **M4 `commit_deploy` git-commit half unwired.** (M4 Task B.) Execute deploys current
   repo state; contractor doesn't commit first (`TODO(steering/commit)` in `actions.ts`).
 - **M2 "what changed" view + snippet polish** — the Today slice shipped; the delta view
