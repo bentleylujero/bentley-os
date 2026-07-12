@@ -687,9 +687,13 @@ though neither is yet scoped.
   /telegram/surface/:id` to push a proposed action to chat. Fire-and-report execute with a
   hard guarantee of a terminal transition. `kind='commit_deploy'` is the only action type so
   far; all writes audit through `audit_log` (target = action id). See §4.
-- ⏳ **Task A — async-completion push:** `action.succeeded` currently fires on deploy's 202
-  *accept*, not real finish. Poll deploy's job to true completion, push "✅/❌" to Telegram
-  via a thin `api` notify endpoint (marionette can't message out — §9).
+- ✅ **Task A — async-completion push — DONE** (`80298a4`). `executeAction` no longer treats
+  deploy's 202 accept as success: the action row stays `executing` until `watchDeploy`
+  (`marionette/src/deploy-poll.ts` → `pollDeployCompletion`) polls `audit_log` for the deploy
+  service's real terminal row (`deploy.succeeded` / `deploy.rolled_back` /
+  `deploy.rollback.failed`, keyed on `job_id`), then writes the true terminal state and pushes
+  "✅/❌" to Telegram via the new internal `POST /telegram/notify` relay in `api` (marionette
+  can't message out — §9). Verified end-to-end from real `api` deploys. See §4.
 - ⏳ **Task B — commit half of `commit_deploy`:** execute deploys from current repo state;
   contractor doesn't git-commit first yet (`TODO(steering/commit)` in `actions.ts`).
 - Additional action types (create event, draft reply) are future work within this milestone.
@@ -884,9 +888,25 @@ system.
   call. Keyword gate (`system-sight.ts`) → in-process `auditSummary(60)` → compact injected
   block → single `callDeepSeek`, existing `normalizeDecision` untouched, sight-read failure
   degrades gracefully. Verified end-to-end from the Telegram app. See §4. **Follow-on worth
-  noting** (not blocking): the keyword gate is blunt — a system-status question phrased
-  outside the pattern list falls back to the honest "can't see" reply. Widen the list or
-  revisit (A) if that becomes annoying. (A) remains a clean future upgrade if Mari should
+  - **A pg `bigint` id is serialized as a STRING and fails `Number.isInteger` at JSON
+  boundaries — even though postgres coerces it back to bigint fine inside SQL.** An action id
+  (`"6"`) flowed unchanged from `getAction` through `watchDeploy` into the `/telegram/notify`
+  POST body, where api's `Number.isInteger(action_id)` guard rejected it with a silent
+  HTTP 400 on every retry. The SQL `where id = ${actionId}` updates in the same function
+  worked (postgres string→bigint coercion), which masked the type mismatch — only the
+  JSON-boundary consumer cared. Coerce with `Number()` at the send boundary; don't assume a
+  round-trip through pg preserves numeric type. (Same root cause as the Telegram
+  `callback_data` bigint note — this is the second place it's bitten.)
+- **Deploying `api` tears down the very container that sends the Telegram push.** The
+  completion notify fires mid-deploy, exactly when `docker compose up -d api` is recreating
+  the notifier. A connection hitting api during its restart window can drop WITHOUT cleanly
+  rejecting the fetch promise — so nothing hits `.catch`, nothing logs, and the push
+  silently vanishes (looked identical to the §1 `sendMessage(undefined)` ghost). Fix:
+  `notifyTelegram` retries with backoff (8×5s ≈ 40s, covering api's restart+healthcheck),
+  each attempt bounded by an `AbortController` timeout so a hung socket during the swap
+  counts as a failed attempt rather than an indefinite stall. A non-2xx response is retried
+  too — but a persistent 400 (the bigint bug above) exhausts all retries, which is how that
+  bug surfaced.
   ever decide *for herself* when to look — nothing here forecloses it.
 - **M4 action `succeeded` = deploy 202 accept, not real completion.** (M4 Task A.) The
   true finish signal lives only in deploy's own `deploy.succeeded` audit row. Needs an
