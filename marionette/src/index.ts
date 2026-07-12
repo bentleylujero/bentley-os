@@ -7,6 +7,7 @@ import { audit } from './audit.ts';
 import { SYSTEM_PROMPT } from './prompt.ts';
 import { createAction, listActions, getAction, approveAction, denyAction } from './actions.ts';
 import { auditSummary } from './audit-read.ts';
+import { classifyBatch } from './classify.ts';
 import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts';
 
 // contractor's /execute can run long (real OpenCode build tasks, multi-step
@@ -31,6 +32,25 @@ app.get('/audit/summary', async (c) => {
     return c.json({ error: 'audit read failed' }, 500);
   }
 });
+// POST /classify  { "limit": 20 }   (default 20)
+// Runs the Clair two-pass triage over unclassified emails. Reasoning lives here;
+// the dashboard only reads the columns this writes. Batch-bounded and manually
+// triggered for now — cron wiring is a later slice once the output is trusted.
+app.post('/classify', async (c) => {
+  let body: any = {};
+  try { body = await c.req.json(); } catch { /* empty body is fine */ }
+  let limit = Number(body?.limit);
+  if (!Number.isInteger(limit) || limit < 1) limit = 20;
+  if (limit > 100) limit = 100;
+  try {
+    const report = await classifyBatch(limit);
+    return c.json(report);
+  } catch (err: any) {
+    return c.json({ error: 'classify batch failed', detail: err?.message || String(err) }, 500);
+  }
+});
+
+
 // POST /think  { "request": "<what you want marionette to reason about>" }
 // Calls DeepSeek, returns a structured Decision, audits the call either way.
 // If the decision is "delegate", hands the spec to contractor and folds the
