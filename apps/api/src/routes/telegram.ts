@@ -193,3 +193,36 @@ telegramRoute.post('/telegram/surface/:id', async (c) => {
 
   return c.json({ ok: true, surfaced: id, chat_id: chatId });
 });
+
+// ── Notify: push a deploy's TRUE terminal outcome to Telegram ────────────────
+// Internal relay only (backend-network isolation, same trust model as surface).
+// Called by marionette's deploy-completion poll once a job reaches a real
+// terminal audit row — fulfills the "Result reported when done." promise made
+// on approve. Marionette cannot message out itself (§9), so it POSTs here.
+// Body: { action_id, state: 'succeeded'|'failed'|'timeout', detail?, chat_id? }
+telegramRoute.post('/telegram/notify', async (c) => {
+  const body = await c.req
+    .json<{ action_id?: number; state?: string; detail?: string; chat_id?: number }>()
+    .catch(() => ({} as Record<string, never>));
+
+  const actionId = body.action_id;
+  const state = body.state;
+  if (!Number.isInteger(actionId) || !state) {
+    return c.json({ error: 'action_id (int) and state are required' }, 400);
+  }
+
+  const chatId = body.chat_id ?? Number(allowedUserId);
+  const detail = body.detail ? ` — ${body.detail}` : '';
+
+  let text: string;
+  if (state === 'succeeded') {
+    text = `✅ Action #${actionId} deploy succeeded${detail}.`;
+  } else if (state === 'timeout') {
+    text = `⏱️ Action #${actionId} deploy status unknown — poll timed out${detail}. Check audit_log.`;
+  } else {
+    text = `❌ Action #${actionId} deploy failed${detail}.`;
+  }
+
+  await sendMessage(chatId, text);
+  return c.json({ ok: true, notified: actionId, state });
+});
