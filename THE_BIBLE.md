@@ -4,8 +4,8 @@
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
 
-*Last verified: 2026-07-11 (whisper model reverted small.en → base — small.en was too slow
-on CPU-only inference in daily use).*
+*Last verified: 2026-07-12 (Telegram → marionette integration shipped and verified
+end-to-end, including a real delegate-to-contractor task).*
 
 ---
 
@@ -14,7 +14,7 @@ on CPU-only inference in daily use).*
 **One-sentence vision:** a personal, self-hosted data hub with an AI layer on top that
 unifies my digital life (starting with Gmail + Calendar), derives insight from it, and —
 increasingly on its own — classifies, briefs, and acts on my behalf, all commanded from a
-single web dashboard (`bentleyos.me`).
+single web dashboard (`bentleyos.me`) **and now also from Telegram**.
 
 **Three principles that don't bend:**
 1. **Host locally by default.** Everything runs on my box except the AI models themselves
@@ -29,11 +29,16 @@ single web dashboard (`bentleyos.me`).
    the sandbox zone (contractor/OpenCode), autonomy over the filesystem and build actions is
    full by design — Bentley doesn't use OpenCode interactively, so there's no
    human-in-the-loop value to preserve there. Guardrail-first applies to the *production*
-   zone and to anything touching the outside world (see §9).
+   zone and to anything touching the outside world (see §9). **Adding a new *interface* to
+   existing sandbox capability (e.g. Telegram) is not a loosening of autonomy** — it's a new
+   client of `marionette`'s already-scoped `/think` → `delegate` → contractor path, gated by
+   its own allow-list. It does not grant any new capability marionette didn't already have.
 
 **North-star sequencing:** data in (Gmail + Calendar) → insight out (real dashboard) → AI
 layer (classify, brief, grounded Q&A) → action layer (approval-gated) → earned autonomy
-(low-risk auto) → self-extension (system ships its own tools).
+(low-risk auto) → self-extension (system ships its own tools). **Command interfaces
+(Telegram, eventually the web dashboard) are orthogonal to this sequencing** — they're just
+new front doors to whatever marionette can already do at any given milestone.
 
 ---
 
@@ -51,7 +56,10 @@ is truth. **This includes this doc's own prior claims** — the marionette→con
 delegate path was marked "verified end-to-end" here once already, on the strength of a
 trivial no-tool-call reply. It wasn't actually proven until a real multi-step task was run
 and two real bugs surfaced. A "verified" claim in this doc is only as good as what was
-actually tested.
+actually tested. **Same lesson repeated during the Telegram build:** a "webhook registered"
+API response from Telegram (`{"ok":true}`) said nothing about whether delivery actually
+worked — `getWebhookInfo`'s `last_error_message` was the only source of truth, and even that
+required a real send/receive cycle (not just a config check) to confirm the full round trip.
 
 **Ground truth beats vision.** Ground every proposal in current state (this doc, §4). If
 unsure whether something exists on the box, give the one command to check — don't assume.
@@ -71,6 +79,13 @@ unsure whether something exists on the box, give the one command to check — do
   to Docker builds:** a `docker compose up --build` can sit on "exporting to image" /
   "unpacking" for 10+ minutes on slow disk I/O with zero visible progress — check
   `docker info` responsiveness and system load before assuming the daemon is hung (see §7).
+- **When a downstream response shape is assumed rather than confirmed, confirm it.** The
+  first Telegram integration attempt silently failed to send replies because
+  `marionette`'s `/think` response was assumed to be `{decision, message, reasoning}` at the
+  top level; it's actually `{decision: {decision, message, reasoning}}`. The bug produced no
+  error — `sendMessage` just sent `undefined` as text — and was only caught by directly
+  curling the upstream service and diffing the real JSON against the code's assumption.
+  Don't guess a response shape from a route name; hit the real endpoint and look.
 
 **File-creation quirk:** the browser terminal has bracketed-paste issues. Short heredocs
 (`cat > file << 'EOF'`) are fine. **For long files — like this one — heredoc in the browser
@@ -97,7 +112,11 @@ flagged as failure-prone.
    approval-gated first. Never wire autonomous actions onto real Gmail without a guardrail.
    Inside the sandbox zone, contractor/OpenCode gets full filesystem/build autonomy by
    design (see §9) — but no email/messaging/external-comms tool is ever wired to contractor,
-   full stop, regardless of zone.
+   full stop, regardless of zone. **Telegram is an inbound command interface only** — it
+   lets a human (allow-listed, single user) direct marionette; it does not give marionette
+   or contractor any new outbound-comms capability. The distinction is direction: a human
+   messaging in is fine, marionette autonomously messaging out to arbitrary
+   contacts/services is exactly what rule 5 forbids.
 
 **Code conventions:**
 - TypeScript + Hono for the API/app. Python only if genuinely unavoidable (basically never).
@@ -120,6 +139,8 @@ flagged as failure-prone.
   BSD/macOS sed (laptop): `sed -i '' 's/x/y/' file` (empty string arg required for the
   backup-suffix parameter). Using the wrong form fails silently or errors — always confirm
   which machine you're on before reaching for `sed -i`.
+- **Never assume a downstream JSON response shape — curl it directly and read the real
+  keys before writing code that parses it.** See §1's Telegram lesson.
 
 ---
 
@@ -134,17 +155,19 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | **postgres** | 5432 (LAN only) | All persisted state — ontology, sync tokens, audit log | Vector search (qdrant) |
 | **qdrant** | 6333 (LAN only) | Vector storage for embeddings (Milestone 3+) | Currently **unused** — nothing writes to it |
 | **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
-| **api** | 3000 | HTTP surface: `/health`, dashboard (`/`), ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min), OpenCode proxy (`/opencode/*`) | Build/deploy logic, AI reasoning |
+| **api** | 3000 | HTTP surface: `/health`, dashboard (`/`), ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → forwards to marionette's `/think`, replies via Telegram `sendMessage`** | Build/deploy logic, AI reasoning |
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
-| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision, audited. Can `reply` or `delegate` to contractor — **the build-machine keystone, now verified working end-to-end including real multi-step tool-call tasks** | Ingestion (api's job), deploy (deploy's job) |
+| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — the build-machine keystone, verified working end-to-end including real multi-step tool-call tasks **and now driven live from Telegram** | Ingestion (api's job), deploy (deploy's job) |
 | **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `base` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
 | **cloudflared** | — | Public tunnel, gated on `api` health | — |
 | **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
 
 **Rule of thumb:** ingestion + read APIs live in `api`; AI reasoning lives in `marionette`;
 anything touching `docker compose` or git lives in `deploy`. Task mentions two of these →
-split the ticket.
+split the ticket. **Telegram fits this rule cleanly: it's just another HTTP surface on
+`api`, forwarding to marionette's existing reasoning endpoint — no new reasoning logic was
+added anywhere.**
 
 **Cloudflare/networking gotcha:** `cloudflared` runs in a container on `backend`. It reaches
 app services by container name (`http://api:3000`), host services (SSH) by LAN IP
@@ -165,7 +188,7 @@ Running on the box at `~/bentley-os` (Ubuntu, LAN IP `172.16.30.4`). Absolute pa
 qdrant (6333/6334 — reachable, zero collections, unused), cloudflared, dozzle (8080),
 portainer (9000/8000/9443), uptime-kuma (healthy, 3001), deploy (healthy, 4000 /
 127.0.0.1), contractor (healthy, 4100, backend only), marionette (healthy, 4200, backend
-only), **whisper (healthy, 4300, backend only, `base` model)**.
+only), whisper (healthy, 4300, backend only, `base` model).
 
 **No `embedder` service exists** — confirmed absent. Embeddings deferred to a local model
 (not yet built).
@@ -179,14 +202,16 @@ state).
 (from `0002_sync_state.sql`, applied live).
 - `emails` **already has** unused `category` + `importance` columns — the future classifier
   writes to these, no new migration needed. Don't recreate them.
-- `calendar_events.organizer_id` and the whole `event_attendees` table are **still
-  unpopulated** — current `gcal.ts` upsert doesn't populate people. **This is the last open
-  item in Milestone 1** — close before Milestone 3 Q&A needs "who's coming to X."
+- `calendar_events.organizer_id` and `event_attendees` are now **populated** — see Milestone
+  1 status below.
 - `audit_log` columns: `id` (bigint identity), `at` (timestamptz, default now()), `actor`,
   `action`, `target` (nullable), `outcome` (nullable), `payload` (jsonb, default `{}`).
   Indexes on `action` and `at DESC`. Real rows now exist from deploy activity,
-  `marionette.think`, `marionette.delegate`, and `contractor.execute`. Ingestion (gcal/gmail)
-  does **not** currently write to `audit_log` — stdout only. Open item.
+  `marionette.think`, `marionette.delegate`, and `contractor.execute` — **including rows
+  originating from Telegram messages**, indistinguishable in `audit_log` from any other
+  `/think` caller (the audit trail doesn't currently tag which interface originated a
+  request — see §8). Ingestion (gcal/gmail) does **not** currently write to `audit_log` —
+  stdout only. Open item.
 - **psql inside the container:** use `-h 127.0.0.1` to force TCP+password auth (peer auth
   fails on the Unix socket):
 ```bash
@@ -202,6 +227,53 @@ state).
   tab, not the global org toggle.
 - Verify Access changes in **incognito** — existing sessions give false "still open"
   readings.
+- **New: `Telegram Webhook Bypass` Access Application** — scoped to
+  `spaghettios.bentleyos.me/telegram/webhook` specifically (a narrower path-level app, not a
+  new subdomain), policy Action **Bypass** (not Allow — Bypass skips the auth challenge
+  entirely, which is required since Telegram's webhook POST can't complete a Cloudflare
+  Access login flow). Path-scoped apps take precedence over the broader hostname-level
+  `Bentley OS API` app. **First creation attempt pointed at the wrong hostname
+  (`tele.bentleyos.me`, a nonexistent subdomain) instead of `spaghettios.bentleyos.me` with a
+  path — always screenshot/confirm the exact domain field before saving an Access app.**
+  Auth for this specific endpoint is instead enforced at the application layer: a
+  `secret_token` header check (Telegram's native webhook-secret mechanism) plus a
+  single-user allow-list check against `TELEGRAM_ALLOWED_USER_ID`.
+
+**Telegram integration — done end-to-end:**
+- **Bot:** `@spaghettios_bot`, created via BotFather. Token stored only in `.env`
+  (`TELEGRAM_BOT_TOKEN`) — **the first-issued token was pasted in plaintext in chat and was
+  rotated immediately** (same leak pattern flagged for whisper/Postgres/DeepSeek, but this
+  one *was* actually rotated right away — see §8 for the ones still pending).
+- **Route:** `apps/api/src/routes/telegram.ts`, mounted in `routes/index.ts` alongside
+  `opencodeRoute`. `POST /telegram/webhook`:
+  1. Rejects unless `x-telegram-bot-api-secret-token` header matches
+     `TELEGRAM_WEBHOOK_SECRET` (env var, random 32-byte hex, generated via
+     `openssl rand -hex 32`).
+  2. Always returns `200 {ok:true}` to Telegram regardless of downstream outcome (Telegram
+     retries aggressively on non-2xx, which isn't the desired behavior for auth/parse
+     failures — same pattern would apply to any future bot-API integration).
+  3. Silently drops any message where `from.id` doesn't match `TELEGRAM_ALLOWED_USER_ID`
+     (env var, Bentley's numeric Telegram user ID, obtained via `@userinfobot`) — the
+     single-user allow-list.
+  4. Forwards `message.text` to `http://marionette:4200/think` as `{"request": text}`.
+  5. Reads the response as `{decision: {decision, message, reasoning}}` (nested — confirmed
+     by direct curl, see §1) and sends `decision.message` back via Telegram's `sendMessage`
+     API to the original `chat.id`.
+- **Env vars** (in `.env`, flow through automatically via `api`'s existing `env_file: .env`
+  compose directive — no compose changes needed): `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_WEBHOOK_SECRET`, `TELEGRAM_ALLOWED_USER_ID`.
+- **Webhook registration:** `POST https://api.telegram.org/bot<token>/setWebhook` with
+  `url: https://spaghettios.bentleyos.me/telegram/webhook` and
+  `secret_token: <TELEGRAM_WEBHOOK_SECRET>`. Check delivery health any time via
+  `GET https://api.telegram.org/bot<token>/getWebhookInfo` — `last_error_message` is the
+  fastest signal something's broken (was `405 Method Not Allowed` when the URL initially
+  pointed at the wrong hostname `bentleyos.me` instead of `spaghettios.bentleyos.me`, then
+  `302 Found` once the URL was right but Cloudflare Access was still gating the path).
+- **Confirmed working end-to-end with a real task**, not just a trivial reply: message sent
+  from the Telegram app → `api` → `marionette` → `delegate` → `contractor` → OpenCode →
+  real answer (directory listing) → reply delivered back in the Telegram app.
+- **Commit:** `c97ba37` — `feat: Telegram webhook -> marionette, Access-bypassed on
+  /telegram/webhook path`.
 
 **Whisper — self-hosted speech-to-text, done end-to-end:**
 - **Server:** `~/bentley-os/whisper/Dockerfile` builds `whisper.cpp` from source
@@ -257,20 +329,24 @@ state).
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `b634e17`.
-Recent commits: `369e256` (gcal + gmail ingestion wired into live api via node-cron) →
-`5c020cc` (gcal: populate organizer_id and event_attendees) → `5f28f3f` (fix: keystone
-end-to-end — undici timeout + OpenCode headless permissions) → `35887c2` (docs: whisper
-remote access setup, via GitHub web UI per the long-file workaround) → `26ecab1` (whisper:
-switch model from base to small.en for better accuracy) → `527d877` (whisper: revert
-model from small.en to base for speed).
+Local in sync with `origin/main` at `c97ba37`.
+Recent commits: `c97ba37` (feat: Telegram webhook → marionette, Access-bypassed on
+`/telegram/webhook` path) → `369e256` (gcal + gmail ingestion wired into live api via
+node-cron) → `5c020cc` (gcal: populate organizer_id and event_attendees) → `5f28f3f` (fix:
+keystone end-to-end — undici timeout + OpenCode headless permissions) → `35887c2` (docs:
+whisper remote access setup, via GitHub web UI per the long-file workaround) → `26ecab1`
+(whisper: switch model from base to small.en for better accuracy) → `527d877` (whisper:
+revert model from small.en to base for speed).
 
 **Deploy service** (`~/bentley-os/deploy/`): serialized queue, reads last-good commit from
 `audit_log` → build → `up -d` → poll real `/health` over `backend` → success or
 auto-rollback, every step audited. `SERVICE_HEALTH` map covers `api`, `contractor`,
 `marionette` — **not `whisper`**, which must be rebuilt directly via
 `docker compose up -d --build whisper` until it's added to the map. Deploys for covered
-services go through `POST /deploy` — never raw compose for those.
+services go through `POST /deploy` — never raw compose for those. Used twice during the
+Telegram build (initial route addition, then the response-shape bugfix), both isolation-
+tested first, both confirmed via `audit_log`'s `deploy.succeeded` row rather than trusting
+the immediate `POST /deploy` response.
 - **Known open bug:** rollback runs `git checkout <commit> -- .` — reverts the **entire repo
   tree**, not just the failed service's files. **Blocks Milestone 5** — must fix before any
   auto-executed AI action, since the blast radius of a bad auto-rollback is the same
@@ -279,7 +355,9 @@ services go through `POST /deploy` — never raw compose for those.
 **Contractor service** (`~/bentley-os/contractor/`): the coding/build layer. `POST /execute`
 runs a real `@opencode-ai/sdk` session against the systemd OpenCode server (LAN IP
 `172.16.30.4:4096`), audited (`actor='contractor'`). `WORKDIR /app` (outside the bind
-mount). Reached as `http://contractor:4100`.
+mount). Reached as `http://contractor:4100`. Now driven both by direct API testing and live
+Telegram-originated tasks — no difference in behavior, since Telegram is purely an inbound
+trigger for the same `/think` → `delegate` path.
 - **`undici.setGlobalDispatcher`** set at process start: `headersTimeout`/`bodyTimeout` =
   10 min. Node's fetch default (5 min) was killing real multi-step OpenCode tasks before
   they finished — a trivial "reply with pong" prompt (no tool calls) always worked, masking
@@ -296,24 +374,29 @@ mount). Reached as `http://contractor:4100`.
 **Marionette service** (`~/bentley-os/marionette/`): the orchestrator, DeepSeek reasoning.
 - `POST /think {"request":"..."}` → DeepSeek (`deepseek-v4-pro`, JSON mode) → structured
   `Decision {decision, message, reasoning}` → audited (`actor='marionette'`,
-  `action='marionette.think'`) → returned.
-- **`delegate` branch — now genuinely verified**, not just claimed. `schema.ts` allowlists
+  `action='marionette.think'`) → returned. **Response envelope is
+  `{"decision": {"decision": ..., "message": ..., "reasoning": ...}}`** — nested one level,
+  not flat. Confirmed by direct curl against `http://marionette:4200/think` from inside the
+  `backend` network; any new client (Telegram included) must read `.decision.message`, not
+  `.message`.
+- `delegate` branch — genuinely verified, not just claimed. `schema.ts` allowlists
   `target_service='contractor'` only (`DELEGATABLE_SERVICES = ['contractor']` — model can't
   invent a target). `index.ts` POSTs to `http://contractor:4100/execute`, audits
   `marionette.delegate`. Same `undici` timeout fix applied here (marionette's own fetch to
   contractor had no timeout override before — it would just hang indefinitely on a slow
   contractor call).
-- **Confirmed end-to-end with a real task**: `/think` → delegate → contractor → OpenCode →
-  actual file written to disk, verified with a direct `cat` (not just trusting the JSON
-  response body, which can plausibly claim success without it being true).
+- **Confirmed end-to-end with a real task, twice now**: once via direct API testing (file
+  written to disk, verified with `cat`), and again via a live Telegram-originated request
+  (directory listing, delivered back through `sendMessage`).
 - Failed delegation still returns 200 with the decision + error, never 502s a reasoning
   success.
 - `MARIONETTE_MODEL` env var (default `deepseek-v4-pro`; set `deepseek-v4-flash` for cheap
   iteration).
-- **Still cannot:** no memory (Qdrant unused, `/think` stateless), no delegation targets
-  beyond contractor, no production-zone write actions (approval-gate layer is Milestone 4,
-  not built) — contractor's writes are sandbox-only today, nothing auto-commits or
-  auto-deploys from a delegated task.
+- **Still cannot:** no memory (Qdrant unused, `/think` stateless — each Telegram message is
+  a fresh, context-free request; no conversation history is retained across messages), no
+  delegation targets beyond contractor, no production-zone write actions (approval-gate
+  layer is Milestone 4, not built) — contractor's writes are sandbox-only today, nothing
+  auto-commits or auto-deploys from a delegated task, Telegram-originated or otherwise.
 
 **OpenCode permission policy** (`~/bentley-os/opencode.json`) — **decided and live**:
 - Bentley doesn't use OpenCode interactively; only marionette/contractor call it, always
@@ -331,7 +414,9 @@ mount). Reached as `http://contractor:4100`.
 - No email/messaging/external-comms tool exists in OpenCode's default toolset, so external
   comms are blocked by omission today. **If an MCP connector for email/messaging is ever
   wired to contractor, it must ship behind an explicit deny in this policy — never rely on
-  omission again once the capability exists.**
+  omission again once the capability exists.** This includes Telegram itself — contractor
+  has no Telegram-sending capability of its own; only the `api` route's `sendMessage` call
+  (a fixed, single-recipient reply-to-sender mechanism, not a general messaging tool) exists.
 - Config is loaded at OpenCode startup, not per-request — `sudo systemctl restart opencode`
   required after any change to this file.
 
@@ -342,7 +427,27 @@ mount). Reached as `http://contractor:4100`.
 - OAuth secrets (`client_secret.json`, `token.json`) bind-mounted read-only into the live
   `api` container at `/secrets/` (exact absolute host path, per §7 bind-mount lesson).
 - Confirmed live: first tick after deploy ran clean, both syncs incremental
-  (`fetched: 0, upserted: 0` — correct, since ---
+  (`fetched: 0, upserted: 0` — correct, since the isolation test had just consumed the
+  delta).
+
+**Milestone 1 gap — resolved.** `event_attendees` and `organizer_id` population is
+**verified live** (organizer_id populated on real rows, event_attendees confirmed via a
+real test event). Milestone 1 is complete; see §6.
+
+---
+
+## 5. Data model
+
+```
+people ──< email_recipients >── emails
+people ──< event_attendees  >── calendar_events
+
+audit_log    (every deploy action, every AI action — reasoning + delegation — regardless
+              of which interface originated the request: direct API call or Telegram)
+sync_state   (source PK, sync_token, updated_at — incremental ingestion cursors)
+```
+
+---
 
 ## 6. Roadmap (ordered by what unblocks what)
 
@@ -350,19 +455,22 @@ mount). Reached as `http://contractor:4100`.
 Cloudflare Access email-locked + MFA on.
 
 **Orchestrator build-order (precedes Milestone 1's remaining work): ✅ Done, and now
-actually proven.**
+actually proven — including from a live external interface.**
 - Deploy service — ✅ built, rollback-tested + fixed (scope bug still open, see §4/§8).
 - Contractor (OpenCode container) — ✅ built, `/execute` wired to real OpenCode, live in
   prod, undici-timeout-hardened.
-- Marionette — ✅ built, `/think` reasoning + `delegate` branch to contractor. **This is the
+- Marionette — ✅ built, `/think` reasoning + `delegate` branch to contractor. The
   build-machine keystone — marionette can direct contractor to write code, not just reason
-  about it — and it's now verified against a real multi-step tool-call task, not just a
-  trivial reply that happened to avoid the two bugs that were actually blocking it.**
+  about it — verified against real multi-step tool-call tasks both via direct API testing
+  and via a live Telegram-originated request.
+- **Telegram interface — ✅ built and verified end-to-end.** First working command channel
+  to marionette outside of direct API calls. Single-user allow-listed, webhook-secret
+  gated, Cloudflare-Access-bypassed on its specific path only.
 - Wolverine (fixer) — not built.
-- Local Whisper — **✅ done** (self-hosted `whisper.cpp`, `base` model, Cloudflare
+- Local Whisper — ✅ done (self-hosted `whisper.cpp`, `base` model, Cloudflare
   Access-gated, Hammerspoon push-to-talk client on laptop). Local embeddings — not built.
 
-**Milestone 1 — Data in (Gmail + Calendar): 🔶 nearly done, one gap left**
+**Milestone 1 — Data in (Gmail + Calendar): ✅ Done.**
 | Step | Status |
 |---|---|
 | `sync_state` migration | ✅ applied |
@@ -371,25 +479,28 @@ actually proven.**
 | Rebuild api image with `googleapis` | ✅ done |
 | node-cron schedule in api | ✅ done, live in prod |
 | Wire `gcal.ts` + `gmail.ts` into running api | ✅ done, live in prod |
-| `event_attendees` / `organizer_id` population | ✅ verified live (organizer_id 1534/1541 populated, event_attendees confirmed via real test event) |
+| `event_attendees` / `organizer_id` population | ✅ verified live |
 
-- **Done when:** new events + emails land in Postgres automatically, with provenance, **and**
-  `event_attendees`/`organizer_id` are populated. First two conditions met; third is the
-  remaining gap.
+- **Done when:** new events + emails land in Postgres automatically, with provenance, and
+  `event_attendees`/`organizer_id` are populated. **All conditions met.**
 
 **Milestone 2 — Insight out.** Replace `apps/api/src/routes/dashboard.ts` (static status
 card) with server-rendered views reading `calendar_events` / `emails` directly. "Today" +
-"what changed" first.
+"what changed" first. **Not started — deferred by choice this session in favor of the
+Telegram interface.**
 
 **Milestone 3 — AI layer, read-only.** In **marionette**, not api. Classify email → the
 existing `category`/`importance` columns. Morning brief. Grounded Q&A. This is where the
-qdrant/embeddings decision can no longer be deferred.
+qdrant/embeddings decision can no longer be deferred. **Telegram is a natural delivery
+channel for the morning brief once this is built** — worth keeping in mind when designing
+it, though not yet scoped.
 
 **Milestone 4 — Action layer, approval-gated.** New action types (create event, draft reply,
 commit + deploy via contractor) behind one-click approval, all writes through `audit_log`.
 Contractor can already write sandbox code via delegation, but nothing auto-commits,
 isolation-tests, or deploys yet from a delegated task — that pipeline is this milestone's
-job.
+job. **Telegram could double as the approval channel** (approve/deny via reply) — worth
+considering when this milestone is scoped, not decided yet.
 
 **Milestone 5 — Earned autonomy.** Auto-execute low-risk tier only. **Blocked on the
 rollback-scope fix (§4).**
@@ -415,7 +526,9 @@ system.
   startup. Applies to `deploy`, `contractor`, `marionette`. `api` uses real `tsc` + `.js` —
   opposite convention, easy to get wrong.
 - **Node/npm live only inside Docker** — host has neither. Dependency changes = hand-edit
-  `package.json`, let the build install.
+  `package.json`, let the build install. **`npx tsc --noEmit` isn't available on the host
+  for the same reason** — the closest pre-deploy check is a full isolation build
+  (`docker build` + throwaway `docker run` + `/health` hit), not a host-side typecheck.
 - **Isolation-test before any commit** — throwaway `docker run`, confirm the real path and
   audit row before deploying.
 - **`audit_log` is authoritative** for deployment and orchestration state — not raw git
@@ -449,6 +562,26 @@ system.
   the JWT `meta` payload — the token itself can be completely valid and still get rejected.
   Confirmed by testing: generating the token and using correct headers still failed until
   this policy existed.
+- **A path-scoped Cloudflare Access Application is not the same as a new subdomain, and it's
+  easy to create the wrong one by accident.** When adding an app meant to carve an exception
+  into an existing hostname's Access policy (e.g. a webhook endpoint that can't complete an
+  Access login), the domain field must be set to the *exact same hostname* as the existing
+  app, with the narrower scope coming from the **path** field — not a different subdomain
+  typed into the domain box. Symptom of getting it wrong: the new app's Destinations column
+  shows an unexpected/truncated hostname, and the target endpoint keeps 302-redirecting to
+  Access login exactly as before. Always confirm the Destinations column (or a screenshot of
+  the edit form) shows the intended full hostname + path before relying on it.
+- **Bypass and Allow are different Cloudflare Access policy actions.** Allow still requires
+  passing an identity check; only **Bypass** skips the Access challenge entirely. A
+  webhook-style caller (Telegram, or any other server-to-server POST with no browser/login
+  flow available) needs Bypass, not Allow.
+- **A downstream JSON response shape should never be assumed from a route name or a "looks
+  about right" guess — confirm it with a real curl.** `marionette`'s `/think` response is
+  nested (`{decision: {decision, message, reasoning}}`), not flat. The bug this caused
+  (`sendMessage` silently sent `undefined` as the message text) produced no error anywhere
+  in the stack — Telegram's API happily accepted and "delivered" a message, it just had no
+  visible content. The only way this surfaced was noticing the user received nothing,
+  which is a much slower feedback loop than just curling the endpoint first.
 - **`sed -i` syntax is platform-specific.** GNU sed (Linux/the box) takes no argument after
   `-i` for in-place editing without a backup. BSD/macOS sed requires an explicit (even if
   empty) backup-suffix argument: `sed -i '' 's/x/y/'`. Using the Linux form on macOS or vice
@@ -501,9 +634,27 @@ system.
   started — scoped as a future task if `base`'s CPU latency becomes annoying in daily
   use.
 - **Log aggregation** specifics — not decided.
-- **`event_attendees` / `organizer_id` gap** — last item blocking Milestone 1 completion.
 - **`marionette/src/schema.ts`** has one leftover comment mentioning "opencode"
   conceptually — cosmetic, not fixed.
+- **`whisper/Dockerfile.bak`** — stray untracked backup file sitting in the repo working
+  tree (noticed during the Telegram commit's `git status`). Harmless but should be deleted
+  or gitignored rather than left loose.
+- **Telegram bot token — rotated once already, mid-build.** The first-issued token was
+  pasted in plaintext in chat before the integration was even wired up; it was rotated
+  immediately via BotFather and the new token went straight into `.env` without being
+  pasted here. Worth normalizing this reflex (rotate-on-exposure, never wait) for any future
+  credential handling.
+- **`audit_log` doesn't tag request origin/interface.** A `marionette.think` row looks
+  identical whether it came from a direct API call, a test script, or a Telegram message.
+  Not a problem yet at single-user scale, but worth a `source` or `channel` field in the
+  audit payload before there's ever more than one command interface or user to disambiguate.
+- **No conversation memory across Telegram messages.** Each message is a fresh, stateless
+  `/think` call — marionette has no way to know "the file I just wrote" refers to something
+  from two messages ago. Fine for one-shot commands today; will need addressing (likely via
+  Qdrant, already deferred to Milestone 3) before Telegram can support multi-turn tasks.
+- **Telegram webhook has no rate limiting or replay protection beyond the secret-token
+  header and user-ID allow-list.** Low risk at single-user scale with a Bypass-scoped path,
+  but worth revisiting if this interface's trust boundary ever expands.
 
 ---
 
@@ -513,37 +664,40 @@ system.
    prompt-calling function in `apps/api` belongs in marionette instead, with api calling
    marionette's HTTP endpoint. **Whisper is not an exception** — it does pure transcription
    only, no interpretation; any future step that reasons about transcribed text belongs in
-   marionette, not in the whisper service or the Hammerspoon client.
+   marionette, not in the whisper service or the Hammerspoon client. **Telegram is not an
+   exception either** — the webhook route in `api` does no reasoning of its own; it's a thin
+   forward-and-relay to marionette's existing `/think`, identical in spirit to how
+   `opencode.ts` proxies to the OpenCode server rather than reimplementing anything.
 2. **One build/deploy system.** `deploy` already has queueing, health polling, audit-backed
    rollback. Milestone 6's git automation is an *extension* of `deploy`, not a parallel
    service.
 3. **Schema before code.** Check `0001_secretary_ontology.sql` before adding a column —
    `emails.category`/`importance` already exist.
-4. **`audit_log` is the one ledger.** Deploy actions and AI actions both write here. No
-   second "AI decisions" table.
+4. **`audit_log` is the one ledger.** Deploy actions and AI actions both write here — this
+   includes Telegram-originated requests, since they flow through the same
+   `marionette.think`/`marionette.delegate` audit points as any other caller. No second "AI
+   decisions" table, and no separate "Telegram log."
 5. **Local vs. pushed state.** `git status` at the start of every session.
 6. **Two-zone autonomy, refined:**
    - **Sandbox zone** (marionette → contractor → OpenCode): full filesystem/build autonomy
      by design. Bentley doesn't use OpenCode interactively, so there's no
      human-in-the-loop cost to preserving. Enforced today via `opencode.json`'s permission
      policy (§4) — allow everything except a short deny-list of catastrophic `rm -rf`
-     patterns.
+     patterns. **Telegram is a new front door into this same zone, not a new zone** — a
+     message from the allow-listed user has exactly the same reach as a direct `/think` API
+     call, no more, no less.
    - **Production zone** (real Gmail, real deploys, anything outside the sandbox):
      default-deny for side-effecting actions, governed by an explicit allow/deny list
      (Milestone 4). Contractor writing a file today is sandbox; nothing auto-promotes that
-     to production without the Milestone 4 approval gate.
+     to production without the Milestone 4 approval gate. This is unaffected by the
+     Telegram interface — commanding marionette from Telegram doesn't unlock any
+     production-zone capability that didn't already exist.
    - **External comms are never in scope for autonomy, in either zone.** No
      email/messaging/external-comms MCP or tool is wired to contractor. If one ever is, it
      ships with an explicit deny in the permission policy from day one — never relying on
-     "it just doesn't have that tool" once the tool exists.the isolation test had just consumed the
-  delta).
-
----
-
-## 5. Data model
-people ──< email_recipients >── emails
-people ──< event_attendees  >── calendar_events
-│
-audit_log   (every deploy action, eventually every AI action)
-sync_state   (source PK, sync_token, updated_at — incremental ingestion cursors)
-
+     "it just doesn't have that tool" once the tool exists. **Telegram's `sendMessage` call
+     in `api` is not an exception to this rule** — it is a fixed, single-recipient
+     reply-to-the-allow-listed-sender mechanism embedded in one route, not a general-purpose
+     messaging capability exposed to contractor or marionette's decision-making. Marionette
+     cannot choose to message anyone; it can only return a `message` string that `api`
+     relays back to whoever sent the original request.
