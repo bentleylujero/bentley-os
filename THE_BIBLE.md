@@ -347,10 +347,11 @@ services go through `POST /deploy` — never raw compose for those. Used twice d
 Telegram build (initial route addition, then the response-shape bugfix), both isolation-
 tested first, both confirmed via `audit_log`'s `deploy.succeeded` row rather than trusting
 the immediate `POST /deploy` response.
-- **Known open bug:** rollback runs `git checkout <commit> -- .` — reverts the **entire repo
-  tree**, not just the failed service's files. **Blocks Milestone 5** — must fix before any
-  auto-executed AI action, since the blast radius of a bad auto-rollback is the same
-  mechanism that must contain a bad AI action.
+- **Rollback-scope bug — RESOLVED** (`52c3f72`). Previously `git checkout <commit> -- .`
+  reverted the entire repo tree. Now an unscoped/unknown service **aborts** with an audited
+  `deploy.rollback.failed` row instead of running any repo-wide checkout; `SERVICE_PATH`/
+  `SERVICE_HEALTH` both cover only api/contractor/marionette. Isolation-tested (bogus service
+  rejected). **This unblocks Milestones 4 and 5.**
 
 **Contractor service** (`~/bentley-os/contractor/`): the coding/build layer. `POST /execute`
 runs a real `@opencode-ai/sdk` session against the systemd OpenCode server (LAN IP
@@ -456,7 +457,7 @@ Cloudflare Access email-locked + MFA on.
 
 **Orchestrator build-order (precedes Milestone 1's remaining work): ✅ Done, and now
 actually proven — including from a live external interface.**
-- Deploy service — ✅ built, rollback-tested + fixed (scope bug still open, see §4/§8).
+- Deploy service — ✅ built, rollback-tested + scope bug FIXED (`52c3f72`, see §4).
 - Contractor (OpenCode container) — ✅ built, `/execute` wired to real OpenCode, live in
   prod, undici-timeout-hardened.
 - Marionette — ✅ built, `/think` reasoning + `delegate` branch to contractor. The
@@ -502,8 +503,8 @@ isolation-tests, or deploys yet from a delegated task — that pipeline is this 
 job. **Telegram could double as the approval channel** (approve/deny via reply) — worth
 considering when this milestone is scoped, not decided yet.
 
-**Milestone 5 — Earned autonomy.** Auto-execute low-risk tier only. **Blocked on the
-rollback-scope fix (§4).**
+**Milestone 5 — Earned autonomy.** Auto-execute low-risk tier only. **Rollback-scope fix
+done (`52c3f72`) — no longer blocked.**
 
 **Milestone 6 — Self-extension.** Tool registry + isolated test + approval + git automation +
 rollback, **reusing `deploy`'s** job/audit machinery — not a parallel build-and-rollback
@@ -600,6 +601,21 @@ system.
   running — if the image exists but the running container's `CREATED` timestamp predates it,
   a plain `docker compose up -d <service>` (no `--build`) will pick up the already-built
   image quickly, no rebuild needed.
+- **An exported shell var silently overrides `.env` in `docker compose` interpolation.** A
+  stale `export POSTGRES_PASSWORD=...` in the interactive shell beat the `.env` value for
+  every `${POSTGRES_PASSWORD}` compose interpolates — poisoning the built `DATABASE_URL` for
+  services whose URL is composed from it, while the plain `POSTGRES_PASSWORD` env stayed
+  correct, producing a baffling per-service split. Symptom: `docker compose config | grep
+  DATABASE_URL` shows a password string that isn't in `.env`. **`docker compose config` is
+  the interpolation truth check** — always diff it against `.env` before touching the DB
+  role. This masqueraded as "password drift" across two sessions; the DB role was always the
+  real `.env` value, and the attempted "fix" (`ALTER ROLE` to the phantom value) was the
+  actual damage each time. Fix: `unset POSTGRES_PASSWORD`, restore the role to the true
+  `.env` value, recreate. Corollaries: (1) a `trust`-path `psql` (`-h 127.0.0.1`)
+  authenticates regardless of the password sent — only `-h postgres` (the scram network
+  path) actually proves a password matches; a loopback `select 1` is a false positive. (2)
+  `.env.bak` sitting in the working tree is a reinfection hazard (holds the stale secret) —
+  deleted.
 
 ---
 
@@ -607,13 +623,15 @@ system.
 
 - **Docs cleanup:** old `.md` files (`00_NORTH_STAR`, `01_CURRENT_STATE`, `02_DECISIONS`,
   `03_ROADMAP`) retired in favor of this Bible. Remove from the project once trusted.
-- **Rollback scope** (`git checkout -- .` is repo-wide, not per-service) — narrow before any
-  real rollback test on `contractor`/`marionette`. **Blocks Milestone 5.**
+- **Rollback scope — RESOLVED** (`52c3f72`): unscoped service aborts, no repo-wide checkout.
+  Unblocks Milestones 4 and 5.
 - **OpenCode duplication:** the systemd OpenCode server and the `contractor` container are
   **not the same thing yet** — contractor calls the systemd server via SDK, doesn't replace
   it. When the container reaches parity, repoint `apps/api/src/routes/opencode.ts`'s
   `baseUrl` to `http://contractor:4100` in the *same* deploy that retires the systemd unit.
 - **Postgres password rotation** — flagged (pasted plaintext into a chat), still not done.
+  **Re-exposed again during the shell-var/`ALTER ROLE` debugging session** — the real
+  `b08a...` value was pasted multiple times. Rotate whenever the batch rotation happens.
 - **DeepSeek API key fragment** — a masked fragment printed into a chat, not usable alone,
   noted alongside the Postgres rotation. Both still pending.
 - **Shared audit module** — deploy + marionette + contractor each duplicate `audit_log`
