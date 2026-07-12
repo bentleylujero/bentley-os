@@ -54,6 +54,58 @@ function header(headers: any[], name: string): string | undefined {
   return h?.value ?? undefined;
 }
 
+// --- Body extraction ---------------------------------------------------------
+// Gmail bodies are a nested MIME tree; parts are base64url-encoded.
+// Prefer text/plain; fall back to stripped text/html. Never throws — a body
+// extraction failure must not break ingestion (which is /health-adjacent).
+
+function decodeB64Url(data: string): string {
+  try {
+    return Buffer.from(data.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function extractBody(payload: any): string | null {
+  if (!payload) return null;
+
+  let plain: string | null = null as string | null;
+  let html: string | null = null as string | null;
+
+  function walk(part: any) {
+    if (!part) return;
+    const mime = part.mimeType ?? '';
+    const data = part.body?.data;
+    if (data) {
+      if (mime === 'text/plain' && plain === null) plain = decodeB64Url(data);
+      else if (mime === 'text/html' && html === null) html = decodeB64Url(data);
+    }
+    for (const child of part.parts ?? []) walk(child);
+  }
+  walk(payload);
+
+  if (plain && plain.trim()) return plain.trim();
+  if (html && html.trim()) return stripHtml(html);
+  return null;
+}
+
 async function upsertPerson(client: any, addr: Addr): Promise<string> {
   const res = await client.query(
     `INSERT INTO people (email, display_name)
@@ -78,6 +130,7 @@ async function upsertMessage(msg: Record<string, any>): Promise<number> {
 
   const subject = header(headers, 'Subject') ?? null;
   const snippet = msg.snippet ?? null;
+  const body = extractBody(payload);
   const threadId = msg.threadId ?? null;
   const internalMs = msg.internalDate ? Number(msg.internalDate) : null;
   const receivedAt = internalMs ? new Date(internalMs).toISOString() : null;
@@ -91,17 +144,18 @@ async function upsertMessage(msg: Record<string, any>): Promise<number> {
     const senderId = fromAddrs[0] ? await upsertPerson(client, fromAddrs[0]) : null;
 
     const emailRes = await client.query(
-      `INSERT INTO emails (source, source_id, thread_id, sender_id, subject, snippet, received_at, is_unread)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO emails (source, source_id, thread_id, sender_id, subject, snippet, body, received_at, is_unread)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (source, source_id) DO UPDATE SET
          thread_id = EXCLUDED.thread_id,
          sender_id = EXCLUDED.sender_id,
          subject = EXCLUDED.subject,
          snippet = EXCLUDED.snippet,
+         body = EXCLUDED.body,
          received_at = EXCLUDED.received_at,
          is_unread = EXCLUDED.is_unread
        RETURNING id, (xmax = 0) AS inserted`,
-      ['gmail', msg.id, threadId, senderId, subject, snippet, receivedAt, isUnread],
+      ['gmail', msg.id, threadId, senderId, subject, snippet, body, receivedAt, isUnread],
     );
     const emailId: string = emailRes.rows[0].id;
     const inserted: boolean = emailRes.rows[0].inserted;
@@ -139,8 +193,7 @@ async function fetchMessage(gmail: any, id: string): Promise<Record<string, any>
   const res = await gmail.users.messages.get({
     userId: 'me',
     id,
-    format: 'metadata',
-    metadataHeaders: ['From', 'To', 'Cc', 'Subject'],
+    format: 'full',
   });
   return res.data;
 }
