@@ -376,8 +376,8 @@ applied live.
   from current repo state; contractor doesn't commit first yet (`TODO(steering/commit)` in
   `actions.ts`).
 - **Commits:** `3a66aef` (propose/approve/deny/execute lifecycle) + `b13c5ce` (Telegram
-  buttons + surface endpoint).
-
+  buttons + surface endpoint) + `80298a4` (async deploy-completion — poll to true finish +
+  ✅/❌ Telegram push).
 **Marionette audit-sight — read endpoint AND `/think` integration both done, live:**
 - **`marionette/src/audit-read.ts`** — Mari's read-only "sight" over her own ledger. The
   read side of `audit.ts`: no new state, no shadow table, only SELECTs from `audit_log`
