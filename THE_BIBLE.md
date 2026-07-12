@@ -5,9 +5,11 @@ When this conflicts with anything older, this wins. Regenerate from the repo whe
 drifts; don't hand-edit it into staleness.*
 
 *Last verified: 2026-07-12 (Milestone 4 approval-gated action layer shipped — `actions`
-table + lifecycle + 5 marionette routes + Telegram Approve/Deny buttons; and marionette
-audit-sight read endpoint `GET /audit/summary` shipped. Both live, confirmed via audited
-`POST /deploy`. `/think` does NOT yet use audit-sight — that integration is the next task.)*
+table + lifecycle + 5 marionette routes + Telegram Approve/Deny buttons; marionette
+audit-sight read endpoint `GET /audit/summary` shipped; AND `/think` now consumes
+audit-sight — Mari narrates real system state from her own ledger in response to
+system-status questions (keyword-gated pre-fetch injection, chosen over a tool-call loop).
+All live, confirmed via audited `POST /deploy`, verified end-to-end from the Telegram app.)*
 
 ---
 
@@ -160,7 +162,7 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | **api** | 3000 | HTTP surface: `/health`, dashboard (`/`), ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
-| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`** | Ingestion (api's job), deploy (deploy's job). **`/think` does NOT yet consume audit-sight** |
+| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, **now consumed by `/think`**: system-status questions trigger an in-process `auditSummary(60)` read, injected into the reasoning prompt so Mari narrates real activity instead of claiming blindness** | Ingestion (api's job), deploy (deploy's job) |
 | **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `base` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
 | **cloudflared** | — | Public tunnel, gated on `api` health | — |
 | **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
@@ -332,7 +334,7 @@ applied live.
 - **Commits:** `3a66aef` (propose/approve/deny/execute lifecycle) + `b13c5ce` (Telegram
   buttons + surface endpoint).
 
-**Marionette audit-sight — read endpoint done, `/think` integration NOT done:**
+**Marionette audit-sight — read endpoint AND `/think` integration both done, live:**
 - **`marionette/src/audit-read.ts`** — Mari's read-only "sight" over her own ledger. The
   read side of `audit.ts`: no new state, no shadow table, only SELECTs from `audit_log`
   (§2/§9: the one authoritative ledger). Same connection pattern as `audit.ts`.
@@ -346,12 +348,48 @@ applied live.
   `/health` and `/think`). Deployed live via audited `POST /deploy` (job `e44b02f7`,
   confirmed by `deploy.succeeded` row), verified on the live `bentley-os-marionette-1`
   container.
-- **NOT YET DONE — the actual payoff:** `/think` does not consume this. A Telegram message
-  like "what have you done today?" still hits `callDeepSeek` with no system-state context
-  and returns a canned "no data" reply (see live rows id=113/125). Wiring `/think` to use
-  audit-sight is the **next task** — the design fork (tool-call loop vs. pre-fetch
-  injection) is captured in §8.
-- **Commit:** `9f3f054` (`feat(marionette): audit-sight read endpoint`).
+- **`/think` now consumes audit-sight — the payoff, done.** A Telegram message like "what
+  have you done today?" or "anything failing?" now returns a real narrated summary of
+  `audit_log` activity (deploys, think calls, action lifecycle, failures), not the old
+  canned "no data" reply. **Design fork resolved: (B) pre-fetch injection**, chosen over
+  (A) a tool-call loop — because `deepseek.ts`'s `callDeepSeek` hardcodes
+  `response_format: json_object`, sends no `tools` array, and returns only `.content` (no
+  `tool_calls` surfaced), so a tool-call loop would have meant a whole second code path and
+  a second model call to reconcile with the forced-JSON decision contract. (B) is one call,
+  `callDeepSeek`/`normalizeDecision` left untouched.
+- **`marionette/src/system-sight.ts`** (new) — the bridge between the raw read
+  (`audit-read.ts`) and the reasoning (`/think`). Two pure functions, no DB access of its
+  own:
+  - `isSystemStatusQuestion(request)` — a **keyword gate** (lowercased substring match
+    against a hand-picked phrase list: "what have you done", "done today", "system status",
+    "anything failing", "did the deploy", etc.). Conservative by design: a miss just falls
+    back to the honest "I can't see that" reply — never a wrong answer, only a missed one.
+    Gate does NOT fire on coding/other requests, so they're not polluted with audit noise
+    (verified: "what is 2+2?" returns a plain answer).
+  - `formatAuditForPrompt(summary)` — turns `auditSummary`'s structured output into a
+    **compact** text block (counts by action/outcome + trimmed one-liners per recent/failure
+    row, pulling only useful crumbs like `req`/`job_id`/`error` out of `payload` — NOT the
+    raw jsonb, which is big and noisy).
+- **`/think` wiring** (`marionette/src/index.ts`): builds a `messages` array; if
+  `isSystemStatusQuestion(request)`, does an **in-process** `await auditSummary(60)` (not an
+  HTTP call to its own `/audit/summary` — the function is right there in-process), formats
+  it, and pushes it as a second `system` message before the user turn. **Sight-read failure
+  degrades gracefully** — a `try/catch` around the fetch logs and falls through to the
+  no-sight path rather than sinking the whole `/think`. `callDeepSeek(messages)` then flows
+  into the unchanged `JSON.parse` → `normalizeDecision` path; status questions resolve to
+  `reply`, returning before the delegate branch.
+- **`prompt.ts` widened** to match the new capability (§ rule: widen the prompt with the
+  capability, never ahead of it). Old blanket "you are NOT the source of truth, never
+  present yourself as knowing the state of the homelab" narrowed to the owner's *data*
+  (email/calendar/docs); added a `WHAT YOU CAN SEE NOW` block telling Mari she CAN observe
+  her own audit ledger, and when a `SYSTEM ACTIVITY` block is present she must narrate from
+  it as fact (when absent, fall back to honest limits — don't invent activity).
+- **Verified end-to-end from the actual Telegram app**, not just a container probe: real
+  "what have you done today?" message → narrated reply naming real timestamped events incl.
+  the self-deploy that shipped this very change. Second phrasing ("anything failing?", a
+  different keyword) confirmed against the production container post-deploy.
+- **Commits:** `27f18b3` (`feat(marionette): /think consumes audit-sight — narrates real
+  system state`) on top of `9f3f054` (`feat(marionette): audit-sight read endpoint`).
 
 **Whisper — self-hosted speech-to-text, done end-to-end:**
 - **Server:** `~/bentley-os/whisper/Dockerfile` builds `whisper.cpp` from source
@@ -407,8 +445,10 @@ applied live.
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `9f3f054`.
-Recent commits: `9f3f054` (feat(marionette): audit-sight read endpoint — `GET
+Local in sync with `origin/main` at `27f18b3`.
+Recent commits: `27f18b3` (feat(marionette): /think consumes audit-sight — narrates real
+system state) → `125de94` (docs: revise for Milestone 4 + Telegram — the regenerated Bible,
+committed via GitHub web UI) → `9f3f054` (feat(marionette): audit-sight read endpoint — `GET
 /audit/summary`) → `b13c5ce` (feat(m4): Telegram approve/deny buttons + surface endpoint) →
 `3a66aef` (feat(m4): approval-gated action layer — propose/approve/deny/execute lifecycle) →
 `5862496` (docs(bible): rollback-scope resolved; password 'drift' → stale shell-var
@@ -471,11 +511,18 @@ trigger for the same `/think` → `delegate` path.
   success.
 - `MARIONETTE_MODEL` env var (default `deepseek-v4-pro`; set `deepseek-v4-flash` for cheap
   iteration).
-- **Still cannot:** no memory (Qdrant unused, `/think` stateless — each Telegram message is
-  a fresh, context-free request; no conversation history is retained across messages), no
-  delegation targets beyond contractor, no production-zone write actions (approval-gate
-  layer is Milestone 4, not built) — contractor's writes are sandbox-only today, nothing
-  auto-commits or auto-deploys from a delegated task, Telegram-originated or otherwise.
+- **Can now:** narrate her own system activity. `/think` consumes audit-sight — a
+  keyword-gated in-process `auditSummary(60)` read is injected into the reasoning prompt for
+  system-status questions, so Mari answers "what have you done today?" / "anything failing?"
+  from the real `audit_log` (see the audit-sight subsection above). This is *self*-sight over
+  the ledger, NOT general memory — see the limit below.
+- **Still cannot:** no cross-message conversation memory (Qdrant unused, `/think` otherwise
+  stateless — each Telegram message is a fresh request; audit-sight lets her see the *ledger*
+  but not recall what the owner said two messages ago — "the file I just wrote" still means
+  nothing), no delegation targets beyond contractor, no *autonomous* production-zone write
+  actions — the M4 approval-gate layer IS built (propose→approve→deny→execute + Telegram
+  buttons, see M4 subsection), but contractor's own writes remain sandbox-only and nothing
+  auto-commits/auto-deploys from a delegated task without the human approval tap.
 
 **OpenCode permission policy** (`~/bentley-os/opencode.json`) — **decided and live**:
 - Bentley doesn't use OpenCode interactively; only marionette/contractor call it, always
@@ -760,16 +807,17 @@ system.
 - **Telegram webhook has no rate limiting or replay protection beyond the secret-token
   header and user-ID allow-list.** Low risk at single-user scale with a Bypass-scoped path,
   but worth revisiting if this interface's trust boundary ever expands.
-- **`/think` doesn't use audit-sight yet — THE next task, and a design fork to decide.**
-  `GET /audit/summary` exists and works, but `/think` is still a single blind `callDeepSeek`
-  and returns canned "no data" to system-status questions. Two paths: **(A) tool-call loop**
-  — give DeepSeek a tool spec for `auditSummary`; on request, fetch + call DeepSeek again
-  with the data (more correct/general, 2 model calls, more moving parts); **(B) pre-fetch
-  injection** — detect system-status questions, fetch the summary, inject into the prompt
-  before a single DeepSeek call (cheaper, 1 call, blunter — only "sees" when we guessed she
-  should). Read `marionette/src/deepseek.ts` first to confirm clean tool-calling support
-  before committing to (A). Whichever: prove end-to-end that a real Telegram "what have you
-  done today?" returns a narrated answer, not the canned reply.
+- **`/think` audit-sight integration — RESOLVED** (`27f18b3`). Design fork decided in favor
+  of **(B) pre-fetch injection** over (A) a tool-call loop, because `deepseek.ts`'s
+  `callDeepSeek` hardcodes `response_format: json_object`, sends no `tools` array, and
+  surfaces no `tool_calls` — (A) would have needed a whole second code path + a second model
+  call. Keyword gate (`system-sight.ts`) → in-process `auditSummary(60)` → compact injected
+  block → single `callDeepSeek`, existing `normalizeDecision` untouched, sight-read failure
+  degrades gracefully. Verified end-to-end from the Telegram app. See §4. **Follow-on worth
+  noting** (not blocking): the keyword gate is blunt — a system-status question phrased
+  outside the pattern list falls back to the honest "can't see" reply. Widen the list or
+  revisit (A) if that becomes annoying. (A) remains a clean future upgrade if Mari should
+  ever decide *for herself* when to look — nothing here forecloses it.
 - **M4 action `succeeded` = deploy 202 accept, not real completion.** (Task A above.) The
   true finish signal lives only in deploy's own `deploy.succeeded` audit row. Needs an
   async poll → Telegram "✅/❌" push via a thin `api` notify endpoint.
