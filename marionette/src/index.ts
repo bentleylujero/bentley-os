@@ -5,6 +5,7 @@ import { callDeepSeek } from './deepseek.ts';
 import { normalizeDecision } from './schema.ts';
 import { audit } from './audit.ts';
 import { SYSTEM_PROMPT } from './prompt.ts';
+import { createAction, listActions, getAction, approveAction, denyAction } from './actions.ts';
 
 // contractor's /execute can run long (real OpenCode build tasks, multi-step
 // tool use) — raise past undici's default 5-minute headers/body timeout so
@@ -98,6 +99,60 @@ app.post('/think', async (c) => {
     return c.json({ decision, delegation: { error: message, cause } });
   }
 });
+
+// ── Action lifecycle (Milestone 4, gate slice) ──────────────────────────────
+// marionette owns the actions table's state transitions. api/Telegram relay to
+// these endpoints; they do no reasoning of their own. Every transition audits
+// with target = the action id.
+
+// Propose an action. { "kind": "commit_deploy", "intent": { "service": "api" } }
+app.post('/actions', async (c) => {
+  let body: any;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'body must be valid JSON' }, 400); }
+  const kind = body?.kind;
+  if (typeof kind !== 'string' || kind.trim() === '') {
+    return c.json({ error: 'missing "kind" string in body' }, 400);
+  }
+  const intent = (body?.intent && typeof body.intent === 'object') ? body.intent : {};
+  const row = await createAction({ kind, intent });
+  return c.json({ action: row }, 201);
+});
+
+// List actions, optionally filtered: /actions?status=proposed
+app.get('/actions', async (c) => {
+  const status = c.req.query('status');
+  const rows = await listActions(status);
+  return c.json({ actions: rows });
+});
+
+// Get one action by id.
+app.get('/actions/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id)) return c.json({ error: 'id must be an integer' }, 400);
+  const row = await getAction(id);
+  if (!row) return c.json({ error: 'not found' }, 404);
+  return c.json({ action: row });
+});
+
+// Approve -> fires execute (fire-and-report; fast ack). Strict guard: only a
+// 'proposed' row can be approved; a second call no-ops with 409.
+app.post('/actions/:id/approve', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id)) return c.json({ error: 'id must be an integer' }, 400);
+  const out = await approveAction(id);
+  if (!out.ok) return c.json({ error: out.reason }, 409);
+  return c.json({ ok: true, id, status: 'approved', note: 'executing — result reported when done' });
+});
+
+// Deny -> terminal. Strict guard: only a 'proposed' row can be denied.
+app.post('/actions/:id/deny', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id)) return c.json({ error: 'id must be an integer' }, 400);
+  const out = await denyAction(id);
+  if (!out.ok) return c.json({ error: out.reason }, 409);
+  return c.json({ ok: true, id, status: 'denied' });
+});
+
 const port = 4200;
 serve({ fetch: app.fetch, port });
 console.log(`marionette listening on :${port}`);
