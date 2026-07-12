@@ -6,6 +6,7 @@ import { normalizeDecision } from './schema.ts';
 import { audit } from './audit.ts';
 import { SYSTEM_PROMPT } from './prompt.ts';
 import { createAction, listActions, getAction, approveAction, denyAction } from './actions.ts';
+import { auditSummary } from './audit-read.ts';
 
 // contractor's /execute can run long (real OpenCode build tasks, multi-step
 // tool use) — raise past undici's default 5-minute headers/body timeout so
@@ -17,6 +18,18 @@ setGlobalDispatcher(new Agent({
 
 const app = new Hono();
 app.get('/health', (c) => c.json({ status: 'ok' }));
+
+// Mari's sight over her own ledger — read-only view of audit_log.
+app.get('/audit/summary', async (c) => {
+  const w = Number(c.req.query('window')) || 60;
+  try {
+    const summary = await auditSummary(w);
+    return c.json(summary);
+  } catch (err) {
+    console.error('[audit/summary] failed:', err);
+    return c.json({ error: 'audit read failed' }, 500);
+  }
+});
 // POST /think  { "request": "<what you want marionette to reason about>" }
 // Calls DeepSeek, returns a structured Decision, audits the call either way.
 // If the decision is "delegate", hands the spec to contractor and folds the
