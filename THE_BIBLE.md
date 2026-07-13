@@ -430,7 +430,7 @@ all applied live. Migrations live at `supabase/migrations/` (five files, `0001`�
     rollback. Verified live in-browser at `spaghettios.bentleyos.me`.
 - **Commits:** `4c39435` (full-body ingestion + `0005`) → `5d45b8d` (Clair classifier
   `POST /classify`) → `532493a` (triage dashboard render).
-- **Still open in M3:** (1) **backlog drain not automated** — 685 emails still unclassified;
+- **Still open in M3:** (1) **auto-drain DONE** (`a9e7bc1`) — cron POSTs marionette /classify (limit 50) each tick;
   the ingestion cron does NOT auto-classify new mail. Natural next slice: wire `classifyBatch`
   into the 5-min cron so new mail self-triages. (2) **Morning brief** — not built.
   (3) **Grounded Q&A** — blocked on the embeddings-provider decision (see the "No embedder"
