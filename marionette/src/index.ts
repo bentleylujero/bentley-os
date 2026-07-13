@@ -8,6 +8,7 @@ import { SYSTEM_PROMPT } from './prompt.ts';
 import { createAction, listActions, getAction, approveAction, denyAction } from './actions.ts';
 import { auditSummary } from './audit-read.ts';
 import { classifyBatch } from './classify.ts';
+import { embedBatch } from './embed.ts';
 import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts';
 
 // contractor's /execute can run long (real OpenCode build tasks, multi-step
@@ -47,6 +48,25 @@ app.post('/classify', async (c) => {
     return c.json(report);
   } catch (err: any) {
     return c.json({ error: 'classify batch failed', detail: err?.message || String(err) }, 500);
+  }
+});
+
+
+// POST /embed  { "limit": 20 }   (default 20)
+// Embeds un-embedded emails (body present, embedded_at null) via OpenAI and
+// upserts vectors into Qdrant. Mirrors /classify: batch-bounded, per-row audit,
+// one bad row can't sink the batch. Reasoning/embedding lives here, not api.
+app.post('/embed', async (c) => {
+  let body: any = {};
+  try { body = await c.req.json(); } catch { /* empty body is fine */ }
+  let limit = Number(body?.limit);
+  if (!Number.isInteger(limit) || limit < 1) limit = 20;
+  if (limit > 200) limit = 200;
+  try {
+    const report = await embedBatch(limit);
+    return c.json(report);
+  } catch (err: any) {
+    return c.json({ error: 'embed batch failed', detail: err?.message || String(err) }, 500);
   }
 });
 
