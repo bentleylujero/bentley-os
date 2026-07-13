@@ -4,22 +4,18 @@
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
 
-*Last verified: 2026-07-12 (Milestone 3 email-triage engine — "Clair" — shipped and live.
-Two-pass consequence classifier in marionette (`marionette/src/classify.ts`, `POST /classify`)
-reads unclassified emails, judges CONSEQUENCE, writes `importance`/`category`/`reason`/
-`confidence`/`classified_at` per email. Deployed via audited `POST /deploy {"service":"marionette"}`
-job `8acb31a7`, confirmed by `deploy.succeeded`. First real batch (21 emails) verified live:
-a real priority curve — GitHub token expiry at 90, Google security alert at 85, both correctly
-tripping Pass 2; newsletters floored at 5–25. Also now live and reflected here for the first
-time: M3 step 2 full-body gmail ingestion (`4c39435`, deployed job `1bbc12fd`) — Gmail sync now
-stores decoded bodies (718/765 rows in the 30-day window); and the out-of-band M2 "what changed"
-dashboard slice (`5955d8d`/`b905e4b`/`79bea75`) — `dashboard_state` singleton tracks last-seen,
-the dashboard surfaces `created_at`-based deltas since the owner last looked. Prior standing
-state still live: M4 approval-gated action layer; marionette audit-sight (`GET /audit/summary`
-+ `/think` consumes it); Telegram command/approval interface; whisper STT.
-KNOWN GAP: the Clair three-tier dashboard RENDER (M3 step 5) is NOT built — the classifier
-writes the columns, but `dashboard.ts` does not read `importance`/`reason` yet. That's the next
-session.)*
+*Last verified: 2026-07-12 (HEAD `b905e4b`. Milestone 2 is now COMPLETE — the "what changed"
+dashboard slice shipped: `apps/api/src/routes/dashboard.ts` now renders a "What changed"
+section (emails/events ingested since the owner last looked, keyed on `created_at`) above the
+existing "Today" + "Recent email" sections, backed by singleton table `dashboard_state`
+(migration `0004`). Live, isolation-tested, deployed via audited `POST /deploy` job
+`63e689a8`, confirmed by `deploy.succeeded`, verified live in-browser. Milestone 4 Task A also
+DONE: async deploy-completion — deploy job polled to true finish, ✅/❌ pushed to Telegram
+(`80298a4`/`8ac171c`). Prior standing state also live: M4 gate slice (`actions` table +
+lifecycle + 5 marionette routes + Telegram Approve/Deny buttons); marionette audit-sight
+(`GET /audit/summary` + `/think` consuming it — Mari narrates real system state from her own
+ledger). `whisper/Dockerfile.bak` now gitignored (`7cb895d`). All confirmed via audited
+`POST /deploy`, verified end-to-end.)*
 
 ---
 
@@ -173,10 +169,10 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | **postgres** | 5432 (LAN only) | All persisted state — ontology, sync tokens, audit log | Vector search (qdrant) |
 | **qdrant** | 6333 (LAN only) | Vector storage for embeddings (Milestone 3+) | Currently **unused** — nothing writes to it |
 | **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
-| **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "Today": today's calendar events + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
+| **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
-| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, consumed by `/think`. **And `POST /classify {"limit":N}` — the Clair triage engine (`classify.ts`): two-pass consequence classifier over unclassified emails, writes `importance`/`category`/`reason`/`confidence`/`classified_at`. Reasoning lives here, NOT in api's dashboard route** | Ingestion (api's job), deploy (deploy's job), **dashboard RENDER of triage output (api's job — reads the columns marionette writes)** |
+| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, **now consumed by `/think`**: system-status questions trigger an in-process `auditSummary(60)` read, injected into the reasoning prompt so Mari narrates real activity instead of claiming blindness** | Ingestion (api's job), deploy (deploy's job) |
 | **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `base` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
 | **cloudflared** | — | Public tunnel, gated on `api` health | — |
 | **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
@@ -218,20 +214,15 @@ confirmed never tracked (checked full git history for leaked values, not just cu
 state).
 
 **Database (Postgres `bentley` db):** ontology schema loaded. Tables: `people`, `emails`,
-`email_recipients`, `calendar_events`, `event_attendees`, `audit_log`, `sync_state`
-(`0002`), `actions` (`0003`, M4), `dashboard_state` (`0004`, M2 what-changed singleton), all
-applied live. Migrations through **`0005_email_intelligence.sql`** applied.
-- `emails` — the classifier (`category`, `importance`) and M3 intelligence columns are all
-  live. **Confirmed live column set (`\d emails`, this session):** `id` (uuid), `source`,
-  `source_id`, `thread_id`, `sender_id` (→ people), `subject`, `snippet`, `received_at`
-  (indexed DESC), `is_unread`, `category`, `importance` (smallint), `created_at`, **`body`
-  (text — full decoded message, `0005`), `reason` (text — Clair's consequence one-liner,
-  `0005`), `confidence` (smallint 0–100, `0005`), `classified_at` (timestamptz — null =
-  never judged, `0005`)**. Partial index **`idx_emails_unclassified ON emails (received_at
-  DESC) WHERE classified_at IS NULL`** — the classifier reads through this.
-- `dashboard_state` (`0004`): single pinned row (`id smallint primary key check (id=1)`),
-  column `last_seen_at timestamptz`. One fact stored once — the last time the owner viewed
-  the dashboard. Drives the "what changed" delta.
+`email_recipients`, `calendar_events`, `event_attendees`, `audit_log`, plus `sync_state`
+(from `0002_sync_state.sql`), `actions` (from `0003_actions.sql`, M4 — see below), and
+`dashboard_state` (from `0004_dashboard_state.sql`, M2 "what changed" — see below), all
+applied live.
+- `emails` **already has** unused `category` + `importance` columns — the future classifier
+  writes to these, no new migration needed. Don't recreate them. Live columns confirmed:
+  `id` (uuid), `source`, `source_id`, `thread_id`, `sender_id` (→ people), `subject`,
+  `snippet`, `received_at` (indexed DESC), `is_unread`, `category`, `importance`,
+  `created_at`.
 - `calendar_events` live columns confirmed: `id` (uuid), `source`, `source_id`, `title`,
   `description`, `location`, `starts_at` (indexed), `ends_at`, `organizer_id` (→ people),
   `status`, `created_at`, `updated_at`. `organizer_id` and `event_attendees` are now
@@ -271,12 +262,10 @@ applied live. Migrations through **`0005_email_intelligence.sql`** applied.
   `secret_token` header check (Telegram's native webhook-secret mechanism) plus a
   single-user allow-list check against `TELEGRAM_ALLOWED_USER_ID`.
 
-**Milestone 2 — dashboard ("Today" + "What changed") — done, live:**
+**Milestone 2 — "Today" dashboard slice — done, live:**
 - **`apps/api/src/routes/dashboard.ts`** replaced the static status card with a
   server-rendered dashboard that reads Postgres directly via api's existing `pg` pool
-  (`apps/api/src/db/pool.ts`, `pool.query(text, params)`). Now THREE sections (Today, Recent
-  email — original slice; **What changed — added out-of-band, `5955d8d`/`b905e4b`/`79bea75`,
-  see below**):
+  (`apps/api/src/db/pool.ts`, `pool.query(text, params)`). Two sections:
   - **Today** — today's `calendar_events`, computed in Postgres with
     `AT TIME ZONE 'America/Chicago'` (Bentley's Central tz — explicit to avoid a UTC-midnight
     bug), `starts_at` within `[today, today+1day)`, ordered ascending. Renders time + title
@@ -298,21 +287,51 @@ applied live. Migrations through **`0005_email_intelligence.sql`** applied.
   audit row, full enqueued→started→succeeded lifecycle, no rollback).
 - **KNOWN COSMETIC GAP:** Gmail marketing snippets carry zero-width padding characters
   (`‌` etc.) that bleed into the rendered snippet. Harmless; strip/truncate in a later
-  dashboard polish.
-- **"What changed" view — DONE, live (landed out-of-band from another session / the GitHub
-  web UI, not the session that shipped "Today").** Renders `created_at`-based deltas — emails
-  and events *ingested* since the owner last looked (NOT `received_at`: an old email newly
-  synced still counts as new to us). Uses the `dashboard_state` singleton (migration
-  `0004_dashboard_state.sql`, one pinned row `id=1`, holds `last_seen_at`). On each dashboard
-  load: read `last_seen_at` → query rows with `created_at > last_seen` (≤20 each of
-  emails/events) → render them with an `event`/`email` tag + a count badge → then
-  fire-and-forget `UPDATE dashboard_state SET last_seen_at = now()` (after the deltas are
-  captured, so THIS view shows what was new and the NEXT resets). First-look and
-  nothing-new states render cleanly; the marker read/update each have their own guard so a
-  failure there never breaks the rest of the page. **This satisfies M2's second "done when"
-  condition — see §6.**
-- **Commits:** `7d79632` (Today slice) → `5955d8d` (what-changed view) → `b905e4b`
-  (0004 singleton migration) → `79bea75` (what-changed section + notification improvements).
+  dashboard polish. Still open.
+- **Commit:** `7d79632` (`feat(m2): server-rendered Today dashboard — today's events +
+  recent email from Postgres`).
+
+**Milestone 2 — "What changed" slice — done, live (M2 now COMPLETE):**
+- **Same file, `apps/api/src/routes/dashboard.ts`** (full rewrite, `5955d8d`) — adds a
+  **"What changed" section that renders FIRST**, above "Today", with a green count badge.
+  Shows emails + calendar_events ingested since the owner last viewed the dashboard.
+- **`dashboard_state` singleton** (migration `0004_dashboard_state.sql`, applied live) holds
+  exactly one fact: `last_seen_at`. Single-row-enforced (`id smallint primary key default 1
+  check (id = 1)`), seeded with one row via `insert ... on conflict (id) do nothing`.
+  **Ontology-correct, not a shadow table** — "since *I* last looked" is a fact about the
+  owner, stored server-side once (chosen deliberately over client-side/localStorage, since
+  it's an owner fact not a browser fact).
+- **"New" is keyed on `created_at` (ingest time), NOT `received_at`/`starts_at`** — an old
+  email newly synced still counts as new to us. Queries: `emails WHERE created_at > $1` and
+  `calendar_events WHERE created_at > $1` (both `LIMIT 20`, `ORDER BY created_at DESC`),
+  `$1 = last_seen_at`.
+- **The GET advances `last_seen_at = now()` fire-and-forget, AFTER computing the deltas** —
+  so the current load shows what's new and the NEXT load resets to "nothing new". Own guard
+  (`void pool.query(...).catch(()=>{})`), never blocks or sinks the response.
+- **Singleton read has its own try/catch** — if it fails, `lastSeen = null`, the delta
+  queries short-circuit to empty (`Promise.resolve({rows:[]})`), and the "What changed"
+  section just shows the empty state while the rest of the page renders. Same
+  graceful-degradation pattern as the "Today" slice. Empty-state copy: "Nothing new since
+  you last looked."
+- **Compact cross-day timestamp** (`fmtStamp` → "Jul 12, 2:40 PM") used in the delta feed,
+  since new rows can span days; the "Today"/"Recent email" sections keep the time-only
+  `fmtTime`. Same `esc()` escaping on all DB-derived strings.
+- **`/health` untouched.** Change stayed in `api` → `.js` imports (`../db/pool.js`), correct
+  for compiled-TS.
+- **Isolation-tested** (throwaway `docker run` on `bentley-os_backend` + `.env`, probed
+  `/health` + `/` body via in-container `node -e fetch(...)` — no curl in `node:22-alpine`;
+  confirmed the "What changed" section renders with a real delta row) **before** deploy.
+  Deployed via audited `POST /deploy {"service":"api"}` (job `63e689a8`, confirmed by
+  `deploy.succeeded` audit row, full enqueued→started→succeeded lifecycle, no rollback).
+  Verified live in-browser at `spaghettios.bentleyos.me` (empty state, as expected — the
+  isolation test + first live load had already advanced `last_seen_at`; correct behavior).
+- **Note:** the isolation test hits the *live* `dashboard_state` via `.env`, so it advances
+  the real `last_seen_at` — expect "nothing new" on the first live load after any isolation
+  test. Not a bug.
+- **Commits:** `5955d8d` (`feat(m2): "what changed" dashboard view — deltas since last
+  look`) + `b905e4b` (`migration: 0004_dashboard_state singleton for 'what changed'
+  last-seen tracking` — the migration file itself, committed after the fact; it had been
+  applied live by hand before being tracked).
 
 **Telegram integration — done end-to-end:**
 - **Bot:** `@spaghettios_bot`, created via BotFather. Token stored only in `.env`
@@ -391,18 +410,18 @@ applied live. Migrations through **`0005_email_intelligence.sql`** applied.
     lifecycle owner), and if it's still `proposed`, pushes it to the allow-listed chat with
     an inline Approve/Deny keyboard. Optional body `{chat_id}`; defaults to the allow-listed
     user (whose chat id == user id in a DM).
-- **KNOWN GAP — `action.succeeded` = deploy ACCEPTED (202), not finished.** `executeAction`
-  fires `POST deploy:4000/deploy` and treats a 2xx *accept* as success — but deploy is
-  async (202, then builds/health-checks/rolls-back on its own timeline). So a `succeeded`
-  action row means "deploy accepted the job", NOT "deploy completed and is healthy." The
-  real-completion signal still lives only in deploy's own `deploy.succeeded` audit row. An
-  async-completion push (poll deploy to true finish → "✅/❌" to Telegram via a thin `api`
-  notify endpoint, since marionette can't message out — §9) is the open M4 task B.
-- **Also unwired:** the git-commit half of `commit_deploy` — execute currently just deploys
-  from current repo state; contractor doesn't commit first yet (`TODO(steering/commit)` in
-  `actions.ts`).
+- **M4 Task A — async-completion push — DONE** (`80298a4`/`8ac171c`). Previously
+  `executeAction` treated deploy's 202 *accept* as terminal success; now the true-completion
+  signal is surfaced. Deploy's job is polled to real finish (reading `deploy.succeeded` /
+  rollback in `audit_log`, the authoritative ledger — not the 202) and a ✅/❌ is pushed to
+  Telegram via a thin `api` notify endpoint (marionette can't message out itself — §9). So a
+  Telegram Approve tap now gets a follow-up confirming the deploy *actually* finished
+  healthy, not just that it was accepted.
+- **Still unwired — M4 Task B:** the git-commit half of `commit_deploy` — execute currently
+  just deploys from current repo state; contractor doesn't commit first yet
+  (`TODO(steering/commit)` in `actions.ts`).
 - **Commits:** `3a66aef` (propose/approve/deny/execute lifecycle) + `b13c5ce` (Telegram
-  buttons + surface endpoint).
+  buttons + surface endpoint) + `80298a4`/`8ac171c` (async completion → Telegram push).
 
 **Marionette audit-sight — read endpoint AND `/think` integration both done, live:**
 - **`marionette/src/audit-read.ts`** — Mari's read-only "sight" over her own ledger. The
@@ -461,54 +480,6 @@ applied live. Migrations through **`0005_email_intelligence.sql`** applied.
 - **Commits:** `27f18b3` (`feat(marionette): /think consumes audit-sight — narrates real
   system state`) on top of `9f3f054` (`feat(marionette): audit-sight read endpoint`).
 
-**Milestone 3 — Clair email-triage classifier — done, live (the AI read layer's first slice):**
-- **What it is:** "Clair" (a name, NOT "Clairvoyant") — the priority-triage engine. It reads
-  every email and judges **CONSEQUENCE**: *what happens to the owner if this is never seen?*
-  Importance is orthogonal to sender and category — an automated "your lease is being
-  terminated" outranks a friend's "hey". Nothing is ever silently dropped; triage bold-
-  surfaces what matters and demotes the rest, never deletes (see §2 "autonomy is earned").
-- **`marionette/src/classify.ts`** — reasoning lives HERE, never in api's dashboard route
-  (§9). Same `postgres(DATABASE_URL, {max:2, idle_timeout:20})` pattern as `audit.ts`.
-  Reuses the existing `callDeepSeek(messages)` client unchanged (JSON mode, 60s timeout).
-- **Two-pass design.** Pass 1 judges from subject + snippet only, emits all four fields +
-  a self-assessed `confidence`. Pass 2 re-judges against the **full body** (capped at 4000
-  chars) when Pass 1 is low-confidence (`<60`) OR high-stakes (`importance ≥70`) — and the
-  body exists. Uncertainty triggers MORE scrutiny, never silent demotion. Pass 2's answer is
-  authoritative. **Verified working:** in the first real batch, the two high-consequence
-  emails (GitHub token expiry, Google security alert) both correctly tripped Pass 2.
-- **Writes four columns per email** via a single `update ... where id`:
-  `importance` (smallint 0–100 — the sort key, pure consequence), `category` (one of
-  `action|financial|personal|work|newsletter|receipt|other`, coerced to `other` if the model
-  returns anything off-list), `reason` (one-line "why this matters" consequence — *the whole
-  game*, capped 500 chars), `confidence` (smallint 0–100). Then `classified_at = now()`.
-  All four values coerced/clamped defensively before the write (`coerce()`), so a malformed
-  model response can't write garbage or an out-of-range smallint.
-- **`POST /classify {"limit":N}`** (default 20, hard-capped 100) in `marionette/src/index.ts`,
-  mounted between `/audit/summary` and `/think`. Reads unclassified rows newest-first through
-  the `idx_emails_unclassified` partial index, classifies each **sequentially**, and returns a
-  per-email report (`{processed, results[]}`). **Each email audits independently**
-  (`action='marionette.classify'`, `target=email.id`, outcome success/error with
-  importance/category/confidence/passes in the payload) and is wrapped in its own try/catch —
-  one bad email can't sink the batch.
-- **Manually triggered for now, NOT cron.** Deliberate guardrail-first choice: the human pulls
-  the trigger and reads results while the prompt is still being trusted, rather than a cron job
-  silently burning DeepSeek calls on an unvalidated prompt. Wiring it into the existing 5-min
-  ingestion cron is a trivial later slice once the output is proven.
-- **Does NOT touch qdrant.** Triage is pure per-email LLM reasoning — no similarity search,
-  no embeddings. Embeddings/qdrant accumulation is a separate deferred M3 slice (still blocked
-  on the embeddings-provider decision, §8).
-- **Deployed** via audited `POST /deploy {"service":"marionette"}` (job `8acb31a7`, confirmed
-  `deploy.succeeded`). First real batch (21 emails: 1 test + 20) verified live — a genuine
-  priority curve, not everything-is-a-5 mush; zero errors; every `reason` named a concrete
-  consequence.
-- **KNOWN GAP — no dashboard render yet (M3 step 5).** The classifier writes
-  `importance`/`reason`/etc., but `dashboard.ts` does NOT read them — it still renders raw
-  recent email by `received_at`, not triaged tiers. The **Clair three-tier dashboard** (*Think
-  about first* / *Peripheral* / *Noise*, collapsed-not-dropped) is the next session's build,
-  in `api`'s dashboard route (pure read/render, `.js` imports, NO reasoning). Reconcile with
-  the existing "what changed" section when building it.
-- **Commit:** `5d45b8d` (`feat(m3): Clair two-pass email triage classifier — POST /classify`).
-
 **Whisper — self-hosted speech-to-text, done end-to-end:**
 - **Server:** `~/bentley-os/whisper/Dockerfile` builds `whisper.cpp` from source
   (`ggerganov/whisper.cpp`, `whisper-server` target) and bundles a `ggml-*.bin` model.
@@ -563,16 +534,25 @@ applied live. Migrations through **`0005_email_intelligence.sql`** applied.
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `5d45b8d`.
-Recent commits: `5d45b8d` (feat(m3): Clair two-pass email triage classifier — POST /classify)
-→ `4c39435` (feat(m3): full-body gmail ingestion + email intelligence schema) → `79bea75`
-(Add 'What changed' section to dashboard and improve notifications) → `b905e4b` (migration:
-0004_dashboard_state singleton for 'what changed' last-seen tracking) → `5955d8d` (feat(m2):
-"what changed" dashboard view — deltas since last look) → `7cb895d` (chore: gitignore
-whisper/Dockerfile.bak) → `7d79632` (feat(m2): server-rendered Today dashboard) → `27f18b3`
+Local in sync with `origin/main` at `b905e4b`, working tree clean.
+Recent commits (newest first): `b905e4b` (migration: 0004_dashboard_state singleton for
+'what changed' last-seen tracking) → `5955d8d` (feat(m2): "what changed" dashboard view —
+deltas since last look) → `7cb895d` (chore: gitignore whisper/Dockerfile.bak) → `403c84b`
+(Update THE_BIBLE.md with commit details and notes) → `ef41370` (Update THE_BIBLE.md to
+remove obsolete information) → `8ac171c` (Enhance deploy action completion and Telegram
+notifications) → `80298a4` (feat(m4): async deploy-completion — poll audit_log to true
+finish, push ✅/❌ to Telegram) → `14c063a` (Revise THE_BIBLE.md for project updates and
+milestones) → `7d79632` (feat(m2): server-rendered Today dashboard) → `27f18b3`
 (feat(marionette): /think consumes audit-sight) → `9f3f054` (feat(marionette): audit-sight
-read endpoint) → `b13c5ce`/`3a66aef` (M4 action layer + Telegram buttons) → `c97ba37`
-(Telegram webhook → marionette).
+read endpoint) → `b13c5ce` (feat(m4): Telegram approve/deny buttons) → `3a66aef` (feat(m4):
+approval-gated action layer) → `52c3f72` (fix(deploy): abort rollback for unscoped service).
+
+**Parked branch — `slice1-image-rollback` (`0cf613e`), UNMERGED / UNVERIFIED. Do NOT build
+on it.** An unmerged refactor of `deploy/src/runner.ts` (88+/30−) changing rollback from
+git-checkout to Docker-image-preservation. Pushed to its own origin branch, NOT on `main`,
+NOT isolation-tested, NOT confirmed running. Testing it means deliberately forcing a failed
+deploy — a future dedicated session. Until then, `main`'s deploy still uses the
+scoped-git-checkout rollback (`52c3f72`).
 
 **Deploy service** (`~/bentley-os/deploy/`): serialized queue, reads last-good commit from
 `audit_log` → build → `up -d` → poll real `/health` over `backend` → success or
@@ -628,15 +608,11 @@ trigger for the same `/think` → `delegate` path.
   success.
 - `MARIONETTE_MODEL` env var (default `deepseek-v4-pro`; set `deepseek-v4-flash` for cheap
   iteration).
-- **Can now (1):** narrate her own system activity. `/think` consumes audit-sight — a
+- **Can now:** narrate her own system activity. `/think` consumes audit-sight — a
   keyword-gated in-process `auditSummary(60)` read is injected into the reasoning prompt for
   system-status questions, so Mari answers "what have you done today?" / "anything failing?"
   from the real `audit_log` (see the audit-sight subsection above). This is *self*-sight over
   the ledger, NOT general memory — see the limit below.
-- **Can now (2):** triage email by consequence. `POST /classify` runs the Clair two-pass
-  classifier over unclassified emails, writing `importance`/`category`/`reason`/`confidence`
-  (see the Clair subsection above). This is the first slice of the M3 read-layer — reasoning
-  that produces durable, queryable judgements on the owner's data, not just orchestration.
 - **Still cannot:** no cross-message conversation memory (Qdrant unused, `/think` otherwise
   stateless — each Telegram message is a fresh request; audit-sight lets her see the *ledger*
   but not recall what the owner said two messages ago — "the file I just wrote" still means
@@ -667,22 +643,15 @@ trigger for the same `/think` → `delegate` path.
 - Config is loaded at OpenCode startup, not per-request — `sudo systemctl restart opencode`
   required after any change to this file.
 
-**Ingestion — scheduled, running in prod (now full-body):**
+**Ingestion — scheduled, running in prod:**
 - `apps/api/src/ingestion/scheduler.ts`: `node-cron` job, every 5 minutes, runs
   `runGcalSync()` then `runGmailSync()` sequentially, guarded against overlap with a
   `running` flag.
 - OAuth secrets (`client_secret.json`, `token.json`) bind-mounted read-only into the live
   `api` container at `/secrets/` (exact absolute host path, per §7 bind-mount lesson).
-- **M3 step 2 — full-body gmail ingestion — done, live (`4c39435`, deployed job `1bbc12fd`,
-  confirmed `deploy.succeeded`).** `apps/api/src/ingestion/gmail.ts`: `fetchMessage` now uses
-  `format:'full'` (the old `metadata` mode returned NO body). New `extractBody` /
-  `decodeB64Url` / `stripHtml` walk the MIME tree — prefer `text/plain`, fall back to
-  stripped `text/html`, base64url-decode, and **never throw** (it's `/health`-adjacent). 
-  `upsertMessage` writes `body` and sets `body = EXCLUDED.body` on conflict, so re-sync
-  backfills bodies. **Verified live: 718/765 email rows carry real prose bodies** (the 30-day
-  window; older rows stay body-null by design). Bodies feed the Clair classifier's Pass 2.
-- Ingestion still does NOT write to `audit_log` (stdout only) — open item, §8.
-- The dashboard reads the rows this cron lands; the classifier reads their bodies.
+- Confirmed live: first tick after deploy ran clean, both syncs incremental
+  (`fetched: 0, upserted: 0` — correct, since the isolation test had just consumed the
+  delta). The M2 dashboard reads the rows this cron lands.
 
 **Milestone 1 gap — resolved.** `event_attendees` and `organizer_id` population is
 **verified live** (organizer_id populated on real rows, event_attendees confirmed via a
@@ -696,18 +665,18 @@ real test event). Milestone 1 is complete; see §6.
 people ──< email_recipients >── emails
 people ──< event_attendees  >── calendar_events
 
-audit_log       (append-only ledger: every deploy action, every AI action — reasoning +
-                 delegation + action lifecycle + classify — regardless of interface)
-sync_state      (source PK, sync_token, updated_at — incremental ingestion cursors)
-actions         (M4: mutable current-state store for proposed side-effecting ops awaiting
-                 approval; audit_log stays the ledger, target = actions.id)
-dashboard_state (M2 what-changed: single pinned row, last_seen_at — one fact stored once)
+audit_log    (append-only ledger: every deploy action, every AI action — reasoning +
+              delegation + action lifecycle — regardless of interface: API call or Telegram)
+sync_state   (source PK, sync_token, updated_at — incremental ingestion cursors)
+actions      (M4: mutable current-state store for proposed side-effecting ops awaiting
+              approval; audit_log stays the ledger, target = actions.id)
+dashboard_state (M2 "what changed": singleton, one row id=1, holds last_seen_at — the one
+              fact of when the owner last viewed the dashboard; not a shadow table)
 ```
 
-The M3 Clair classifier writes **in place** onto `emails` (`importance`/`category`/`reason`/
-`confidence`/`classified_at`) — no new table, no shadow state; it enriches existing ontology
-rows (the ontology-first rule, §2). The M2 dashboard is a pure **read** over
-`calendar_events` + `emails` (+ the `dashboard_state` marker for deltas).
+The M2 dashboard reads `calendar_events` + `emails`; its only owned state is the
+`dashboard_state` singleton (one owner fact: last-seen time). Delta computation is a read
+over existing ontology rows keyed on `created_at`.
 
 ---
 
@@ -747,50 +716,40 @@ actually proven — including from a live external interface.**
   `event_attendees`/`organizer_id` are populated. **All conditions met.**
 
 **Milestone 2 — Insight out. ✅ Done.**
-- ✅ **"Today" slice shipped** (`7d79632`): server-rendered dashboard reading
-  `calendar_events` / `emails` via api's `pg` pool. "Today" = today's events (Central tz);
-  "Recent email" = last 15 by `received_at`, unread-flagged. DB-field escaping, graceful
-  states, `/health` untouched. See §4.
-- ✅ **"What changed" view shipped** (`5955d8d`/`b905e4b`/`79bea75`, out-of-band): `created_at`-
-  based deltas since last look, via the `dashboard_state` singleton (`last_seen_at`, advanced
-  fire-and-forget on each view). Count badge, per-row event/email tags. See §4.
-- ⏳ **Snippet polish** (optional/cosmetic) — strip Gmail zero-width padding (`‌`) from
-  rendered snippets. Not done; harmless.
+- ✅ **"Today" slice shipped** (`7d79632`): `apps/api/src/routes/dashboard.ts` replaced the
+  static status card with a server-rendered dashboard reading `calendar_events` / `emails`
+  directly via api's `pg` pool. "Today" = today's events (Central tz, ordered); "Recent
+  email" = last 15 by `received_at`, unread-flagged. DB-field escaping, graceful empty/error
+  states, `/health` untouched. Isolation-tested, deployed via audited `POST /deploy` (job
+  `b3da007c`, confirmed `deploy.succeeded`). See §4.
+- ✅ **"What changed" slice shipped** (`5955d8d` + migration `0004`, `b905e4b`): renders
+  FIRST, above Today, with a count badge; shows emails/events ingested since the owner last
+  looked, keyed on `created_at`, backed by the `dashboard_state` singleton (`last_seen_at`,
+  advanced fire-and-forget after computing deltas). Isolation-tested, deployed via audited
+  `POST /deploy` (job `63e689a8`, confirmed `deploy.succeeded`), verified live. See §4.
+- ⏳ **Snippet polish** (optional, cosmetic) — strip Gmail zero-width padding (`‌`) from
+  rendered snippets. Still open; not milestone-blocking.
 - **Done when:** the dashboard shows today's real events + email at a glance AND a "what
   changed" view surfaces recent deltas. **Both conditions met.**
 
-**Milestone 3 — AI layer, read-only. 🔨 Classifier + full-body ingestion done; dashboard
-render + embeddings + brief/Q&A remain.** In **marionette**, not api.
-- ✅ **Step 2 — full-body gmail ingestion** (`4c39435`, deployed): bodies now stored,
-  718/765 in-window. Feeds Pass 2. See §4.
-- ✅ **Step 3 — Clair two-pass classifier** (`5d45b8d`, deployed): consequence-triage over
-  `emails`, writes `importance`/`category`/`reason`/`confidence`/`classified_at`. Manually
-  triggered (`POST /classify`), not yet cron. See §4.
-- ⏳ **Step 4 — cron-wire the classifier:** trivial slice — call `classifyBatch` from the
-  existing 5-min scheduler once the prompt output stays trusted. Guardrail-first: prove the
-  output first (done for one batch), then automate.
-- ⏳ **Step 5 — Clair three-tier dashboard render:** in `api`'s dashboard route (pure
-  read/render, `.js` imports, NO reasoning). Three tiers: *Think about first* (high-
-  consequence — full summary + why-it-matters + suggested action) / *Peripheral* (real but
-  not urgent, collapsed one-liners) / *Noise* (newsletters/receipts, collapsed to a count,
-  one tap to expand, NEVER dropped). Reconcile with the existing "what changed" section.
-- ⏳ **Step 6 — qdrant embedding on classify:** accumulation-only for a later Q&A/unsubscribe-
-  pattern slice; triage itself never queries qdrant. **BLOCKED on the embeddings-provider
-  decision (§8) — must resolve to an API, not local (the §2 no-local-inference rule).**
-- ⏳ **Later — morning brief + grounded Q&A.** Telegram is a natural brief delivery channel.
-- **Done when:** emails are triaged and surfaced in tiers on the dashboard, and the owner can
-  ask grounded questions. Classification + one visible slice met; render + Q&A remain.
+**Milestone 3 — AI layer, read-only.** In **marionette**, not api. Classify email → the
+existing `category`/`importance` columns. Morning brief. Grounded Q&A. This is where the
+qdrant/embeddings decision can no longer be deferred. **Telegram is a natural delivery
+channel for the morning brief once this is built; the M2 dashboard is a natural surface for
+classifier output (category/importance badges)** — worth keeping in mind when designing it,
+though neither is yet scoped.
 
-**Milestone 4 — Action layer, approval-gated. 🔨 Gate slice done; two tasks remain.**
+**Milestone 4 — Action layer, approval-gated. 🔨 Gate slice + Task A done; Task B remains.**
 - ✅ **Gate slice shipped** (`3a66aef` + `b13c5ce`): `actions` table + strict lifecycle
   (`marionette/src/actions.ts`), 5 marionette routes, and **Telegram IS the approval
   channel** — inline Approve/Deny buttons via `callback_query`, plus `POST
   /telegram/surface/:id` to push a proposed action to chat. Fire-and-report execute with a
   hard guarantee of a terminal transition. `kind='commit_deploy'` is the only action type so
   far; all writes audit through `audit_log` (target = action id). See §4.
-- ⏳ **Task A — async-completion push:** `action.succeeded` currently fires on deploy's 202
-  *accept*, not real finish. Poll deploy's job to true completion, push "✅/❌" to Telegram
-  via a thin `api` notify endpoint (marionette can't message out — §9).
+- ✅ **Task A — async-completion push — DONE** (`80298a4`/`8ac171c`): deploy job polled to
+  true completion via `audit_log`, ✅/❌ pushed to Telegram through a thin `api` notify
+  endpoint. An Approve tap now gets a follow-up confirming the deploy actually finished
+  healthy, not just that it was accepted (202). See §4.
 - ⏳ **Task B — commit half of `commit_deploy`:** execute deploys from current repo state;
   contractor doesn't git-commit first yet (`TODO(steering/commit)` in `actions.ts`).
 - Additional action types (create event, draft reply) are future work within this milestone.
@@ -849,6 +808,23 @@ system.
 - **Long file pastes break the browser terminal.** Beyond a short heredoc, generate the file
   in Claude's sandbox and commit it via the GitHub web UI (paste into the online editor, or
   drag-and-drop upload to replace the file) rather than fighting heredoc/scp limits.
+- **The api image's build context is `apps/api/`, not the repo root.** `apps/api/Dockerfile`
+  does `COPY package.json ./` / `COPY . .` with no monorepo pathing — there is NO
+  `package.json` at repo root (it's a monorepo; api's lives at `apps/api/package.json`). So
+  to build it by hand for an isolation test, the command is `docker build -t <tag> apps/api`
+  (context = the directory), NOT `docker build -f apps/api/Dockerfile .` (which sets context
+  to root and fails at `COPY package.json ./` with "not found"). The deploy service already
+  gets this right; it only bites manual/isolation builds.
+- **`node:22-alpine` (the api base image) has no curl** — same class as the `node:22-slim`
+  no-curl/no-apk lesson. Isolation-probe a running api container via
+  `docker exec <c> node -e "fetch('http://localhost:3000/...').then(r=>r.text()).then(console.log)"`,
+  not curl.
+- **Don't paste prior terminal output back into the shell.** Twice this session, previous
+  command output (prompt lines + build log) was accidentally pasted into bash, which tried
+  to execute each line — harmless (`command not found` noise) but it also created stray
+  files named for tokens in the output (`=`, `CACHED`, `[internal]`, `exporting`, etc.) that
+  had to be `rm`'d before the tree was clean. When copy-pasting a command, copy only the
+  command line, not the leading `spaghettios@…$` prompt or the output above it.
 - **A Cloudflare Access service token is not automatically valid against an app just because
   it was generated.** It must be explicitly attached via a separate **Service Auth** policy
   on that specific application (Action: Service Auth, Include: Service Token). Without it,
@@ -938,15 +914,11 @@ system.
 - **DeepSeek API key fragment** — a masked fragment printed into a chat, not usable alone,
   noted alongside the Postgres rotation. Both still pending.
 - **Shared audit module** — deploy + marionette + contractor each duplicate `audit_log`
-  write logic; unify eventually. Ingestion (gcal/gmail) doesn't write to `audit_log` at
-  all yet — decide whether it should before Milestone 2's "what changed" view needs "last
-  synced" (the dashboard currently infers recency from `received_at`/`starts_at`, not from
-  an audit trail).
-- **Embeddings provider — NOW BLOCKING M3 step 6, and the old answer is wrong.** §8 once
-  said "local model" — that **contradicts §2's no-local-inference rule** and was never built.
-  Resolve to an embeddings **API** (Voyage / OpenAI / etc. — API-only, consistent with the
-  rule). Do NOT silently pick local. Nothing depends on this until the qdrant-on-classify
-  slice (M3 step 6); triage ships and runs without it.
+  write logic; unify eventually. Ingestion (gcal/gmail) still doesn't write to `audit_log`
+  at all — not a blocker for the shipped "what changed" view (it keys off each row's own
+  `created_at` ingest timestamp, not an audit trail), but revisit if a future view needs a
+  true "last synced" signal.
+- **Embeddings provider** — resolved to "local model" but not built.
 - **`whisper-laptop` Cloudflare service token exposed in plaintext in chat multiple times
   across sessions** (initial setup, then again during the Service Auth policy debugging).
   Not rotated yet — same pattern as the Postgres/DeepSeek leaks, now the most-repeated
@@ -963,9 +935,9 @@ system.
 - **Log aggregation** specifics — not decided.
 - **`marionette/src/schema.ts`** has one leftover comment mentioning "opencode"
   conceptually — cosmetic, not fixed.
-- **`whisper/Dockerfile.bak`** — stray untracked backup file sitting in the repo working
-  tree. Harmless but should be deleted or gitignored rather than left loose. **Must stay out
-  of every commit — `git add` by explicit path, never `-A`.**
+- **`whisper/Dockerfile.bak` — RESOLVED** (`7cb895d`): now gitignored, so it can't sneak
+  into a commit. The broader discipline still holds — **`git add` by explicit path, never
+  `-A`** — but this specific reinfection hazard is defused.
 - **Telegram bot token — rotated once already, mid-build.** The first-issued token was
   pasted in plaintext in chat before the integration was even wired up; it was rotated
   immediately via BotFather and the new token went straight into `.env` without being
@@ -993,24 +965,21 @@ system.
   outside the pattern list falls back to the honest "can't see" reply. Widen the list or
   revisit (A) if that becomes annoying. (A) remains a clean future upgrade if Mari should
   ever decide *for herself* when to look — nothing here forecloses it.
-- **M4 action `succeeded` = deploy 202 accept, not real completion.** (M4 Task A.) The
-  true finish signal lives only in deploy's own `deploy.succeeded` audit row. Needs an
-  async poll → Telegram "✅/❌" push via a thin `api` notify endpoint.
-- **M4 `commit_deploy` git-commit half unwired.** (M4 Task B.) Execute deploys current
-  repo state; contractor doesn't commit first (`TODO(steering/commit)` in `actions.ts`).
-- **M2 "what changed" view — DONE** (`5955d8d`/`b905e4b`/`79bea75`). Only the optional Gmail
-  zero-width-padding snippet cleanup remains (cosmetic). See §4/§6.
-- **Clair classifier not yet cron-wired.** (M3 step 4.) `POST /classify` is manual today —
-  deliberate, so the prompt could be validated before automating. Wire `classifyBatch` into
-  the 5-min scheduler once output stays trusted. Cheap slice.
-- **Clair three-tier dashboard render not built.** (M3 step 5.) The classifier writes
-  `importance`/`reason`; `dashboard.ts` doesn't read them yet. The three-tier surface (*Think
-  about first* / *Peripheral* / *Noise*) is the headline next slice. Pure read/render in
-  `api`, reconciled with the existing "what changed" section.
-- **Classifier batch bound / re-classification policy.** `POST /classify` only touches
-  `classified_at IS NULL` rows, so it never re-judges. No path yet to re-classify (e.g. after
-  a prompt change) — a `classified_at = null` reset would re-queue rows through the same
-  index. Decide a re-classification trigger when the prompt materially changes.
+- **M4 action `succeeded` = deploy 202 accept — RESOLVED** (M4 Task A, `80298a4`/`8ac171c`).
+  Deploy job now polled to true completion via `audit_log`; ✅/❌ pushed to Telegram via a
+  thin `api` notify endpoint. The confirmation now reflects real deploy finish, not just
+  acceptance.
+- **M4 `commit_deploy` git-commit half unwired.** (M4 Task B — STILL OPEN.) Execute deploys
+  current repo state; contractor doesn't commit first (`TODO(steering/commit)` in
+  `actions.ts`).
+- **M2 "what changed" view — RESOLVED** (`5955d8d` + `0004`/`b905e4b`, M2 now complete). The
+  Gmail zero-width-padding **snippet polish still remains** — cosmetic, not blocking, applies
+  to both the "Recent email" and "What changed" feeds.
+- **Parked branch `slice1-image-rollback` (`0cf613e`) — UNMERGED, UNVERIFIED.** Refactor of
+  `deploy/src/runner.ts` swapping git-checkout rollback for Docker-image-preservation. On its
+  own origin branch, not `main`, not isolation-tested, not confirmed running. Do NOT build on
+  it. Verifying it requires deliberately forcing a failed deploy — a future dedicated
+  session. `main` still uses the scoped-git-checkout rollback (`52c3f72`).
 - **Audit-sight Tier 2 (DB/ingestion influx detection) and Tier 3 (host CPU/mem/disk
   metrics) not built.** Tier 2 reads `emails`/`calendar_events`/`sync_state` directly (note:
   ingestion still doesn't write to `audit_log`, so counts come from tables) — same read-tool
