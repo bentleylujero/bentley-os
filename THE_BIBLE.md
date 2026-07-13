@@ -202,7 +202,32 @@ app services by container name (`http://api:3000`), host services (SSH) by LAN I
 **Same gotcha class:** `contractor` reaches the real systemd OpenCode server via LAN IP
 `172.16.30.4:4096`, never `127.0.0.1` — a service bound to loopback only is unreachable from
 any other container regardless of shared network.
+---
 
+## 3a. Ontology-bound vs. utility services
+
+Not every service needs a typed object. The ontology rule (§2.1) governs **facts about the
+owner's world** — email, calendar events, proposed actions — not services themselves.
+`redis`, `portainer`, `dozzle`, `uptime-kuma`, and `deploy` already sit outside it; this
+section just makes the line explicit instead of re-litigating it per tool.
+
+**The test:** does this service **create or persist a new durable fact about the owner's
+world** — something Mari should be able to reason about, query, or classify later?
+
+- **Yes → ontology-bound.** Needs a typed object + versioned migration, same discipline as
+  `emails`/`calendar_events`. New ingestion sources (documents, web pages) fall here.
+- **No → utility.** It transforms, indexes, or observes data another service already owns.
+  Wire it in freely — no migration, no object type required.
+
+**The guardrail:** a utility that starts writing durable state describing the owner's world
+— not just turning a request into a response — has graduated to ontology-bound and needs
+the same treatment as any other fact, regardless of which container it lives in. Qdrant
+storing vectors is a derived index over ontology objects (utility); a service logging "user
+asked about X on date Y" as a queryable fact would not be.
+
+**Current utility services:** `redis` (cache), `qdrant` (vector index), `portainer` /
+`dozzle` / `uptime-kuma` (ops visibility), `deploy` (build/rollback — audits *to*
+`audit_log`, doesn't own a fact of its own).
 ---
 
 ## 4. Current state (living — what actually exists on the box right now)
