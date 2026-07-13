@@ -1,5 +1,5 @@
 # Bentley OS — The Bible
-
+after the github copilot curfuffle
 *The single source of truth. Rules, architecture, project map, current state — all here.
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
