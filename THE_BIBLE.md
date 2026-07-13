@@ -4,18 +4,28 @@
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
 
-*Last verified: 2026-07-12 (HEAD `b905e4b`. Milestone 2 is now COMPLETE — the "what changed"
-dashboard slice shipped: `apps/api/src/routes/dashboard.ts` now renders a "What changed"
-section (emails/events ingested since the owner last looked, keyed on `created_at`) above the
-existing "Today" + "Recent email" sections, backed by singleton table `dashboard_state`
-(migration `0004`). Live, isolation-tested, deployed via audited `POST /deploy` job
-`63e689a8`, confirmed by `deploy.succeeded`, verified live in-browser. Milestone 4 Task A also
-DONE: async deploy-completion — deploy job polled to true finish, ✅/❌ pushed to Telegram
-(`80298a4`/`8ac171c`). Prior standing state also live: M4 gate slice (`actions` table +
-lifecycle + 5 marionette routes + Telegram Approve/Deny buttons); marionette audit-sight
-(`GET /audit/summary` + `/think` consuming it — Mari narrates real system state from her own
-ledger). `whisper/Dockerfile.bak` now gitignored (`7cb895d`). All confirmed via audited
-`POST /deploy`, verified end-to-end.)*
+*Last verified: 2026-07-13 (HEAD `532493a`. **Milestone 3 is now UNDERWAY — the AI layer has
+its first two slices live: the Clair email classifier AND the priority-triage dashboard
+render.** Clair (`marionette/src/classify.ts`, `5d45b8d`) is a two-pass consequence-based
+triage engine writing `importance`/`category`/`reason`/`confidence`/`classified_at` on
+`emails`; backed by migration `0005_email_intelligence.sql` (`4c39435`, which also added
+full-body Gmail ingestion). `POST /classify {"limit":N}` batch endpoint, audited per-email.
+As of this session **93 of 778 emails are classified** (partial backlog drain — 685 remain,
+drainable via repeated `POST /classify` batches). The **priority-triage dashboard section**
+(`apps/api/src/routes/dashboard.ts`, `532493a`) is a pure read-only render in api — three
+tiers keyed on `importance` (Think about first ≥70 / Peripheral 40–69 / Noise <40),
+reason-led rows, isolation-tested, deployed via audited `POST /deploy` (jobs
+`7b98f464`+`10eab659`, both `deploy.succeeded`, no rollback), verified live in-browser.
+Milestone 2 remains COMPLETE (the "what changed" + "Today" dashboard slices, `dashboard_state`
+singleton migration `0004`). Milestone 4 Task A DONE: async deploy-completion — deploy job
+polled to true finish, ✅/❌ pushed to Telegram (`80298a4`/`8ac171c`). Prior standing state
+also live: M4 gate slice (`actions` table + lifecycle + 5 marionette routes + Telegram
+Approve/Deny buttons); marionette audit-sight (`GET /audit/summary` + `/think` consuming it).
+`whisper/Dockerfile.bak` gitignored (`7cb895d`). **Open incident carried forward:** two
+unidentified commits (`e06ed72`/`449a9b7`, "Hello"→"Goodbye" print edits) landed on
+`origin/main` via the GitHub web UI from an unidentified actor; `091c8e0` restored the
+corrupted Bible file, but the SOURCE of the commits was never run down — see §8. All confirmed
+via audited `POST /deploy`, verified end-to-end.)*
 
 ---
 
@@ -206,8 +216,14 @@ portainer (9000/8000/9443), uptime-kuma (healthy, 3001), deploy (healthy, 4000 /
 127.0.0.1), contractor (healthy, 4100, backend only), marionette (healthy, 4200, backend
 only), whisper (healthy, 4300, backend only, `base` model).
 
-**No `embedder` service exists** — confirmed absent. Embeddings deferred to a local model
-(not yet built).
+**No `embedder` service exists** — confirmed absent. Embeddings were tentatively "resolved to
+a local model" but **that collides with §2.4 (host locally; AI is API-only, no local
+inference)** — the decision is NOT actually settled, and it's now the gating decision for
+M3's grounded-Q&A slice. **The classifier and triage render needed ZERO embeddings** (Clair
+is prompt-in → JSON-out via DeepSeek), so M3 got its first two slices done without touching
+this — but grounded Q&A / retrieval can't ship until embeddings are decided. Lean toward an
+external embeddings API (consistent with API-only) over reintroducing a local model. Not
+built either way.
 
 **Repo:** private, confirmed via `gh repo view`. `.env`/`client_secret.json`/`token.json`
 confirmed never tracked (checked full git history for leaked values, not just current
@@ -215,14 +231,21 @@ state).
 
 **Database (Postgres `bentley` db):** ontology schema loaded. Tables: `people`, `emails`,
 `email_recipients`, `calendar_events`, `event_attendees`, `audit_log`, plus `sync_state`
-(from `0002_sync_state.sql`), `actions` (from `0003_actions.sql`, M4 — see below), and
-`dashboard_state` (from `0004_dashboard_state.sql`, M2 "what changed" — see below), all
-applied live.
-- `emails` **already has** unused `category` + `importance` columns — the future classifier
-  writes to these, no new migration needed. Don't recreate them. Live columns confirmed:
-  `id` (uuid), `source`, `source_id`, `thread_id`, `sender_id` (→ people), `subject`,
-  `snippet`, `received_at` (indexed DESC), `is_unread`, `category`, `importance`,
-  `created_at`.
+(from `0002_sync_state.sql`), `actions` (from `0003_actions.sql`, M4 — see below),
+`dashboard_state` (from `0004_dashboard_state.sql`, M2 "what changed" — see below), and the
+email-intelligence columns + partial index (from `0005_email_intelligence.sql`, `4c39435`,
+M3 — `body`/`reason`/`confidence`/`classified_at` on `emails` + `idx_emails_unclassified`),
+all applied live. Migrations live at `supabase/migrations/` (five files, `0001`–`0005`).
+- `emails` — the Clair classifier (`marionette/src/classify.ts`) **actively writes**
+  `category`, `importance`, `reason`, `confidence`, `classified_at`. Don't recreate any of
+  them. Live columns confirmed via `\d emails`: `id` (uuid), `source`, `source_id`,
+  `thread_id`, `sender_id` (→ people), `subject`, `snippet`, `received_at` (indexed DESC),
+  `is_unread`, `category` (text), `importance` (smallint), `created_at`, `body` (text, full
+  message body — added by `0005`), `reason` (text — Clair's one-line consequence),
+  `confidence` (smallint — Clair's self-assessed certainty), `classified_at` (timestamptz —
+  null = unclassified). Partial index `idx_emails_unclassified btree (received_at DESC) WHERE
+  classified_at IS NULL` (the classifier's work-queue index — `0005`). **93 of 778 rows
+  classified as of this session; 685 remain `classified_at IS NULL`.**
 - `calendar_events` live columns confirmed: `id` (uuid), `source`, `source_id`, `title`,
   `description`, `location`, `starts_at` (indexed), `ends_at`, `organizer_id` (→ people),
   `status`, `created_at`, `updated_at`. `organizer_id` and `event_attendees` are now
@@ -230,7 +253,9 @@ applied live.
 - `audit_log` columns: `id` (bigint identity), `at` (timestamptz, default now()), `actor`,
   `action`, `target` (nullable), `outcome` (nullable), `payload` (jsonb, default `{}`).
   Indexes on `action` and `at DESC`. Real rows now exist from deploy activity,
-  `marionette.think`, `marionette.delegate`, and `contractor.execute` — **including rows
+  `marionette.think`, `marionette.delegate`, `marionette.classify` (Clair — one row per
+  email classified, `target` = email id, `payload` = importance/category/confidence/passes;
+  ~81+ rows and growing as the backlog drains), and `contractor.execute` — **including rows
   originating from Telegram messages**, indistinguishable in `audit_log` from any other
   `/think` caller (the audit trail doesn't currently tag which interface originated a
   request — see §8). Ingestion (gcal/gmail) does **not** currently write to `audit_log` —
@@ -332,6 +357,60 @@ applied live.
   look`) + `b905e4b` (`migration: 0004_dashboard_state singleton for 'what changed'
   last-seen tracking` — the migration file itself, committed after the fact; it had been
   applied live by hand before being tracked).
+
+**Milestone 3 — AI layer (read-only) — classifier + triage render both done, live:**
+- **Full-body Gmail ingestion + intelligence schema** (`4c39435`, migration `0005`): `emails`
+  now stores the full `body`, and the four Clair columns (`reason`/`confidence`/
+  `classified_at` + reuse of existing `category`/`importance`) plus the
+  `idx_emails_unclassified` partial index exist and are populated. Schema is versioned and
+  reproducible (§2.3 — earlier worry that these were ad-hoc production edits was wrong; the
+  migration is committed at `supabase/migrations/0005_email_intelligence.sql`).
+- **Clair classifier** (`marionette/src/classify.ts`, `5d45b8d`) — the triage engine.
+  Judges **CONSEQUENCE** ("what happens to the owner if this is never seen?"), NOT
+  sender/topic/human-vs-automated. Reasoning lives in marionette (§9 held — the dashboard
+  only reads what this writes).
+  - **Two-pass:** Pass 1 judges subject+snippet only; Pass 2 re-judges against the full body
+    (capped 4000 chars) **only when** Pass-1 confidence < 60 OR importance ≥ 70 (high stakes
+    earns a second look) AND a body exists. Uncertainty triggers MORE scrutiny, never silent
+    demotion.
+  - Writes `importance` (0–100 consequence score), `category` (exactly one of
+    action/financial/personal/work/newsletter/receipt/other), `reason` (one-line concrete
+    consequence — the whole point), `confidence` (0–100), `classified_at`. All coerced/clamped
+    server-side (`coerce()`), category falls back to `other` if the model invents one.
+  - **`POST /classify {"limit":N}`** (default 20) — batch endpoint in `marionette/src/index.ts`,
+    consumes the `classified_at IS NULL` work-queue newest-first. **Each email audits
+    independently** (`marionette.classify`, success/error per row) — one bad email can't sink
+    the batch. Confirmed clean at batch size 50 (50/50 ok, 0 err, no timeout).
+  - **Live data:** 93 of 778 emails classified this session (partial drain — 685 remain).
+    Tier spread over the classified set: ~3 high (≥70) / ~11 mid (40–69) / rest noise (<40),
+    with natural score gaps at the 70 and 40 boundaries (cutoffs are robust — nothing sits at
+    66–69 or 31–39). Top items correctly float up: GitHub token-expiry (90), Google security
+    alert (85).
+- **Priority-triage dashboard section** (`apps/api/src/routes/dashboard.ts`, `532493a`) —
+  pure read-only render in **api** (§9 — no reasoning in the dashboard route). New "Priority
+  triage" section between "What changed" and "Today". Three tiers keyed on `importance`:
+  **Think about first (≥70, red chip) / Peripheral (40–69, amber) / Noise (<40, grey)**. Each
+  row leads with **reason as the headline**, score chip on the left, category tag + subject as
+  the sub-line — every DB string `esc()`-escaped. Empty tiers omitted; heading shows
+  "N to act on" when the high tier is non-empty. Same `dbError` graceful-degradation guard as
+  the sibling sections (one shared try/catch, triage query folded into the existing
+  `Promise.all`). `/health` untouched.
+  - **Isolation-tested** (`docker build -t api-triage-test apps/api` — context is `apps/api/`
+    not repo root, §7; throwaway `docker run` on `bentley-os_backend` + `.env`, probed
+    `/health` + `/` via in-container `node -e fetch`, confirmed real reason string renders in
+    the high tier) **before** deploy.
+  - **Deployed** via audited `POST /deploy {"service":"api"}` — **accidentally fired twice**
+    (jobs `7b98f464` + `10eab659`; a garbled command line double-submitted). The deploy
+    queue is serialized, so both ran back-to-back cleanly, both `deploy.succeeded`, no
+    rollback. Verified live in-browser at `spaghettios.bentleyos.me`.
+- **Commits:** `4c39435` (full-body ingestion + `0005`) → `5d45b8d` (Clair classifier
+  `POST /classify`) → `532493a` (triage dashboard render).
+- **Still open in M3:** (1) **backlog drain not automated** — 685 emails still unclassified;
+  the ingestion cron does NOT auto-classify new mail. Natural next slice: wire `classifyBatch`
+  into the 5-min cron so new mail self-triages. (2) **Morning brief** — not built.
+  (3) **Grounded Q&A** — blocked on the embeddings-provider decision (see the "No embedder"
+  note above; classifier/render needed none, Q&A does). (4) **Snippet zero-width-padding
+  polish** (cosmetic, carried from M2) now also applies to triage subjects.
 
 **Telegram integration — done end-to-end:**
 - **Bot:** `@spaghettios_bot`, created via BotFather. Token stored only in `.env`
@@ -534,18 +613,29 @@ applied live.
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `b905e4b`, working tree clean.
-Recent commits (newest first): `b905e4b` (migration: 0004_dashboard_state singleton for
-'what changed' last-seen tracking) → `5955d8d` (feat(m2): "what changed" dashboard view —
-deltas since last look) → `7cb895d` (chore: gitignore whisper/Dockerfile.bak) → `403c84b`
-(Update THE_BIBLE.md with commit details and notes) → `ef41370` (Update THE_BIBLE.md to
-remove obsolete information) → `8ac171c` (Enhance deploy action completion and Telegram
-notifications) → `80298a4` (feat(m4): async deploy-completion — poll audit_log to true
-finish, push ✅/❌ to Telegram) → `14c063a` (Revise THE_BIBLE.md for project updates and
-milestones) → `7d79632` (feat(m2): server-rendered Today dashboard) → `27f18b3`
-(feat(marionette): /think consumes audit-sight) → `9f3f054` (feat(marionette): audit-sight
-read endpoint) → `b13c5ce` (feat(m4): Telegram approve/deny buttons) → `3a66aef` (feat(m4):
-approval-gated action layer) → `52c3f72` (fix(deploy): abort rollback for unscoped service).
+Local in sync with `origin/main` at `532493a`, working tree clean.
+Recent commits (newest first): `532493a` (feat(m3): priority triage dashboard section —
+three-tier Clair render, reason-led) → `091c8e0` (fix(docs): restore clean THE_BIBLE.md from
+5d45b8d — revert web-UI scrollback corruption) → `449a9b7` + `e06ed72` (**ROGUE — "Hello"→
+"Goodbye" print edits from an unidentified actor via the GitHub web UI; see §8**) → `5d45b8d`
+(feat(m3): Clair two-pass email triage classifier — POST /classify) → `4c39435` (feat(m3):
+full-body gmail ingestion + email intelligence schema / migration 0005) → `79bea75` (Add
+'What changed' section to dashboard and improve notifications) → `b905e4b` (migration:
+0004_dashboard_state singleton) → `5955d8d` (feat(m2): "what changed" dashboard view) →
+`7cb895d` (chore: gitignore whisper/Dockerfile.bak) → `8ac171c` / `80298a4` (feat(m4): async
+deploy-completion → Telegram push) → `7d79632` (feat(m2): server-rendered Today dashboard) →
+`27f18b3` / `9f3f054` (feat(marionette): audit-sight) → `b13c5ce` / `3a66aef` (feat(m4):
+approval gate + Telegram buttons) → `52c3f72` (fix(deploy): abort rollback for unscoped
+service).
+
+**⚠ Unresolved repo-integrity incident:** commits `e06ed72` and `449a9b7` (both "Update print
+statement from 'Hello' to 'Goodbye'") landed on `origin/main` via the **GitHub web UI** from
+an **unidentified actor** — classic bot/agent smoke-test signature. They also carried
+THE_BIBLE.md scrollback corruption, cleaned up by `091c8e0`. **The file was restored but the
+SOURCE was never run down** — something was auto-committing through Bentley's GitHub web
+session. Cheapest lead not yet pulled: `git log --format='%h %an <%ae> %cn %ci %s'
+e06ed72~1..091c8e0` to read the author/committer identity (a `web-flow` committer = GitHub web
+editor; any other identity = the culprit). Tracked as OPEN in §8.
 
 **Parked branch — `slice1-image-rollback` (`0cf613e`), UNMERGED / UNVERIFIED. Do NOT build
 on it.** An unmerged refactor of `deploy/src/runner.ts` (88+/30−) changing rollback from
@@ -678,6 +768,13 @@ The M2 dashboard reads `calendar_events` + `emails`; its only owned state is the
 `dashboard_state` singleton (one owner fact: last-seen time). Delta computation is a read
 over existing ontology rows keyed on `created_at`.
 
+**M3 (Clair) adds NO new tables — it's ontology-correct in-place:** the classifier writes
+`importance`/`category`/`reason`/`confidence`/`classified_at` **onto the existing `emails`
+rows** (the triage judgement is a fact about the email, so it lives on the email — not in a
+parallel "classifications" table). `body` (full message) also lives on `emails`. All added by
+migration `0005_email_intelligence.sql`. The priority-triage dashboard section is a pure read
+over these columns — no owned state of its own.
+
 ---
 
 ## 6. Roadmap (ordered by what unblocks what)
@@ -732,12 +829,24 @@ actually proven — including from a live external interface.**
 - **Done when:** the dashboard shows today's real events + email at a glance AND a "what
   changed" view surfaces recent deltas. **Both conditions met.**
 
-**Milestone 3 — AI layer, read-only.** In **marionette**, not api. Classify email → the
-existing `category`/`importance` columns. Morning brief. Grounded Q&A. This is where the
-qdrant/embeddings decision can no longer be deferred. **Telegram is a natural delivery
-channel for the morning brief once this is built; the M2 dashboard is a natural surface for
-classifier output (category/importance badges)** — worth keeping in mind when designing it,
-though neither is yet scoped.
+**Milestone 3 — AI layer, read-only. 🔨 UNDERWAY — classifier + triage render done; brief +
+Q&A remain.** In **marionette**, not api (reasoning), rendered by **api** (read-only views).
+- ✅ **Email classification shipped** (`4c39435` + `5d45b8d`): Clair two-pass consequence
+  classifier writing `importance`/`category`/`reason`/`confidence`/`classified_at`, backed by
+  migration `0005`. `POST /classify` batch endpoint, audited per-email. 93/778 classified
+  (partial drain; 685 remain). See §4.
+- ✅ **Triage render shipped** (`532493a`): the M2 dashboard now surfaces classifier output —
+  three-tier priority section (Think about first / Peripheral / Noise), reason-led, in api as
+  a pure read view. Isolation-tested, deployed via audited `POST /deploy`, verified live. See
+  §4. (This is the "classifier output on the dashboard" idea, now built.)
+- ⏳ **Automate the drain:** wire `classifyBatch` into the 5-min ingestion cron so new mail
+  self-triages; also finish the 685-email backlog. Not built.
+- ⏳ **Morning brief** — not built. Telegram is the natural delivery channel once it exists.
+- ⏳ **Grounded Q&A** — blocked on the **embeddings-provider decision**, which can no longer
+  be deferred (classifier + render needed none; retrieval does). Lean external-API embeddings
+  to stay consistent with §2.4, not a local model. This is the real remaining M3 gate.
+- **Done when:** email is auto-classified on ingest AND a morning brief + grounded Q&A are
+  live. Classification + its render are done; the brief, Q&A, and embeddings decision remain.
 
 **Milestone 4 — Action layer, approval-gated. 🔨 Gate slice + Task A done; Task B remains.**
 - ✅ **Gate slice shipped** (`3a66aef` + `b13c5ce`): `actions` table + strict lifecycle
@@ -900,6 +1009,18 @@ system.
 
 ## 8. Open questions (decided-when-we-get-there, not blocking)
 
+- **⚠ Unidentified actor auto-committing to the repo — OPEN, security-relevant.** Commits
+  `e06ed72` + `449a9b7` ("Hello"→"Goodbye" print-statement edits) landed on `origin/main`
+  via the GitHub web UI from an unknown source, and rewrote THE_BIBLE.md with terminal
+  scrollback junk. `091c8e0` restored the file, but **what made the commits was never
+  identified** — something is/was acting through Bentley's GitHub web session (the "Hello"→
+  "Goodbye" pattern is a classic agent/integration smoke-test). Deferred during the M3-render
+  session (chose to proceed with the file restored), but NOT resolved. Cheapest next step,
+  costs nothing: `git log --format='%h %an <%ae> %cn %ci %s' e06ed72~1..091c8e0` to read the
+  author/committer identity — `web-flow` = GitHub web editor (consistent with the web-session
+  theory); any other identity names the culprit. Then audit GitHub → Settings → Applications
+  (authorized OAuth apps / installed GitHub Apps) and repo deploy keys / webhooks for anything
+  unexpected, and rotate the token if one is found.
 - **Docs cleanup:** old `.md` files (`00_NORTH_STAR`, `01_CURRENT_STATE`, `02_DECISIONS`,
   `03_ROADMAP`) retired in favor of this Bible. Remove from the project once trusted.
 - **Rollback scope — RESOLVED** (`52c3f72`): unscoped service aborts, no repo-wide checkout.
@@ -918,7 +1039,16 @@ system.
   at all — not a blocker for the shipped "what changed" view (it keys off each row's own
   `created_at` ingest timestamp, not an audit trail), but revisit if a future view needs a
   true "last synced" signal.
-- **Embeddings provider** — resolved to "local model" but not built.
+- **Embeddings provider — NOT settled, and now the M3 grounded-Q&A blocker.** Earlier
+  "resolved to a local model," but that collides with §2.4 (API-only, no local inference).
+  The classifier + triage render needed zero embeddings, so M3's first two slices shipped
+  without resolving this — but grounded Q&A / retrieval can't. Decide before building Q&A;
+  lean toward an external embeddings API over a local model. Qdrant remains plumbed-but-unused
+  until then.
+- **Backlog drain not automated (M3).** 685 of 778 emails are still unclassified; the 5-min
+  ingestion cron does NOT auto-classify new mail — classification only runs on manual
+  `POST /classify` batches. Natural next M3 slice: call `classifyBatch` from the cron so new
+  mail self-triages, and finish draining the existing 685 (clean at batch size 50).
 - **`whisper-laptop` Cloudflare service token exposed in plaintext in chat multiple times
   across sessions** (initial setup, then again during the Service Auth policy debugging).
   Not rotated yet — same pattern as the Postgres/DeepSeek leaks, now the most-repeated
