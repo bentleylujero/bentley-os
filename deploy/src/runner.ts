@@ -246,7 +246,11 @@ async function runJob(job: Job): Promise<void> {
     });
     return;
   }
-  await run(job, 'git', ['checkout', job.fromCommit, '--', scopePath]);
+  if (process.env.DRY_RUN === '1') {
+    line(job, `[dry-run] would: git checkout ${job.fromCommit} -- ${scopePath}`);
+  } else {
+    await run(job, 'git', ['checkout', job.fromCommit, '--', scopePath]);
+  }
   const recovered = (await buildAndUp(job)) && (await pollHealth(job, healthUrl));
 
   job.finishedAt = new Date().toISOString();
