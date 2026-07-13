@@ -26,7 +26,7 @@ const QDRANT_URL = process.env.QDRANT_URL || 'http://qdrant:6333';
 const QDRANT_COLLECTION = 'emails';
 // Cap input — 3-small's context is 8191 tokens; bodies are short but marketing
 // mail can be huge. ~24k chars is a safe ceiling well under the token limit.
-const MAX_INPUT_CHARS = 24_000;
+const MAX_INPUT_CHARS = 8_000;
 const TIMEOUT_MS = 60_000;
 
 interface EmailRow {
