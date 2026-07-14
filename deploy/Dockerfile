@@ -8,10 +8,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update \
     && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
+RUN groupadd -g 983 dockerhost && usermod -aG dockerhost node
 WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev
 COPY src ./src
-RUN git config --global --add safe.directory /home/spaghettios/bentley-os
+RUN chown -R node:node /app
+RUN git config --system --add safe.directory /home/spaghettios/bentley-os
+USER node
 EXPOSE 4000
 CMD ["node", "--experimental-strip-types", "src/index.ts"]
