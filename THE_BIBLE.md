@@ -1,32 +1,45 @@
 # Bentley OS — The Bible
-after the github copilot curfuffle
+
 *The single source of truth. Rules, architecture, project map, current state — all here.
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
 
-*Last verified: 2026-07-13 (HEAD `a9e7bc1`. **This session shipped the M3 auto-drain: the
-5-min ingestion cron now auto-classifies AND auto-embeds new mail — no more manual
-`POST /classify` / `POST /embed`.** `apps/api/src/ingestion/scheduler.ts` (`a9e7bc1`) now,
-after each tick's gcal+gmail sync, POSTs `http://marionette:4200/classify` (limit 50) then
-`/embed` (limit 50). Cron→marionette is a thin HTTP forward (§9-clean — no reasoning added to
-`api`; identical pattern to the Telegram route, reusing the same `MARIONETTE` base URL). Each
-drain is wrapped in its own try/catch so a marionette hiccup can't kill the tick, and the
-whole `runAllSyncs` body is now `try/finally`-wrapped so the `running` guard can never strand
-`true` (incidental correctness fix, made because we added two more await points). New mail now
-self-triages and self-embeds; the backlog also drains 50+50 per tick until caught up.
-Isolation-tested on `bentley-os_backend` (marionette health + a real `/classify`+`/embed`
-round-trip at limit 3, all `ok:true`) before deploy; shipped via audited `POST /deploy`
-(job `4c205049`, `deploy.succeeded`, ~21s, no rollback), fresh-boot scheduler line confirmed
-in `bentley-os-api-1` logs. **M3 now has four slices live: Clair classifier, priority-triage
-render, embedding pipeline, and auto-drain.** Remaining in M3: grounded Q&A (`retrieve.ts` +
-`/think` wiring — UNBLOCKED, not built) and the morning brief. Prior context still holds:
-embeddings = OpenAI `text-embedding-3-small` (1536-dim cosine → Qdrant, 755 backlog points),
-Clair (`5d45b8d`) two-pass consequence classifier, triage render (`532493a`) live. Milestone 2
-COMPLETE. Milestone 4 Task A DONE (async deploy-completion → Telegram, `80298a4`/`8ac171c`);
-M4 gate slice + marionette audit-sight live. **Open incident carried forward:** two
-unidentified commits (`e06ed72`/`449a9b7`, "Hello"→"Goodbye" print edits) landed on
-`origin/main` via the GitHub web UI from an unidentified actor; `091c8e0` restored the
-corrupted Bible file, but the SOURCE was never run down — see §8.)*
+*Last verified: 2026-07-13 (HEAD `a0ced26`. **Milestone 3's AI layer now has four slices
+live: the Clair email classifier, the priority-triage dashboard render, the email embedding
+pipeline, AND grounded Q&A.** This session shipped **grounded Q&A**: a keyword gate
+(`marionette/src/data-gate.ts`, `isDataQuestion()`, mirrors `system-sight.ts`'s
+`isSystemStatusQuestion` pattern) detects data questions ("email about", "did i get",
+"invoice", "receipt", etc.), triggering `marionette/src/retrieve.ts`'s `retrieveContext()`:
+embeds the request via the now-exported `embedText()` (reused from `embed.ts` — same model,
+same embedding space as the stored vectors), searches Qdrant top-10, then SELECTs real
+bodies back from Postgres by id. Wired into `/think` as a second pre-fetch injection block
+(same shape as audit-sight), degrading gracefully on failure. **Confirmed working
+end-to-end against the live production container** — a real question ("did I get any email
+about an invoice or receipt recently?") returned a grounded answer citing real subjects/
+amounts/dates (Cloudflare, Anthropic, DigitalOcean, Nous Research, Rentec Direct), and a
+sanity check ("what is 2+2?") confirmed the gate correctly does NOT fire on non-data
+questions. **A separate, previously-hidden bug was also fixed this session:** DeepSeek's
+`deepseek-v4-pro` sometimes leaks a `<think>...</think>` reasoning trace (and occasionally a
+stray `<｜end▁of▁thinking｜>` token, sometimes with the JSON object duplicated) even in
+`response_format: json_object` mode — this silently broke `index.ts`'s `JSON.parse` and fell
+through to the raw-string fallback, delivering garbled text as `message`. Never surfaced
+before because no prior `/think` response was complex enough to trigger the leak; the
+retrieval feature's longer context finally exposed it. Fixed at the source in
+`marionette/src/deepseek.ts`: `callDeepSeek` now strips `<think>` blocks and stray special
+tokens, then extracts the first balanced `{...}` object before returning `content` — the
+function's contract (a clean JSON string) is unchanged, so no caller needed to change.
+**Qdrant `emails` collection now holds 766 points** (up from 755 at last verification — new
+mail has been ingested/embedded since; the embed backlog-drain is still not automated, see
+§8). Deployed via audited `POST /deploy {"service":"marionette"}` (job `97b27e56`, confirmed
+`deploy.succeeded`, commit `a0ced26`, no rollback), verified end-to-end against the real
+running container post-deploy. Clair (`marionette/src/classify.ts`, `5d45b8d`) remains the
+two-pass consequence classifier (`POST /classify`); the priority-triage dashboard render
+(`532493a`) is live. Milestone 2 remains COMPLETE. Milestone 4 Task A DONE (async
+deploy-completion → Telegram, `80298a4`/`8ac171c`); M4 gate slice + marionette audit-sight
+live. **Open incident carried forward:** two unidentified commits (`e06ed72`/`449a9b7`,
+"Hello"→"Goodbye" print edits) landed on `origin/main` via the GitHub web UI from an
+unidentified actor; `091c8e0` restored the corrupted Bible file, but the SOURCE was never run
+down — see §8.)*
 
 ---
 
@@ -81,6 +94,10 @@ actually tested. **Same lesson repeated during the Telegram build:** a "webhook 
 API response from Telegram (`{"ok":true}`) said nothing about whether delivery actually
 worked — `getWebhookInfo`'s `last_error_message` was the only source of truth, and even that
 required a real send/receive cycle (not just a config check) to confirm the full round trip.
+**And again during the grounded-Q&A build:** the retrieval pipeline looked done (real,
+correctly-cited answers) while a completely separate bug — DeepSeek's thinking-trace leak —
+was silently corrupting the delivered `message` field; only reading the actual JSON response
+end-to-end (not just checking that retrieval ran) caught it.
 
 **Ground truth beats vision.** Ground every proposal in current state (this doc, §4). If
 unsure whether something exists on the box, give the one command to check — don't assume.
@@ -106,7 +123,10 @@ unsure whether something exists on the box, give the one command to check — do
   top level; it's actually `{decision: {decision, message, reasoning}}`. The bug produced no
   error — `sendMessage` just sent `undefined` as text — and was only caught by directly
   curling the upstream service and diffing the real JSON against the code's assumption.
-  Don't guess a response shape from a route name; hit the real endpoint and look.
+  Don't guess a response shape from a route name; hit the real endpoint and look. **Same
+  discipline caught the retrieve.ts SQL bugs and the DeepSeek thinking-trace bug** — neither
+  surfaced until the real end-to-end output was actually read, not just the "did it run
+  without throwing" check.
 
 **File-creation quirk:** the browser terminal has bracketed-paste issues. Short heredocs
 (`cat > file << 'EOF'`) are fine. **For long files — like this one — heredoc in the browser
@@ -127,7 +147,12 @@ flagged as failure-prone.
    prefix, plain SQL, e.g. `0001_secretary_ontology.sql`) — never ad-hoc production edits.
 4. **Host locally; AI is API-only, except small local-model utilities like whisper.** No
    local LLM inference. Do not reintroduce a local embeddings/LLM service. Whisper (speech-
-   to-text) is a deliberate, narrow exception — see §0.
+   to-text) is a deliberate, narrow exception — see §0. **Grounded Q&A's retrieval-time
+   embedding call reuses the same OpenAI `embedText()` as the storage-time pipeline — no new
+   embedding model or local inference was introduced to build it.** An earlier plan to gate
+   data-questions via a local `all-minilm` embedding model (a new `local-ai` service, Vulkan
+   on the RX 5700 XT) was explicitly abandoned in favor of a plain keyword gate — simpler, no
+   new service, no exception to this rule needed, no untested GPU/Vulkan risk. See §8.
 5. **Autonomy is earned — except inside the sandbox, and never for external comms.** Any AI
    action capability that touches the *production* zone or the outside world ships
    approval-gated first. Never wire autonomous actions onto real Gmail without a guardrail.
@@ -166,6 +191,11 @@ flagged as failure-prone.
   user/data-derived strings (`esc()` helper) before interpolating into the HTML template —
   email subjects/snippets and event titles are third-party content and must never be
   injected raw. Any new server-rendered view follows the same rule.
+- **A model's JSON-mode output still isn't guaranteed clean JSON.** DeepSeek's
+  `response_format: json_object` can still leak a `<think>...</think>` reasoning trace or
+  stray special tokens around the real JSON object, and can duplicate it. Any code that
+  calls a reasoning-capable model in JSON mode should sanitize/extract the JSON object
+  before parsing, not assume `response_format` alone guarantees a clean parse. See §7.
 
 ---
 
@@ -178,12 +208,12 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | Service | Port | Owns | Does NOT own |
 |---|---|---|---|
 | **postgres** | 5432 (LAN only) | All persisted state — ontology, sync tokens, audit log | Vector search (qdrant) |
-| **qdrant** | 6333 (LAN only) | Vector storage for embeddings — **`emails` collection, 1536-dim cosine, 755 points, written by `marionette/src/embed.ts`** (derived index over `emails.body`, keyed on email id) | Reasoning (marionette's job); the source-of-truth body (that stays in Postgres) |
+| **qdrant** | 6333 (LAN only) | Vector storage for embeddings — **`emails` collection, 1536-dim cosine, 766 points, written by `marionette/src/embed.ts`, read by `marionette/src/retrieve.ts`** (derived index over `emails.body`, keyed on email id) | Reasoning (marionette's job); the source-of-truth body (that stays in Postgres) |
 | **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
-| **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min; **after each sync the cron also POSTs marionette `/classify` + `/embed` (limit 50 each) to auto-drain new mail — a thin forward, no reasoning in api**), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
+| **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
-| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, **now consumed by `/think`**: system-status questions trigger an in-process `auditSummary(60)` read, injected into the reasoning prompt so Mari narrates real activity instead of claiming blindness** | Ingestion (api's job), deploy (deploy's job) |
+| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, consumed by `/think` for system-status questions. AND `retrieve.ts`/`data-gate.ts` — grounded Q&A over real email content via Qdrant retrieval, consumed by `/think` for data questions ("did I get an email about...")** | Ingestion (api's job), deploy (deploy's job) |
 | **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `base` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
 | **cloudflared** | — | Public tunnel, gated on `api` health | — |
 | **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
@@ -194,7 +224,9 @@ mentions two of these → split the ticket. **Telegram fits this rule cleanly: i
 another HTTP surface on `api`, forwarding to marionette's existing reasoning endpoint — no
 new reasoning logic was added anywhere.** **The dashboard fits it cleanly too: it's a pure
 read view over Postgres in `api`, no reasoning — any future "insight" that requires
-classification/generation belongs in marionette, not the dashboard route.**
+classification/generation belongs in marionette, not the dashboard route.** **Grounded Q&A
+fits it too: retrieval (embed query, search Qdrant, pull bodies) and the keyword gate both
+live in marionette; api never touches email content directly for this feature.**
 
 **Cloudflare/networking gotcha:** `cloudflared` runs in a container on `backend`. It reaches
 app services by container name (`http://api:3000`), host services (SSH) by LAN IP
@@ -202,7 +234,10 @@ app services by container name (`http://api:3000`), host services (SSH) by LAN I
 
 **Same gotcha class:** `contractor` reaches the real systemd OpenCode server via LAN IP
 `172.16.30.4:4096`, never `127.0.0.1` — a service bound to loopback only is unreachable from
-any other container regardless of shared network.
+any other container regardless of shared network. **Qdrant is bound to `127.0.0.1:6333` on
+the host** — not LAN-reachable at `172.16.30.4:6333` despite earlier doc wording; test it
+only from inside the `backend` docker network (`http://qdrant:6333`), matching how the real
+services reach it.
 ---
 
 ## 3a. Ontology-bound vs. utility services
@@ -226,11 +261,12 @@ the same treatment as any other fact, regardless of which container it lives in.
 storing vectors is a derived index over ontology objects (utility); a service logging "user
 asked about X on date Y" as a queryable fact would not be.
 
-**Current utility services:** `redis` (cache), `qdrant` (vector index — now populated: the
-`emails` collection holds one 1536-dim vector per embedded email, a derived index over
-`emails.body`; the body itself stays in Postgres, the one source of truth), `portainer` /
-`dozzle` / `uptime-kuma` (ops visibility), `deploy` (build/rollback — audits *to*
-`audit_log`, doesn't own a fact of its own).
+**Current utility services:** `redis` (cache), `qdrant` (vector index — now populated AND
+actively queried: the `emails` collection holds one 1536-dim vector per embedded email
+(766 points), a derived index over `emails.body`; the body itself stays in Postgres, the one
+source of truth; retrieval SELECTs it back by id at query time), `portainer` / `dozzle` /
+`uptime-kuma` (ops visibility), `deploy` (build/rollback — audits *to* `audit_log`, doesn't
+own a fact of its own).
 ---
 
 ## 4. Current state (living — what actually exists on the box right now)
@@ -239,8 +275,9 @@ Running on the box at `~/bentley-os` (Ubuntu, LAN IP `172.16.30.4`). Absolute pa
 `/home/spaghettios/bentley-os` — always exact, never an alias (see §7 bind-mount lesson).
 
 **Infrastructure — all up:** api (healthy, 3000), postgres (healthy, 5432), redis (6379),
-qdrant (6333/6334 — reachable, `emails` collection with 755 points, actively used by the embed pipeline), cloudflared, dozzle (8080),
-portainer (9000/8000/9443), uptime-kuma (healthy, 3001), deploy (healthy, 4000 /
+qdrant (6333/6334 — reachable from `backend` network, `emails` collection with 766 points,
+actively used by both the embed pipeline and the retrieval query path), cloudflared, dozzle
+(8080), portainer (9000/8000/9443), uptime-kuma (healthy, 3001), deploy (healthy, 4000 /
 127.0.0.1), contractor (healthy, 4100, backend only), marionette (healthy, 4200, backend
 only), whisper (healthy, 4300, backend only, `base` model).
 
@@ -248,13 +285,16 @@ only), whisper (healthy, 4300, backend only, `base` model).
 The embeddings-provider decision is **RESOLVED = OpenAI `text-embedding-3-small`** (1536-dim,
 cosine), consistent with §2.4 (API-only, no local inference). `OPENAI_API_KEY` in `.env`.
 The pipeline lives in `marionette/src/embed.ts` (`POST /embed`) — see the embed subsection
-below. **Local embeddings were considered and deliberately deferred:** a small local model
-(BGE-M3/Jina on the box's idle AMD RX 5700 XT) would arguably fit the whisper-class exception
-(small, mature, no frontier need) and keep email bodies off OpenAI's servers (privacy). But
-cost is a non-argument — embedding all 755 emails is ~2¢ one-time, well under $1/yr ongoing —
-so the only real driver for local would be privacy, and it carries the same unfinished
-ROCm/HIP GPU-setup cost parked for whisper (§8). Chose OpenAI to ship a working pipeline now;
-`embedText()` in `embed.ts` is a clean single-function swap seam if privacy ever wins. See §8.
+below. `embedText()` is now **exported** (previously private) so `retrieve.ts` can reuse the
+exact same embedding call/model for query-time embedding — query and stored vectors share one
+embedding space by construction, not by convention. **Local embeddings were considered and
+deliberately deferred:** a small local model (BGE-M3/Jina on the box's idle AMD RX 5700 XT)
+would arguably fit the whisper-class exception (small, mature, no frontier need) and keep
+email bodies off OpenAI's servers (privacy). But cost is a non-argument — embedding all 755+
+emails is ~2¢ one-time, well under $1/yr ongoing — so the only real driver for local would be
+privacy, and it carries the same unfinished ROCm/HIP GPU-setup cost parked for whisper (§8).
+Chose OpenAI to ship a working pipeline now; `embedText()` in `embed.ts` is a clean
+single-function swap seam if privacy ever wins. See §8.
 
 **Repo:** private, confirmed via `gh repo view`. `.env`/`client_secret.json`/`token.json`
 confirmed never tracked (checked full git history for leaked values, not just current
@@ -268,7 +308,9 @@ email-intelligence columns + partial index (from `0005_email_intelligence.sql`, 
 M3 — `body`/`reason`/`confidence`/`classified_at` on `emails` + `idx_emails_unclassified`),
 and the embedding-status column + partial index (from `0006_email_embeddings.sql`, `a46d8ce`,
 M3 — `embedded_at` on `emails` + `idx_emails_unembedded`), all applied live. Migrations live
-at `supabase/migrations/` (six files, `0001`–`0006`).
+at `supabase/migrations/` (six files, `0001`–`0006`). **Grounded Q&A (this session) added NO
+new migration** — retrieval is a pure read over existing `emails` rows (SELECT by id), no new
+column or table; see §5.
 - `emails` — the Clair classifier (`marionette/src/classify.ts`) **actively writes**
   `category`, `importance`, `reason`, `confidence`, `classified_at`. Don't recreate any of
   them. Live columns confirmed via `\d emails`: `id` (uuid), `source`, `source_id`,
@@ -280,9 +322,11 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   `0006`). Partial indexes: `idx_emails_unclassified btree (received_at DESC) WHERE
   classified_at IS NULL` (classifier work-queue, `0005`) and `idx_emails_unembedded btree
   (received_at DESC) WHERE body IS NOT NULL AND embedded_at IS NULL` (embed work-queue,
-  `0006`). **755 rows have a body; all 755 are embedded (`embedded_at` set, `remaining=0`).**
-  (Classification is a separate axis and was NOT advanced this session — it stands where the
-  classify slices left it; the embed pipeline does not classify and vice versa.)
+  `0006`). **766 points now live in Qdrant (up from 755) — new mail has been ingested and
+  embedded since the last full-backlog verification; live counts should be re-checked
+  whenever they matter, not assumed from this doc.**
+  (Classification is a separate axis from embedding and from retrieval — retrieval reads
+  `body` directly, does not depend on `classified_at`/`importance`/`category` being set.)
 - `calendar_events` live columns confirmed: `id` (uuid), `source`, `source_id`, `title`,
   `description`, `location`, `starts_at` (indexed), `ends_at`, `organizer_id` (→ people),
   `status`, `created_at`, `updated_at`. `organizer_id` and `event_attendees` are now
@@ -292,12 +336,15 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   Indexes on `action` and `at DESC`. Real rows now exist from deploy activity,
   `marionette.think`, `marionette.delegate`, `marionette.classify` (Clair — one row per
   email classified, `target` = email id, `payload` = importance/category/confidence/passes),
-  `marionette.embed` (one row per email embedded, `target` = email id, `payload` = model/dim;
-  755 success rows from this session's backlog drain), and `contractor.execute` — **including rows
-  originating from Telegram messages**, indistinguishable in `audit_log` from any other
-  `/think` caller (the audit trail doesn't currently tag which interface originated a
-  request — see §8). Ingestion (gcal/gmail) does **not** currently write to `audit_log` —
-  stdout only. Open item.
+  `marionette.embed` (one row per email embedded, `target` = email id, `payload` = model/dim),
+  and `contractor.execute` — **including rows originating from Telegram messages**,
+  indistinguishable in `audit_log` from any other `/think` caller (the audit trail doesn't
+  currently tag which interface originated a request — see §8). **Retrieval itself does not
+  write its own audit rows** — a data-question `/think` call still produces exactly one
+  `marionette.think` row (same as any other `/think` call); the retrieval step is an
+  in-process pre-fetch, not a separately-audited action, matching how audit-sight's
+  `auditSummary` read is also unaudited-in-itself. Ingestion (gcal/gmail) does **not**
+  currently write to `audit_log` — stdout only. Open item.
 - **psql inside the container:** use `-h 127.0.0.1` to force TCP+password auth (peer auth
   fails on the Unix socket):
 ```bash
@@ -396,7 +443,8 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   last-seen tracking` — the migration file itself, committed after the fact; it had been
   applied live by hand before being tracked).
 
-**Milestone 3 — AI layer (read-only) — classifier + triage render both done, live:**
+**Milestone 3 — AI layer (read-only) — classifier + triage render + embeddings + grounded
+Q&A all done, live:**
 - **Full-body Gmail ingestion + intelligence schema** (`4c39435`, migration `0005`): `emails`
   now stores the full `body`, and the four Clair columns (`reason`/`confidence`/
   `classified_at` + reuse of existing `category`/`importance`) plus the
@@ -419,10 +467,10 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
     consumes the `classified_at IS NULL` work-queue newest-first. **Each email audits
     independently** (`marionette.classify`, success/error per row) — one bad email can't sink
     the batch. Confirmed clean at batch size 50 (50/50 ok, 0 err, no timeout).
-  - **Live data:** 93 of 778 emails classified this session (partial drain — 685 remain).
-    Tier spread over the classified set: ~3 high (≥70) / ~11 mid (40–69) / rest noise (<40),
-    with natural score gaps at the 70 and 40 boundaries (cutoffs are robust — nothing sits at
-    66–69 or 31–39). Top items correctly float up: GitHub token-expiry (90), Google security
+  - **Live data (last checked in an earlier session — re-verify counts before relying on
+    them, per §8):** 93 of 778 emails classified. Tier spread over the classified set: ~3
+    high (≥70) / ~11 mid (40–69) / rest noise (<40), with natural score gaps at the 70 and 40
+    boundaries. Top items correctly float up: GitHub token-expiry (90), Google security
     alert (85).
 - **Priority-triage dashboard section** (`apps/api/src/routes/dashboard.ts`, `532493a`) —
   pure read-only render in **api** (§9 — no reasoning in the dashboard route). New "Priority
@@ -443,64 +491,73 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
     rollback. Verified live in-browser at `spaghettios.bentleyos.me`.
 - **Commits:** `4c39435` (full-body ingestion + `0005`) → `5d45b8d` (Clair classifier
   `POST /classify`) → `532493a` (triage dashboard render).
-- **Still open in M3:** (1) **auto-drain — DONE** (`a9e7bc1`, this session): the 5-min
-  ingestion cron now POSTs marionette `/classify` (limit 50) after each sync, so new mail
-  self-triages; the classify backlog also drains 50/tick until caught up. (See the auto-drain
-  subsection below.) (2) **Morning brief** — not built. (3) **Grounded Q&A** — now UNBLOCKED
-  (embeddings done); `retrieve.ts` + `/think` data-question gate is the next slice, not built.
-  (4) **Snippet zero-width-padding polish** (cosmetic, carried from M2) now also applies to
-  triage subjects.
-
-**Milestone 3 — email embedding pipeline — done, live (full backlog embedded):**
-- **Migration `0006_email_embeddings.sql`** (`a46d8ce`, applied live): adds `embedded_at
-  timestamptz` to `emails` + partial index `idx_emails_unembedded (received_at DESC) WHERE
-  body IS NOT NULL AND embedded_at IS NULL` — the embed work-queue index, mirroring `0005`'s
-  `idx_emails_unclassified`. Embedding-status is a **fact on the email** (a column), not a
-  shadow table; the vector itself lives in Qdrant (the derived index, §3a).
-- **`marionette/src/embed.ts`** (`a46d8ce`, char-cap fixed in `2947a9b`) — clones
-  `classify.ts` structure exactly: same `postgres(DATABASE_URL, {max:2, idle_timeout:20})`
-  client, same per-row independent audit, one bad row can't sink the batch. No new npm deps —
-  OpenAI and Qdrant are both plain `fetch` (same as `deepseek.ts`).
-  - **`embedText(text)`** — OpenAI `POST /v1/embeddings`, model `text-embedding-3-small`,
-    `OPENAI_API_KEY` from env, 60s timeout, defensive shape-check (throws unless a 1536-length
-    array comes back). **This is the single swap seam** if embeddings ever go local (§8).
-  - **`upsertVector(email, vector)`** — Qdrant `PUT /collections/emails/points`, point id =
-    the email's uuid, light payload (`subject`/`received_at`/`sender_id`) for display/filter
-    at retrieval time. **The body is NOT stored in Qdrant** — it stays in Postgres (one source
-    of truth); `retrieve.ts` (next session) will SELECT it back by id.
-  - **What gets embedded:** `Subject: <s>\n\n<body>` so a subject-line query still retrieves
-    when the body is thin.
-  - **Input cap = 8000 chars** (`MAX_INPUT_CHARS`). **Bug caught mid-drain and fixed:** the
-    first cap was 24000 chars — mistaking a *char* budget for 3-small's *8192-token* limit.
-    Token-dense bodies (marketing HTML, quoted threads) 400'd with "maximum context length is
-    8192 tokens" on 25 of the first 200 emails. 8k chars ≈ ~2k tokens worst-case, safely
-    under. Same "stakes/signal live near the top" reasoning as classify.ts's 4k cap. Those 25
-    correctly audited as errors and stayed `embedded_at IS NULL`, so the retry re-picked them —
-    the per-row isolation held exactly as designed. Nothing was corrupted.
-- **`POST /embed {"limit":N}`** (default 20, capped 200) in `marionette/src/index.ts` —
-  mirrors `/classify`, mounted between `/classify` and `/think`. Drains the
-  `body IS NOT NULL AND embedded_at IS NULL` work-queue newest-first; each email audits
-  independently as `marionette.embed`.
-- **Qdrant `emails` collection** — created via REST PUT (size 1536, distance Cosine). Holds
-  **755 points** after the drain.
-- **Isolation-tested** twice (throwaway `docker run` on `bentley-os_backend` + `.env`, probed
-  via in-container `node -e fetch` — no curl in `node:22-slim`): first a 3-email smoke test
-  (all four checks green: embed report, Qdrant point count, `embedded_at` set, audit rows),
-  then the fix re-tested against a 30-batch that re-picked the previously-400ing long emails
-  (30/30 ok). **Deployed** via audited `POST /deploy {"service":"marionette"}` — job
-  `0df49452` (initial) + `bf991272` (char-cap fix), both confirmed by `deploy.succeeded` audit
-  rows, no rollback.
-- **Backlog fully drained:** 755/755 embedded (`remaining=0`, `done=755`), Qdrant
-  `points_count=755` — exact match. Total OpenAI cost ~2¢.
-- **Still open in M3 (embed-adjacent):** (1) **embed auto-drain — DONE** (`a9e7bc1`, this
-  session): the 5-min ingestion cron now auto-embeds new mail (POSTs marionette `/embed`
-  limit 50 after each sync, alongside `/classify`). See the auto-drain subsection below. (2) **Grounded Q&A** — now UNBLOCKED (embeddings
-  done); `retrieve.ts` (embed query → Qdrant top-k → SELECT bodies → inject as grounding via
-  the pre-fetch injection pattern) + a `/think` data-question gate is the next slice, NOT
-  built. (3) **Chunking** deferred to first long-form source (PDFs/web) — email is one vector,
-  no chunk needed; `retrieve.ts` leaves a chunk-ready seam. See §8.
-- **Commits:** `a46d8ce` (`feat(m3): email embedding pipeline — OpenAI 3-small -> Qdrant,
-  POST /embed`) → `2947a9b` (`fix(m3): cap embed input at 8k chars`).
+- **Email embedding pipeline** (`a46d8ce` + `2947a9b`, migration `0006`) — OpenAI
+  `text-embedding-3-small` (1536-dim, cosine) → Qdrant `emails` collection, via
+  `marionette/src/embed.ts` + `POST /embed {"limit":N}`. Mirrors the classify pattern
+  exactly: batch-bounded, per-row independent audit (`marionette.embed`), one bad row can't
+  sink the batch. Input cap = 8000 chars (`MAX_INPUT_CHARS`) — a prior 24000-char cap
+  conflated *chars* with 3-small's *8192-token* limit, 400'ing on token-dense emails; fixed
+  in `2947a9b`. Embeddings-provider decision **RESOLVED = OpenAI 3-small** (§8). Backlog
+  fully drained as of last full check (755/755); **766 points live now** — new mail keeps
+  arriving and getting embedded, though the cron doesn't auto-embed yet (see below).
+- **Grounded Q&A — shipped THIS SESSION, done, live:**
+  - **`marionette/src/data-gate.ts`** (new) — `isDataQuestion(request)`, a keyword gate
+    mirroring `system-sight.ts`'s `isSystemStatusQuestion` exactly in shape (lowercased
+    substring match against a hand-picked phrase list: "email about", "did i get",
+    "invoice", "receipt", etc.). Conservative by design — a miss just means the honest "I
+    don't have that" fallback rather than a wrong answer. Also exports
+    `formatRetrievalForPrompt(hits)`, which turns retrieval hits into a compact system-prompt
+    block (subject + truncated body per hit).
+  - **`marionette/src/retrieve.ts`** (new) — `retrieveContext(request)`: embeds the request
+    via the now-exported `embedText()` (same model/space as stored vectors), searches Qdrant
+    `POST /collections/emails/points/search` (top-10, `with_payload:false`), then SELECTs the
+    real bodies back from Postgres by id, capped ~1200 chars per email in the formatted
+    block (mirrors classify.ts/embed.ts's "stakes near the top" truncation reasoning). **The
+    working Postgres IN-list pattern is `where id in ${sql(ids)}`** — NOT
+    `sql.array(ids)::uuid[]` with `any()` (that produced a malformed-array error, then a
+    `uuid = any(text[])` type mismatch, error 42809). See §7.
+  - **`marionette/src/index.ts`** — new gate block in `/think`, mirrors the audit-sight
+    block exactly: if `isDataQuestion(request)`, `await retrieveContext(request)`, push the
+    formatted result as a `system` message. Wrapped in try/catch — a retrieval failure logs
+    and falls through, never sinks `/think`.
+  - **`marionette/src/prompt.ts`** — widened with a `RETRIEVED EMAIL CONTEXT` block
+    instructing Mari to use it as the sole source when present, say plainly when it's
+    empty/absent, and never invent email content beyond it (same "widen the prompt with the
+    capability" rule as audit-sight).
+  - **`marionette/src/embed.ts`** — `embedText` changed from a private helper to an
+    **exported** function so `retrieve.ts` can call the exact same embedding logic — one
+    embedding space, one code path, no drift risk between storage-time and query-time
+    vectors.
+  - **A separate, previously-hidden bug was found and fixed in the same session:**
+    `marionette/src/deepseek.ts`'s `callDeepSeek` now strips `<think>...</think>` reasoning
+    traces and stray `<｜...｜>` tokens, then extracts the first balanced `{...}` object,
+    before returning `content` — DeepSeek's `deepseek-v4-pro` was leaking thinking traces
+    (and occasionally duplicated JSON) even in `response_format: json_object` mode, which
+    silently broke `JSON.parse` and fell through to a raw-string fallback that delivered
+    garbled text as the `message` field. Never surfaced before this feature because no prior
+    `/think` call was complex/long enough to trigger the leak. Fix is fully contained in
+    `deepseek.ts` — the function's contract (clean JSON string) is unchanged, so `index.ts`
+    and `schema.ts` needed zero changes. See §7.
+  - **Isolation-tested twice** (throwaway `docker build -t marionette-retrieve-test
+    marionette` + `docker run` on `bentley-os_backend` + `.env`, probed via in-container
+    `node -e fetch` — no curl in `node:22-slim`): once before the DeepSeek fix (retrieval
+    correct, but `message` field garbled — this is how the DeepSeek bug was caught), once
+    after (both the invoice-query test AND a "what is 2+2?" sanity check — confirming the
+    gate correctly does NOT fire on non-data questions — came back clean).
+  - **Deployed** via audited `POST /deploy {"service":"marionette"}` (job `97b27e56e`,
+    confirmed by `deploy.succeeded` audit row, commit `a0ced26`, no rollback). **Re-verified
+    against the real running production container post-deploy** with the same invoice-query
+    question — confirmed clean, correctly-cited real answer.
+  - **Commit:** `a0ced26` (`feat(m3): grounded Q&A — Qdrant retrieval + fix DeepSeek
+    thinking-trace JSON parsing`).
+- **Still open in M3:** (1) **backlog drains not automated** — the 5-min ingestion cron does
+  NOT auto-classify or auto-embed new mail; wiring `classifyBatch` AND `embedBatch` into the
+  cron is the natural next slice. (2) **Morning brief** — not built. (3) **Chunking**
+  deferred to first long-form ingestion source (PDFs/web) — email is one vector, no chunk
+  needed. (4) **Snippet zero-width-padding polish** (cosmetic, carried from M2) still open.
+  (5) Grounded Q&A currently has **no conversation memory** — each `/think` call, including
+  data questions, is stateless; "what about that one" as a follow-up means nothing yet (same
+  limit noted for Telegram generally, see §8).
 
 **Telegram integration — done end-to-end:**
 - **Bot:** `@spaghettios_bot`, created via BotFather. Token stored only in `.env`
@@ -614,8 +671,10 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   `response_format: json_object`, sends no `tools` array, and returns only `.content` (no
   `tool_calls` surfaced), so a tool-call loop would have meant a whole second code path and
   a second model call to reconcile with the forced-JSON decision contract. (B) is one call,
-  `callDeepSeek`/`normalizeDecision` left untouched.
-- **`marionette/src/system-sight.ts`** (new) — the bridge between the raw read
+  `callDeepSeek`/`normalizeDecision` left untouched. **Grounded Q&A's retrieval gate reuses
+  this exact same (B) pre-fetch-injection shape** — a second independent proof the pattern
+  generalizes cleanly to new "give Mari sight over X" features.
+- **`marionette/src/system-sight.ts`** — the bridge between the raw read
   (`audit-read.ts`) and the reasoning (`/think`). Two pure functions, no DB access of its
   own:
   - `isSystemStatusQuestion(request)` — a **keyword gate** (lowercased substring match
@@ -623,7 +682,10 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
     "anything failing", "did the deploy", etc.). Conservative by design: a miss just falls
     back to the honest "I can't see that" reply — never a wrong answer, only a missed one.
     Gate does NOT fire on coding/other requests, so they're not polluted with audit noise
-    (verified: "what is 2+2?" returns a plain answer).
+    (verified: "what is 2+2?" returns a plain answer). **`data-gate.ts`'s
+    `isDataQuestion()` is a sibling gate, same shape, for email-content questions instead of
+    system-activity questions — the two gates fire independently and can both be silent on
+    the same request (e.g. "what is 2+2?" triggers neither).**
   - `formatAuditForPrompt(summary)` — turns `auditSummary`'s structured output into a
     **compact** text block (counts by action/outcome + trimmed one-liners per recent/failure
     row, pulling only useful crumbs like `req`/`job_id`/`error` out of `payload` — NOT the
@@ -633,19 +695,28 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   HTTP call to its own `/audit/summary` — the function is right there in-process), formats
   it, and pushes it as a second `system` message before the user turn. **Sight-read failure
   degrades gracefully** — a `try/catch` around the fetch logs and falls through to the
-  no-sight path rather than sinking the whole `/think`. `callDeepSeek(messages)` then flows
-  into the unchanged `JSON.parse` → `normalizeDecision` path; status questions resolve to
-  `reply`, returning before the delegate branch.
+  no-sight path rather than sinking the whole `/think`. **Immediately after this block, a
+  second, independent gate block does the same for `isDataQuestion(request)` →
+  `retrieveContext` → `formatRetrievalForPrompt`** (grounded Q&A, this session) — both gates
+  can fire on the same request in principle, though no real query has triggered both yet.
+  `callDeepSeek(messages)` then flows into the unchanged `JSON.parse` → `normalizeDecision`
+  path (with `deepseek.ts`'s new thinking-trace sanitization now happening inside
+  `callDeepSeek` itself, before `content` is even returned) — status/data questions resolve
+  to `reply`, returning before the delegate branch.
 - **`prompt.ts` widened** to match the new capability (§ rule: widen the prompt with the
   capability, never ahead of it). Old blanket "you are NOT the source of truth, never
   present yourself as knowing the state of the homelab" narrowed to the owner's *data*
   (email/calendar/docs); added a `WHAT YOU CAN SEE NOW` block telling Mari she CAN observe
   her own audit ledger, and when a `SYSTEM ACTIVITY` block is present she must narrate from
-  it as fact (when absent, fall back to honest limits — don't invent activity).
+  it as fact (when absent, fall back to honest limits — don't invent activity). **This
+  session added a second block, `RETRIEVED EMAIL CONTEXT`**, with the same "use it as sole
+  source when present, admit absence honestly, never invent" discipline.
 - **Verified end-to-end from the actual Telegram app**, not just a container probe: real
   "what have you done today?" message → narrated reply naming real timestamped events incl.
   the self-deploy that shipped this very change. Second phrasing ("anything failing?", a
-  different keyword) confirmed against the production container post-deploy.
+  different keyword) confirmed against the production container post-deploy. **Grounded
+  Q&A separately verified against the live production marionette container** (not just
+  Telegram) — see the M3 grounded-Q&A subsection above.
 - **Commits:** `27f18b3` (`feat(marionette): /think consumes audit-sight — narrates real
   system state`) on top of `9f3f054` (`feat(marionette): audit-sight read endpoint`).
 
@@ -703,8 +774,10 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `2947a9b`, working tree clean.
-Recent commits (newest first): `2947a9b` (fix(m3): cap embed input at 8k chars) → `a46d8ce`
+Local in sync with `origin/main` at `a0ced26`, working tree clean.
+Recent commits (newest first): `a0ced26` (feat(m3): grounded Q&A — Qdrant retrieval + fix
+DeepSeek thinking-trace JSON parsing) → `b8780ba` (docs: Bible update w/ Copilot note) →
+`2947a9b` (fix(m3): cap embed input at 8k chars) → `a46d8ce`
 (feat(m3): email embedding pipeline — OpenAI 3-small -> Qdrant, POST /embed) → `b153b1e`
 (merge: DRY_RUN-aware scoped rollback into main — the current rollback impl; supersedes the
 `52c3f72` scoped-checkout described in older text, and deleted the redundant
@@ -748,8 +821,7 @@ auto-rollback, every step audited. `SERVICE_HEALTH` map covers `api`, `contracto
 `marionette` — **not `whisper`**, which must be rebuilt directly via
 `docker compose up -d --build whisper` until it's added to the map. Deploys for covered
 services go through `POST /deploy` — never raw compose for those. Most recently used for the
-M2 dashboard deploy (job `b3da007c`), isolation-tested first, confirmed via `audit_log`'s
-`deploy.succeeded` row rather than trusting the immediate `POST /deploy` response.
+grounded-Q&A + DeepSeek-fix deploy (job `97b27e56`, `deploy.succeeded`, commit `a0ced26`).
 - **Rollback-scope bug — RESOLVED** (`52c3f72`). Previously `git checkout <commit> -- .`
   reverted the entire repo tree. Now an unscoped/unknown service **aborts** with an audited
   `deploy.rollback.failed` row instead of running any repo-wide checkout; `SERVICE_PATH`/
@@ -796,21 +868,23 @@ trigger for the same `/think` → `delegate` path.
   success.
 - `MARIONETTE_MODEL` env var (default `deepseek-v4-pro`; set `deepseek-v4-flash` for cheap
   iteration).
-- **Can now:** narrate her own system activity. `/think` consumes audit-sight — a
-  keyword-gated in-process `auditSummary(60)` read is injected into the reasoning prompt for
-  system-status questions, so Mari answers "what have you done today?" / "anything failing?"
-  from the real `audit_log` (see the audit-sight subsection above). This is *self*-sight over
-  the ledger, NOT general memory — see the limit below.
-- **Still cannot:** ground answers in email *content* yet — the embed pipeline populated
-  Qdrant (755 vectors) but `retrieve.ts` + the `/think` data-question gate aren't built, so
-  Mari can't yet answer "what did the accountant's email say?" from real bodies (next slice).
-  No cross-message conversation memory (`/think` is stateless — each Telegram message is a
-  fresh request; audit-sight sees the *ledger*, retrieval will see email *content*, but
-  neither recalls what the owner said two messages ago — "the file I just wrote" still means
-  nothing), no delegation targets beyond contractor, no *autonomous* production-zone write
-  actions — the M4 approval-gate layer IS built (propose→approve→deny→execute + Telegram
-  buttons, see M4 subsection), but contractor's own writes remain sandbox-only and nothing
-  auto-commits/auto-deploys from a delegated task without the human approval tap.
+- **`callDeepSeek` (in `deepseek.ts`) now sanitizes its own output before returning it** —
+  strips `<think>` blocks and stray special tokens, extracts the first balanced JSON object.
+  Fixes a previously-hidden bug where `deepseek-v4-pro`'s occasional thinking-trace leak
+  broke `JSON.parse` downstream and delivered garbled text as `message`. See §7.
+- **Can now:** narrate her own system activity (audit-sight) AND ground answers in real
+  email content (grounded Q&A, this session). `/think` runs two independent, gracefully-
+  degrading pre-fetch gates — `isSystemStatusQuestion` → `auditSummary` for system-activity
+  questions, `isDataQuestion` → `retrieveContext` for email-content questions — either,
+  both, or neither can fire per request.
+- **Still cannot:** chunked/long-form retrieval (email is one vector each; PDFs/web pages
+  will need chunking when added, see §8), cross-message conversation memory (`/think` is
+  stateless — each Telegram message, including data questions, is a fresh request; "that
+  one" as a follow-up means nothing yet), delegation targets beyond contractor, or
+  *autonomous* production-zone write actions — the M4 approval-gate layer IS built
+  (propose→approve→deny→execute + Telegram buttons, see M4 subsection), but contractor's own
+  writes remain sandbox-only and nothing auto-commits/auto-deploys from a delegated task
+  without the human approval tap.
 
 **OpenCode permission policy** (`~/bentley-os/opencode.json`) — **decided and live**:
 - Bentley doesn't use OpenCode interactively; only marionette/contractor call it, always
@@ -842,7 +916,8 @@ trigger for the same `/think` → `delegate` path.
   `api` container at `/secrets/` (exact absolute host path, per §7 bind-mount lesson).
 - Confirmed live: first tick after deploy ran clean, both syncs incremental
   (`fetched: 0, upserted: 0` — correct, since the isolation test had just consumed the
-  delta). The M2 dashboard reads the rows this cron lands.
+  delta). The M2 dashboard reads the rows this cron lands. **Still does not auto-classify or
+  auto-embed new mail** — see M3 open items.
 
 **Milestone 1 gap — resolved.** `event_attendees` and `organizer_id` population is
 **verified live** (organizer_id populated on real rows, event_attendees confirmed via a
@@ -883,6 +958,13 @@ uuid) — a derived index over `emails.body`, a utility store (§3a), NOT a sour
 body stays in Postgres; Qdrant holds only the vector + a light display payload
 (subject/received_at/sender_id).
 
+**M3 grounded Q&A adds NO new table and NO new migration either** — retrieval is a pure read:
+embed the question, search Qdrant (existing collection, no schema change), SELECT `body`
+back from Postgres by id (existing column). Nothing new is stored anywhere; the feature is
+100% derived from data that already existed before this session. This is the same "read,
+don't duplicate" shape as audit-sight — a new *capability* to see existing facts, not a new
+fact.
+
 ---
 
 ## 6. Roadmap (ordered by what unblocks what)
@@ -904,7 +986,9 @@ actually proven — including from a live external interface.**
   gated, Cloudflare-Access-bypassed on its specific path only.
 - Wolverine (fixer) — not built.
 - Local Whisper — ✅ done (self-hosted `whisper.cpp`, `base` model, Cloudflare
-  Access-gated, Hammerspoon push-to-talk client on laptop). Local embeddings — not built.
+  Access-gated, Hammerspoon push-to-talk client on laptop). Local embeddings — not built,
+  and not planned for the retrieval-gate use case either (see §2.4, §8 — the local-AI gate
+  plan was abandoned in favor of a keyword gate).
 
 **Milestone 1 — Data in (Gmail + Calendar): ✅ Done.**
 | Step | Status |
@@ -937,9 +1021,9 @@ actually proven — including from a live external interface.**
 - **Done when:** the dashboard shows today's real events + email at a glance AND a "what
   changed" view surfaces recent deltas. **Both conditions met.**
 
-**Milestone 3 — AI layer, read-only. 🔨 UNDERWAY — classifier + triage render + embeddings
-done; grounded Q&A + brief remain.** In **marionette**, not api (reasoning), rendered by
-**api** (read-only views).
+**Milestone 3 — AI layer, read-only. 🔨 UNDERWAY — classifier + triage render + embeddings +
+grounded Q&A all done; brief + cron automation remain.** In **marionette**, not api
+(reasoning), rendered by **api** (read-only views).
 - ✅ **Email classification shipped** (`4c39435` + `5d45b8d`): Clair two-pass consequence
   classifier writing `importance`/`category`/`reason`/`confidence`/`classified_at`, backed by
   migration `0005`. `POST /classify` batch endpoint, audited per-email. See §4.
@@ -948,21 +1032,22 @@ done; grounded Q&A + brief remain.** In **marionette**, not api (reasoning), ren
   a pure read view. Isolation-tested, deployed via audited `POST /deploy`, verified live. See §4.
 - ✅ **Embedding pipeline shipped** (`a46d8ce` + `2947a9b`): OpenAI `text-embedding-3-small`
   → Qdrant, via `marionette/src/embed.ts` + `POST /embed`, migration `0006`
-  (`embedded_at` + `idx_emails_unembedded`). Full 755-email backlog embedded, Qdrant
-  `emails` collection = 755 points. Embeddings-provider decision RESOLVED = OpenAI (§8).
-  Isolation-tested, deployed via audited `POST /deploy` (`deploy.succeeded`). See §4.
-- ⏳ **Grounded Q&A** — now **UNBLOCKED** (embeddings done). Next slice: `retrieve.ts` (embed
-  query → Qdrant top-k → SELECT bodies from Postgres → inject as grounding via the pre-fetch
-  injection pattern, same shape as audit-sight) + a `/think` data-question gate + a
-  prompt.ts widen. NOT built.
-- ✅ **Auto-drain shipped** (`a9e7bc1`): the 5-min ingestion cron POSTs marionette
-  `/classify` then `/embed` (limit 50 each) after every sync, so new mail self-triages and
-  self-embeds; backlog drains 50+50/tick until caught up. Thin HTTP forward (§9-clean),
-  `try/finally` guard fix. Isolation-tested, deployed job `4c205049` (`deploy.succeeded`).
+  (`embedded_at` + `idx_emails_unembedded`). Embeddings-provider decision RESOLVED = OpenAI
+  (§8). Qdrant `emails` collection now at 766 points (live count, growing as new mail is
+  embedded). Isolation-tested, deployed via audited `POST /deploy` (`deploy.succeeded`). See §4.
+- ✅ **Grounded Q&A shipped** (`a0ced26`, this session): `retrieve.ts` + `data-gate.ts` —
+  embed query → Qdrant top-10 → SELECT bodies from Postgres → inject as grounding via the
+  pre-fetch injection pattern (same shape as audit-sight), gated by a keyword check, wired
+  into `/think` and `prompt.ts`. Fixed a co-discovered DeepSeek thinking-trace JSON-parsing
+  bug in the same commit. Isolation-tested twice, deployed via audited `POST /deploy` (job
+  `97b27e56`, confirmed `deploy.succeeded`), re-verified against the live production
+  container. See §4.
+- ⏳ **Automate the drains:** wire `classifyBatch` AND `embedBatch` into the 5-min ingestion
+  cron so new mail self-triages and self-embeds. Not built.
 - ⏳ **Morning brief** — not built. Telegram is the natural delivery channel once it exists.
 - **Done when:** email is auto-classified + auto-embedded on ingest AND a morning brief +
-  grounded Q&A are live. Classification, its render, embeddings, AND the cron automation are
-  now done; grounded Q&A and the brief remain.
+  grounded Q&A are live. Classification, its render, embeddings, and grounded Q&A are done;
+  the brief and the cron automation remain.
 
 **Milestone 4 — Action layer, approval-gated. 🔨 Gate slice + Task A done; Task B remains.**
 - ✅ **Gate slice shipped** (`3a66aef` + `b13c5ce`): `actions` table + strict lifecycle
@@ -1039,7 +1124,9 @@ system.
   to build it by hand for an isolation test, the command is `docker build -t <tag> apps/api`
   (context = the directory), NOT `docker build -f apps/api/Dockerfile .` (which sets context
   to root and fails at `COPY package.json ./` with "not found"). The deploy service already
-  gets this right; it only bites manual/isolation builds.
+  gets this right; it only bites manual/isolation builds. **`marionette`'s Dockerfile is the
+  same shape but simpler — it has no monorepo nesting, so `docker build -t <tag> marionette`
+  from the repo root just works** (confirmed building the grounded-Q&A isolation image).
 - **Cap embedding input by TOKEN budget, not char count — and short test emails won't catch
   the mistake.** OpenAI `text-embedding-3-small` has an 8192-*token* input limit. The embed
   pipeline first capped at 24000 *chars*, conflating the two; token-dense bodies (marketing
@@ -1060,7 +1147,9 @@ system.
   to execute each line — harmless (`command not found` noise) but it also created stray
   files named for tokens in the output (`=`, `CACHED`, `[internal]`, `exporting`, etc.) that
   had to be `rm`'d before the tree was clean. When copy-pasting a command, copy only the
-  command line, not the leading `spaghettios@…$` prompt or the output above it.
+  command line, not the leading `spaghettios@…$` prompt or the output above it. **Recurred
+  again in the grounded-Q&A session** — same failure mode, harmless again, but worth
+  restating: give one clean command block at a time and say explicitly "copy only this."
 - **A Cloudflare Access service token is not automatically valid against an app just because
   it was generated.** It must be explicitly attached via a separate **Service Auth** policy
   on that specific application (Action: Service Auth, Include: Service Token). Without it,
@@ -1131,6 +1220,28 @@ system.
   path) actually proves a password matches; a loopback `select 1` is a false positive. (2)
   `.env.bak` sitting in the working tree is a reinfection hazard (holds the stale secret) —
   deleted.
+- **A postgres.js IN-list over an array of uuids needs `sql(ids)` inside a template
+  literal (`where id in ${sql(ids)}`), not `sql.array(ids)` + `any()`.** The `sql.array` +
+  `any` combination failed twice in sequence while building `retrieve.ts`: first a
+  malformed-array error from a dropped `<` in the query template, then — once that was
+  fixed — a genuine `uuid = any(text[])` type mismatch (Postgres error 42809), since
+  `sql.array` produces a `text[]` by default and `any()` doesn't auto-cast it against a
+  `uuid` column. `sql(ids)` (postgres.js's list-helper, which expands to a parenthesized,
+  correctly-typed list for `IN`) is the confirmed-working form for this exact shape
+  (`emails.id uuid` column, array of uuid strings from a Qdrant search result).
+- **A model's `response_format: json_object` doesn't guarantee `content` is nothing but the
+  JSON object.** `deepseek-v4-pro` can leak a `<think>...</think>` reasoning trace (and a
+  stray `<｜end▁of▁thinking｜>`-style special token) around or before the real JSON, and can
+  occasionally emit the JSON object twice. This broke `JSON.parse` silently — no thrown
+  error surfaced anywhere except the code's own `try/catch`, which fell through to a
+  "treat the raw string as the message" fallback that then delivered garbled text to the
+  end user. It went unnoticed for as long as it did because every previous manual test used
+  short/simple `/think` requests that didn't trigger the model's internal reasoning trace at
+  meaningful length — the bug only appeared once a longer, retrieval-grounded prompt gave
+  the model enough to "think out loud" about. Fix: sanitize at the source, inside
+  `callDeepSeek` itself (strip `<think>` blocks + stray special tokens via regex, then
+  extract the first balanced `{...}` by brace-depth-counting) — never assume a
+  reasoning-capable model's JSON mode is clean without an explicit extraction step.
 
 ---
 
@@ -1171,27 +1282,45 @@ system.
   true "last synced" signal.
 - **Embeddings provider — RESOLVED = OpenAI `text-embedding-3-small`** (1536-dim, cosine),
   external API, consistent with §2.4. The embed pipeline (`marionette/src/embed.ts`,
-  `POST /embed`, migration `0006`) is live and the full 755-email backlog is embedded; Qdrant
-  is now used. **Local-model alternative deliberately deferred, not foreclosed:** a small
+  `POST /embed`, migration `0006`) is live; Qdrant `emails` collection is at 766 points and
+  growing. **Local-model alternative deliberately deferred, not foreclosed:** a small
   local model on the box's idle AMD RX 5700 XT would plausibly fit the whisper-class exception
   and keep email bodies off OpenAI (privacy), but cost is a non-argument (~2¢ one-time, <$1/yr)
   and it carries the same unfinished ROCm/HIP setup parked for whisper. `embedText()` in
   `embed.ts` is a clean single-function swap seam if privacy ever wins.
+- **Grounded Q&A intent-gate design — RESOLVED = plain keyword gate, not local-AI.** An
+  earlier plan called for a new `local-ai` service running a small local embedding model
+  (`all-minilm`) on the RX 5700 XT via Vulkan, used to semantically detect data-questions
+  before retrieving. Explicitly abandoned mid-planning in favor of `data-gate.ts`'s plain
+  keyword gate (mirrors `system-sight.ts`'s pattern exactly) — simpler, no new service, no
+  §2.4 exception needed, and no untested GPU/Vulkan risk taken on for an intent-detection
+  problem a keyword list already solves adequately. Retrieval's actual embedding call still
+  uses OpenAI (`embedText()`, reused from `embed.ts`) — the local-AI idea was specifically
+  about the *gate*, not the retrieval embedding itself. If the keyword gate proves too blunt
+  in practice (misses phrasings), widening the keyword list is the first fix to try before
+  reconsidering a model-based gate.
+- **Grounded Q&A shipped — RESOLVED.** `retrieve.ts` + `data-gate.ts`, wired into `/think`
+  and `prompt.ts`, deployed (`a0ced26`, job `97b27e56`), verified against the live production
+  container with a real invoice/receipt query and a "what is 2+2?" sanity check. See §4, §6.
+- **DeepSeek thinking-trace JSON-parsing bug — RESOLVED.** `deepseek.ts`'s `callDeepSeek` now
+  strips `<think>` blocks/stray tokens and extracts the first balanced JSON object before
+  returning `content`. Found and fixed in the same session as grounded Q&A (the longer
+  retrieval-grounded prompts were what finally triggered the leak reliably enough to notice).
+  See §4, §7.
 - **Chunking — deferred to the first long-form ingestion source** (PDFs / web pages, the
   ontology-bound sources in §3a). Email is short: one email = one vector, no chunking, and
-  `retrieve.ts` (next session) leaves a chunk-ready seam without importing a chunker. When
-  added, it must be TS (§2 — Python basically never), not a Python service. Candidate libs
+  `retrieve.ts` (shipped this session) confirmed that assumption holds — no chunk-ready seam
+  was even needed yet since nothing so far requires it. When a long-form source is added, it
+  must be TS (§2 — Python basically never), not a Python service. Candidate libs
   (Chonkie/llm-chunk) noted but not chosen.
-- **Drains not automated (M3) — RESOLVED** (`a9e7bc1`, this session). The 5-min ingestion
-  cron now auto-runs BOTH classification and embedding on new mail: after each gcal+gmail
-  sync, `apps/api/src/ingestion/scheduler.ts` POSTs marionette `/classify` (limit 50) then
-  `/embed` (limit 50) — a thin HTTP forward reusing the same `MARIONETTE` base URL as the
-  Telegram route (§9-clean, no reasoning in api). Each drain has its own try/catch; the whole
-  `runAllSyncs` body is now `try/finally`-wrapped so the `running` guard can't strand `true`.
-  Isolation-tested on `bentley-os_backend`, deployed job `4c205049` (`deploy.succeeded`). New
-  mail self-triages and self-embeds; backlog also drains 50+50/tick until caught up. (Note:
-  the historical "685 unclassified / 778 total" figures elsewhere in this doc are stale —
-  check live counts before relying on them.)
+- **Drains not automated (M3).** The 5-min ingestion cron auto-runs neither classification
+  nor embedding on new mail — both only run on manual `POST /classify` / `POST /embed`
+  batches. Qdrant's live point count (766, up from 755) confirms new mail keeps getting
+  embedded via manual/session-driven batches, not the cron; the **classify** backlog was
+  last drained partially in an earlier session and new mail similarly won't self-classify.
+  Natural next slice: call both `classifyBatch` and `embedBatch` from the cron. (Note: the
+  historical "685 unclassified / 778 total" figures elsewhere in this doc are stale — check
+  live counts before relying on them.)
 - **`whisper-laptop` Cloudflare service token exposed in plaintext in chat multiple times
   across sessions** (initial setup, then again during the Service Auth policy debugging).
   Not rotated yet — same pattern as the Postgres/DeepSeek leaks, now the most-repeated
@@ -1204,7 +1333,8 @@ system.
 - **Whisper GPU acceleration** — box has an AMD RX 5700 XT, currently unused; whisper runs
   CPU-only. Vulkan or ROCm/HIP backend would speed up larger models significantly. Not
   started — scoped as a future task if `base`'s CPU latency becomes annoying in daily
-  use.
+  use. **Also newly relevant to the abandoned local-AI gate plan** — if a model-based gate
+  is ever reconsidered, this same unfinished GPU work is the blocker either way.
 - **Log aggregation** specifics — not decided.
 - **`marionette/src/schema.ts`** has one leftover comment mentioning "opencode"
   conceptually — cosmetic, not fixed.
@@ -1220,10 +1350,12 @@ system.
   identical whether it came from a direct API call, a test script, or a Telegram message.
   Not a problem yet at single-user scale, but worth a `source` or `channel` field in the
   audit payload before there's ever more than one command interface or user to disambiguate.
-- **No conversation memory across Telegram messages.** Each message is a fresh, stateless
-  `/think` call — marionette has no way to know "the file I just wrote" refers to something
-  from two messages ago. Fine for one-shot commands today; will need addressing (likely via
-  Qdrant, already deferred to Milestone 3) before Telegram can support multi-turn tasks.
+- **No conversation memory across Telegram messages, including grounded Q&A.** Each message
+  is a fresh, stateless `/think` call — marionette has no way to know "the file I just wrote"
+  or "that email you mentioned" refers to something from a prior message. Retrieval re-runs
+  fresh on every data question rather than building on a prior answer. Fine for one-shot
+  commands/questions today; will need addressing (likely building on the same Qdrant
+  infrastructure grounded Q&A now uses) before Telegram can support true multi-turn tasks.
 - **Telegram webhook has no rate limiting or replay protection beyond the secret-token
   header and user-ID allow-list.** Low risk at single-user scale with a Bypass-scoped path,
   but worth revisiting if this interface's trust boundary ever expands.
@@ -1233,8 +1365,10 @@ system.
   surfaces no `tool_calls` — (A) would have needed a whole second code path + a second model
   call. Keyword gate (`system-sight.ts`) → in-process `auditSummary(60)` → compact injected
   block → single `callDeepSeek`, existing `normalizeDecision` untouched, sight-read failure
-  degrades gracefully. Verified end-to-end from the Telegram app. See §4. **Follow-on worth
-  noting** (not blocking): the keyword gate is blunt — a system-status question phrased
+  degrades gracefully. Verified end-to-end from the Telegram app. **Grounded Q&A's
+  `data-gate.ts`/`retrieve.ts` reused this exact (B) shape a second time**, confirming the
+  pattern generalizes cleanly. See §4. **Follow-on worth noting** (not blocking): the
+  keyword gate is blunt — a system-status question (or, now, a data question) phrased
   outside the pattern list falls back to the honest "can't see" reply. Widen the list or
   revisit (A) if that becomes annoying. (A) remains a clean future upgrade if Mari should
   ever decide *for herself* when to look — nothing here forecloses it.
@@ -1275,17 +1409,23 @@ system.
    `opencode.ts` proxies to the OpenCode server rather than reimplementing anything. **The
    M2 dashboard is not an exception** — it's a pure read/render over Postgres; the moment a
    view needs classification or a generated summary, that logic lives in marionette and the
-   dashboard calls it, never a prompt-caller in `api`.
+   dashboard calls it, never a prompt-caller in `api`. **Grounded Q&A's retrieval is not an
+   exception either** — embedding the query, searching Qdrant, and formatting the retrieved
+   context all live in `marionette` (`retrieve.ts`/`data-gate.ts`); `api` never touches email
+   content for this feature, same as it never touches audit-sight's ledger read directly.
 2. **One build/deploy system.** `deploy` already has queueing, health polling, audit-backed
    rollback. Milestone 6's git automation is an *extension* of `deploy`, not a parallel
    service.
 3. **Schema before code.** Check `0001_secretary_ontology.sql` before adding a column —
    `emails.category`/`importance` already exist. (The M2 dashboard added no columns — pure
-   read.)
+   read. Grounded Q&A added no columns either — pure read over `emails.body` + the existing
+   Qdrant collection.)
 4. **`audit_log` is the one ledger.** Deploy actions and AI actions both write here — this
    includes Telegram-originated requests, since they flow through the same
    `marionette.think`/`marionette.delegate` audit points as any other caller. No second "AI
-   decisions" table, and no separate "Telegram log."
+   decisions" table, and no separate "Telegram log." **Retrieval reads (audit-sight and
+   grounded Q&A alike) don't get their own audit rows** — they're in-process pre-fetch steps
+   feeding a single `marionette.think` call, which is what actually gets audited.
 5. **Local vs. pushed state.** `git status` at the start of every session.
 6. **Two-zone autonomy, refined:**
    - **Sandbox zone** (marionette → contractor → OpenCode): full filesystem/build autonomy
@@ -1302,7 +1442,8 @@ system.
      Telegram interface — commanding marionette from Telegram doesn't unlock any
      production-zone capability that didn't already exist. **The M2 dashboard is read-only —
      it surfaces production data but takes no side-effecting action, so it sits outside the
-     autonomy question entirely.**
+     autonomy question entirely. Grounded Q&A is the same** — it reads existing email
+     content and answers a question; it takes no side-effecting action and unlocks nothing.
    - **External comms are never in scope for autonomy, in either zone.** No
      email/messaging/external-comms MCP or tool is wired to contractor. If one ever is, it
      ships with an explicit deny in the permission policy from day one — never relying on
