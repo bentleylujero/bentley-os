@@ -23,10 +23,13 @@ render, embedding pipeline, and auto-drain.** Remaining in M3: grounded Q&A (`re
 embeddings = OpenAI `text-embedding-3-small` (1536-dim cosine → Qdrant, 755 backlog points),
 Clair (`5d45b8d`) two-pass consequence classifier, triage render (`532493a`) live. Milestone 2
 COMPLETE. Milestone 4 Task A DONE (async deploy-completion → Telegram, `80298a4`/`8ac171c`);
-M4 gate slice + marionette audit-sight live. **Open incident carried forward:** two
-unidentified commits (`e06ed72`/`449a9b7`, "Hello"→"Goodbye" print edits) landed on
-`origin/main` via the GitHub web UI from an unidentified actor; `091c8e0` restored the
-corrupted Bible file, but the SOURCE was never run down — see §8.)*
+M4 gate slice + marionette audit-sight live. **Rogue-commit incident — RESOLVED (see §8):**
+the "Hello"→"Goodbye" commits (`e06ed72`/`449a9b7`, and a third occurrence `650a7a8`) are
+GitHub's native Copilot coding agent (`dynamic/copilot-swe-agent/copilot` workflow, confirmed
+active via `gh api`), producing real GPG-signed/verified commits under Bentley's identity —
+not a compromised credential or unknown actor. Left enabled by choice; going forward, always
+`git fetch` + diff `origin/main` before every push, since it periodically reverts
+THE_BIBLE.md to a stale snapshot.)*
 
 ---
 
@@ -726,14 +729,18 @@ around the scoped git-checkout, plus deletion of `deploy/src/service-path.ts`). 
 the commit and the DRY_RUN guard are newer. The parked `slice1-image-rollback` branch
 (`0cf613e`) remains unmerged/unverified, unchanged.
 
-**⚠ Unresolved repo-integrity incident:** commits `e06ed72` and `449a9b7` (both "Update print
-statement from 'Hello' to 'Goodbye'") landed on `origin/main` via the **GitHub web UI** from
-an **unidentified actor** — classic bot/agent smoke-test signature. They also carried
-THE_BIBLE.md scrollback corruption, cleaned up by `091c8e0`. **The file was restored but the
-SOURCE was never run down** — something was auto-committing through Bentley's GitHub web
-session. Cheapest lead not yet pulled: `git log --format='%h %an <%ae> %cn %ci %s'
-e06ed72~1..091c8e0` to read the author/committer identity (a `web-flow` committer = GitHub web
-editor; any other identity = the culprit). Tracked as OPEN in §8.
+**Repo-integrity incident — RESOLVED.** Commits `e06ed72`, `449a9b7`, and a third occurrence
+`650a7a8` (all "Hello"→"Goodbye" print-statement edits, each also reverting THE_BIBLE.md to a
+stale snapshot) landed on `origin/main` via the GitHub web UI. **Root cause confirmed:**
+`gh api /repos/bentleylujero/bentley-os/actions/workflows` shows an active workflow named
+"Copilot cloud agent" (`dynamic/copilot-swe-agent/copilot`, created 2026-07-13). `gh api
+/repos/bentleylujero/bentley-os/commits/650a7a8 --jq '.commit.verification'` confirms
+`verified: true`, a real GPG signature under Bentley's identity — this is GitHub's native
+Copilot coding agent, not a compromised credential, leaked token, or unknown actor. **Decision:
+left enabled** (Bentley likes it) — but it will keep periodically reverting THE_BIBLE.md to
+stale content when it runs. **New standing rule: `git fetch origin` + diff `origin/main`
+before every push**, not just after a rejected push — treat a stale-content revert on
+`origin/main` as expected background behavior of this repo now, not a fresh incident.
 
 **Parked branch — `slice1-image-rollback` (`0cf613e`), UNMERGED / UNVERIFIED. Do NOT build
 on it.** An unmerged refactor of `deploy/src/runner.ts` (88+/30−) changing rollback from
@@ -1138,18 +1145,16 @@ system.
 
 ## 8. Open questions (decided-when-we-get-there, not blocking)
 
-- **⚠ Unidentified actor auto-committing to the repo — OPEN, security-relevant.** Commits
-  `e06ed72` + `449a9b7` ("Hello"→"Goodbye" print-statement edits) landed on `origin/main`
-  via the GitHub web UI from an unknown source, and rewrote THE_BIBLE.md with terminal
-  scrollback junk. `091c8e0` restored the file, but **what made the commits was never
-  identified** — something is/was acting through Bentley's GitHub web session (the "Hello"→
-  "Goodbye" pattern is a classic agent/integration smoke-test). Deferred during the M3-render
-  session (chose to proceed with the file restored), but NOT resolved. Cheapest next step,
-  costs nothing: `git log --format='%h %an <%ae> %cn %ci %s' e06ed72~1..091c8e0` to read the
-  author/committer identity — `web-flow` = GitHub web editor (consistent with the web-session
-  theory); any other identity names the culprit. Then audit GitHub → Settings → Applications
-  (authorized OAuth apps / installed GitHub Apps) and repo deploy keys / webhooks for anything
-  unexpected, and rotate the token if one is found.
+- **Rogue auto-committing actor — RESOLVED.** `e06ed72`/`449a9b7` (and a third recurrence,
+  `650a7a8`, caught live in a later session) are GitHub's native **Copilot coding agent**
+  (workflow `dynamic/copilot-swe-agent/copilot`, confirmed via `gh api
+  .../actions/workflows`, `state: active`), producing genuinely GPG-signed/verified commits
+  under Bentley's identity — not a leaked credential, rogue app, or unknown actor. No repo
+  webhooks (`gh api .../hooks` → `[]`) or deploy keys (`gh api .../keys` → `[]`) were
+  involved. **Decision: left enabled deliberately.** Known side effect: it periodically
+  reverts THE_BIBLE.md to a stale cached snapshot when it runs (seen 3 times now) — so
+  **`git fetch` + diff `origin/main` before every push is now standing practice**, not a
+  one-off precaution.
 - **Docs cleanup:** old `.md` files (`00_NORTH_STAR`, `01_CURRENT_STATE`, `02_DECISIONS`,
   `03_ROADMAP`) retired in favor of this Bible. Remove from the project once trusted.
 - **Rollback scope — RESOLVED** (current impl `b153b1e`, supersedes `52c3f72`): unscoped
