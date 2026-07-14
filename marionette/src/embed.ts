@@ -39,7 +39,7 @@ interface EmailRow {
 
 // Embeds one string via OpenAI. Throws on network failure, non-2xx, or a
 // malformed response (mirrors deepseek.ts's defensive shape-checking).
-async function embedText(text: string): Promise<number[]> {
+export async function embedText(text: string): Promise<number[]> {
   const key = process.env.OPENAI_API_KEY;
   if (!key) throw new Error('OPENAI_API_KEY not set in environment');
 

@@ -10,6 +10,8 @@ import { auditSummary } from './audit-read.ts';
 import { classifyBatch } from './classify.ts';
 import { embedBatch } from './embed.ts';
 import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts';
+import { isDataQuestion, formatRetrievalForPrompt } from './data-gate.ts';
+import { retrieveContext } from './retrieve.ts';
 
 // contractor's /execute can run long (real OpenCode build tasks, multi-step
 // tool use) — raise past undici's default 5-minute headers/body timeout so
@@ -101,6 +103,14 @@ app.post('/think', async (c) => {
         messages.push({ role: 'system' as const, content: formatAuditForPrompt(summary) });
       } catch (sightErr) {
         console.error('[think] audit-sight fetch failed:', sightErr);
+      }
+    }
+    if (isDataQuestion(request)) {
+      try {
+        const hits = await retrieveContext(request);
+        messages.push({ role: 'system' as const, content: formatRetrievalForPrompt(hits) });
+      } catch (retrieveErr) {
+        console.error('[think] retrieval fetch failed:', retrieveErr);
       }
     }
     messages.push({ role: 'user' as const, content: request });
