@@ -235,3 +235,5 @@ serve({ fetch: app.fetch, port });
 console.log(`marionette listening on :${port}`);
 // task-b live test 2026-07-14T20:58:24Z
 // task-b live test 2026-07-14T20:58:33Z
+// gap2-fix-verification: 2026-07-14T23:18:50Z
+// gap2-fix-verification: 2026-07-14T23:19:03Z
