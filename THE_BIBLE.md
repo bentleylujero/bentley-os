@@ -4,32 +4,37 @@ after the github copilot curfuffle
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
 
-*Last verified: 2026-07-13 (HEAD `a9e7bc1`. **This session shipped the M3 auto-drain: the
-5-min ingestion cron now auto-classifies AND auto-embeds new mail — no more manual
-`POST /classify` / `POST /embed`.** `apps/api/src/ingestion/scheduler.ts` (`a9e7bc1`) now,
-after each tick's gcal+gmail sync, POSTs `http://marionette:4200/classify` (limit 50) then
-`/embed` (limit 50). Cron→marionette is a thin HTTP forward (§9-clean — no reasoning added to
-`api`; identical pattern to the Telegram route, reusing the same `MARIONETTE` base URL). Each
-drain is wrapped in its own try/catch so a marionette hiccup can't kill the tick, and the
-whole `runAllSyncs` body is now `try/finally`-wrapped so the `running` guard can never strand
-`true` (incidental correctness fix, made because we added two more await points). New mail now
-self-triages and self-embeds; the backlog also drains 50+50 per tick until caught up.
-Isolation-tested on `bentley-os_backend` (marionette health + a real `/classify`+`/embed`
-round-trip at limit 3, all `ok:true`) before deploy; shipped via audited `POST /deploy`
-(job `4c205049`, `deploy.succeeded`, ~21s, no rollback), fresh-boot scheduler line confirmed
-in `bentley-os-api-1` logs. **M3 now has four slices live: Clair classifier, priority-triage
-render, embedding pipeline, and auto-drain.** Remaining in M3: grounded Q&A (`retrieve.ts` +
-`/think` wiring — UNBLOCKED, not built) and the morning brief. Prior context still holds:
-embeddings = OpenAI `text-embedding-3-small` (1536-dim cosine → Qdrant, 755 backlog points),
-Clair (`5d45b8d`) two-pass consequence classifier, triage render (`532493a`) live. Milestone 2
-COMPLETE. Milestone 4 Task A DONE (async deploy-completion → Telegram, `80298a4`/`8ac171c`);
-M4 gate slice + marionette audit-sight live. **Rogue-commit incident — RESOLVED (see §8):**
-the "Hello"→"Goodbye" commits (`e06ed72`/`449a9b7`, and a third occurrence `650a7a8`) are
-GitHub's native Copilot coding agent (`dynamic/copilot-swe-agent/copilot` workflow, confirmed
-active via `gh api`), producing real GPG-signed/verified commits under Bentley's identity —
-not a compromised credential or unknown actor. Left enabled by choice; going forward, always
-`git fetch` + diff `origin/main` before every push, since it periodically reverts
-THE_BIBLE.md to a stale snapshot.)*
+*Last verified: 2026-07-14 (HEAD `1cdd19f`. **This session shipped M4 Task B: `commit_deploy`
+now actually commits + pushes before deploying.** `deploy/src/runner.ts`'s `commitAndPush()`
+does fetch origin/main → divergence check (refuses if origin/main has commits not in local
+HEAD, per the fetch-before-push rule from the Copilot-agent incident) → scoped `git add
+<SERVICE_PATH>` → `git commit` (via `-c user.name=/-c user.email=` flags, no global git config
+mutation) → `git push origin main`, gated entirely on whether `job.commitMessage` was passed.
+Any diverge/commit/push failure aborts before build — never deploys an uncommitted/unpushed
+state as if it were fine. `deploy` reuses Bentley's own box SSH credentials (bind-mounted
+`~/.ssh` read-only into the container, `openssh-client` added to the Dockerfile) — a
+deliberate choice over a separate deploy-only key, made explicitly aware deploy already has
+full docker.sock + repo access so this isn't a meaningful escalation. `marionette/src/
+actions.ts` forwards `intent.commit_message` through to `deploy`'s `/deploy` call.
+**Verified fully live**, not just isolation-tested: action id=7 (`commit_deploy`,
+service=marionette) real-fetched, real-committed (`59996a1`), real-pushed to `origin/main`,
+built, and passed health — the whole chain, for real, on the actual repo.
+
+**Two real gaps surfaced by this test, neither fixed yet:**
+1. **Self-targeting `commit_deploy` (service=marionette) kills its own watcher.** When the
+   deploy rebuilds/recreates the marionette container, the in-process `void watchDeploy(...)`
+   background poll (M4 Task A) is running *inside that same container* — it gets torn down
+   mid-poll, leaving the action stuck `executing` forever even though the underlying deploy
+   actually succeeds. Action 7 was manually resolved (see §8). Needs its own session — likely
+   moving the watcher into `deploy` or `api` (neither gets torn down by a marionette-only
+   deploy) so a self-targeting action can't kill its own completion signal.
+2. **`deploy` runs git as root; commits from inside it leave root-owned `.git/objects` on the
+   host bind mount.** Hit immediately after action 7's test commit — Bentley's own `git add`
+   failed with `insufficient permission` until `sudo chown -R spaghettios:spaghettios .git`.
+   Will recur after every `commit_deploy` execution until resolved (either always chown back
+   after, or run git in the container as a non-root user matching the host UID).
+
+M4 is now: gate slice ✅, Task A ✅, Task B ✅ — all done. See §4, §6, §8.)*
 
 ---
 
@@ -589,11 +594,19 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   Telegram via a thin `api` notify endpoint (marionette can't message out itself — §9). So a
   Telegram Approve tap now gets a follow-up confirming the deploy *actually* finished
   healthy, not just that it was accepted.
-- **Still unwired — M4 Task B:** the git-commit half of `commit_deploy` — execute currently
-  just deploys from current repo state; contractor doesn't commit first yet
-  (`TODO(steering/commit)` in `actions.ts`).
-- **Commits:** `3a66aef` (propose/approve/deny/execute lifecycle) + `b13c5ce` (Telegram
-  buttons + surface endpoint) + `80298a4`/`8ac171c` (async completion → Telegram push).
+- **M4 Task B — commit-half of `commit_deploy` — DONE** (`1cdd19f`). `deploy/src/runner.ts`'s
+  `commitAndPush()`: fetch origin/main → divergence guard → scoped `git add <SERVICE_PATH>` →
+  `git commit` (per-command `-c user.name=/-c user.email=`, no global config write) → `git push
+  origin main`. Runs only when `job.commitMessage` is set; any failure aborts before build.
+  `docker-compose.yml` bind-mounts Bentley's real `~/.ssh` read-only into `deploy`; Dockerfile
+  adds `openssh-client`. `marionette/src/actions.ts` passes `intent.commit_message` through.
+  **Verified live end-to-end** (action id=7, service=marionette): real commit `59996a1` landed
+  on `origin/main`, scoped correctly to `marionette/` only, build+health succeeded. **Two gaps
+  found by this test, open — see header and §8:** self-deploy kills the Task A watcher
+  mid-poll (action 7 manually resolved); `deploy` running git as root leaves host `.git/
+  objects` root-owned, breaking the next host-side `git add` until manually `chown`'d.
+- **Commits:** `3a66aef` (propose/approve/deny/execute) + `b13c5ce` (Telegram buttons) +
+  `80298a4`/`8ac171c` (Task A, async completion) + `1cdd19f` (Task B, commit+push wiring).
 
 **Marionette audit-sight — read endpoint AND `/think` integration both done, live:**
 - **`marionette/src/audit-read.ts`** — Mari's read-only "sight" over her own ledger. The
@@ -973,20 +986,19 @@ done; grounded Q&A + brief remain.** In **marionette**, not api (reasoning), ren
   grounded Q&A are live. Classification, its render, embeddings, the cron automation, AND
   grounded Q&A are all done; only the morning brief remains.
 
-**Milestone 4 — Action layer, approval-gated. 🔨 Gate slice + Task A done; Task B remains.**
-- ✅ **Gate slice shipped** (`3a66aef` + `b13c5ce`): `actions` table + strict lifecycle
-  (`marionette/src/actions.ts`), 5 marionette routes, and **Telegram IS the approval
-  channel** — inline Approve/Deny buttons via `callback_query`, plus `POST
-  /telegram/surface/:id` to push a proposed action to chat. Fire-and-report execute with a
-  hard guarantee of a terminal transition. `kind='commit_deploy'` is the only action type so
-  far; all writes audit through `audit_log` (target = action id). See §4.
-- ✅ **Task A — async-completion push — DONE** (`80298a4`/`8ac171c`): deploy job polled to
-  true completion via `audit_log`, ✅/❌ pushed to Telegram through a thin `api` notify
-  endpoint. An Approve tap now gets a follow-up confirming the deploy actually finished
-  healthy, not just that it was accepted (202). See §4.
-- ⏳ **Task B — commit half of `commit_deploy`:** execute deploys from current repo state;
-  contractor doesn't git-commit first yet (`TODO(steering/commit)` in `actions.ts`).
-- Additional action types (create event, draft reply) are future work within this milestone.
+**Milestone 4 — Action layer, approval-gated. ✅ Done — gate slice, Task A, and Task B all
+shipped.**
+- ✅ Gate slice (`3a66aef`+`b13c5ce`): `actions` table, strict lifecycle, Telegram
+  Approve/Deny buttons. See §4.
+- ✅ Task A (`80298a4`/`8ac171c`): deploy polled to true completion via `audit_log`, ✅/❌
+  pushed to Telegram. See §4.
+- ✅ Task B (`1cdd19f`): `commit_deploy` now really commits + pushes the scoped path before
+  building, gated by a fetch-first divergence check. Verified live (action 7). See §4.
+- **Two open gaps, not milestone-blocking but real:** self-targeting deploys can strand the
+  Task A watcher (action stuck `executing`); `deploy`'s root-owned git objects need a manual
+  `chown` after any commit_deploy run. See §8.
+- Additional action types (create event, draft reply) remain future work within this
+  milestone — no design started.
 
 **Milestone 5 — Earned autonomy.** Auto-execute low-risk tier only. **Rollback-scope fix
 done (`52c3f72`) — no longer blocked.**
@@ -1252,6 +1264,26 @@ system.
 - **M4 `commit_deploy` git-commit half unwired.** (M4 Task B — STILL OPEN.) Execute deploys
   current repo state; contractor doesn't commit first (`TODO(steering/commit)` in
   `actions.ts`).
+  - **M4 Task B — commit_deploy git-commit/push — RESOLVED** (`1cdd19f`). See §4, §6.
+- **NEW — self-deploy watcher gap, OPEN.** A `commit_deploy` action targeting
+  `service:"marionette"` tears down the marionette container mid-`watchDeploy`-poll, since
+  the poll runs in-process inside the very container being replaced. The action never
+  receives its terminal `succeeded`/`failed` write and is stuck `executing` forever, even
+  though the underlying deploy genuinely succeeds (confirmed via `audit_log` and the deploy
+  job's own record). Action id=7 hit this and was manually resolved (`UPDATE actions
+  SET status='succeeded'... WHERE id=7`, plus a matching `action.succeeded` audit row).
+  Fix needs its own session: move the watcher/terminal-write responsibility to a service
+  that survives a marionette-only deploy — `deploy` itself (it already knows the true
+  outcome) or `api`. Same class of self-referential risk would apply to `service:"api"` or
+  `service:"contractor"` self-deploys — not yet tested for those.
+- **NEW — deploy's root-owned git objects, OPEN.** `deploy` runs as root inside its
+  container; any `git commit` it performs (via Task B's `commitAndPush`) writes new objects
+  into `.git/objects` on the host bind mount as root. Bentley's own subsequent host-side
+  `git add`/`commit` then fails with `insufficient permission for adding an object to
+  repository database` until a manual `sudo chown -R spaghettios:spaghettios .git`. Hit
+  immediately after action 7's test commit. Needs a real fix before `commit_deploy` is used
+  routinely — either auto-`chown` back at the end of `commitAndPush`, or run deploy's git
+  commands as a non-root user matching the host UID/GID.
 - **M2 "what changed" view — RESOLVED** (`5955d8d` + `0004`/`b905e4b`, M2 now complete). The
   Gmail zero-width-padding **snippet polish still remains** — cosmetic, not blocking, applies
   to both the "Recent email" and "What changed" feeds.
