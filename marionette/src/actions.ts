@@ -134,7 +134,7 @@ export async function executeAction(action: ActionRow): Promise<void> {
     const res = await fetch('http://deploy:4000/deploy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ service }),
+      body: JSON.stringify({ service, commit_message: action.intent?.commit_message ?? undefined }),
     });
 
     // Deploy returns 202 ACCEPT with a job_id — NOT completion. Parse the raw
