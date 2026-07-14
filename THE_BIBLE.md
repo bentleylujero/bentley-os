@@ -446,8 +446,8 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
 - **Still open in M3:** (1) **auto-drain — DONE** (`a9e7bc1`, this session): the 5-min
   ingestion cron now POSTs marionette `/classify` (limit 50) after each sync, so new mail
   self-triages; the classify backlog also drains 50/tick until caught up. (See the auto-drain
-  subsection below.) (2) **Morning brief** — not built. (3) **Grounded Q&A** — now UNBLOCKED
-  (embeddings done); `retrieve.ts` + `/think` data-question gate is the next slice, not built.
+  subsection below.) (2) **Morning brief** — not built. (3) **Grounded Q&A — DONE** (`a0ced26`,
+  live and verified end-to-end against production — see the grounded Q&A subsection below).
   (4) **Snippet zero-width-padding polish** (cosmetic, carried from M2) now also applies to
   triage subjects.
 
@@ -494,10 +494,10 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   `points_count=755` — exact match. Total OpenAI cost ~2¢.
 - **Still open in M3 (embed-adjacent):** (1) **embed auto-drain — DONE** (`a9e7bc1`, this
   session): the 5-min ingestion cron now auto-embeds new mail (POSTs marionette `/embed`
-  limit 50 after each sync, alongside `/classify`). See the auto-drain subsection below. (2) **Grounded Q&A** — now UNBLOCKED (embeddings
-  done); `retrieve.ts` (embed query → Qdrant top-k → SELECT bodies → inject as grounding via
-  the pre-fetch injection pattern) + a `/think` data-question gate is the next slice, NOT
-  built. (3) **Chunking** deferred to first long-form source (PDFs/web) — email is one vector,
+  limit 50 after each sync, alongside `/classify`). See the auto-drain subsection below. (2) **Grounded Q&A — DONE** (`a0ced26`): `retrieve.ts`
+  (embed query → Qdrant top-k → SELECT bodies → inject as grounding via the pre-fetch
+  injection pattern) + a `/think` data-question gate, live and verified end-to-end against
+  production. (3) **Chunking** deferred to first long-form source (PDFs/web) — email is one vector,
   no chunk needed; `retrieve.ts` leaves a chunk-ready seam. See §8.
 - **Commits:** `a46d8ce` (`feat(m3): email embedding pipeline — OpenAI 3-small -> Qdrant,
   POST /embed`) → `2947a9b` (`fix(m3): cap embed input at 8k chars`).
@@ -959,10 +959,12 @@ done; grounded Q&A + brief remain.** In **marionette**, not api (reasoning), ren
   `/classify` then `/embed` (limit 50 each) after every sync, so new mail self-triages and
   self-embeds; backlog drains 50+50/tick until caught up. Thin HTTP forward (§9-clean),
   `try/finally` guard fix. Isolation-tested, deployed job `4c205049` (`deploy.succeeded`).
+- ✅ **Grounded Q&A shipped** (`a0ced26`): retrieval + data-gate wired into `/think`, live and
+  verified end-to-end against production (real cited invoice/receipt query tested).
 - ⏳ **Morning brief** — not built. Telegram is the natural delivery channel once it exists.
 - **Done when:** email is auto-classified + auto-embedded on ingest AND a morning brief +
-  grounded Q&A are live. Classification, its render, embeddings, AND the cron automation are
-  now done; grounded Q&A and the brief remain.
+  grounded Q&A are live. Classification, its render, embeddings, the cron automation, AND
+  grounded Q&A are all done; only the morning brief remains.
 
 **Milestone 4 — Action layer, approval-gated. 🔨 Gate slice + Task A done; Task B remains.**
 - ✅ **Gate slice shipped** (`3a66aef` + `b13c5ce`): `actions` table + strict lifecycle
