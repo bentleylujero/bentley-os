@@ -2,32 +2,24 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { audit, pool } from './audit.ts';
 
-// --- config ---------------------------------------------------------------
-const REPO_DIR = '/home/spaghettios/bentley-os'; // the bind-mounted ~/bentley-os
-const HEALTH_RETRIES = 12; // ~12 * 5s = 60s max wait for a service to come healthy
+const REPO_DIR = '/home/spaghettios/bentley-os';
+const HEALTH_RETRIES = 12;
 const HEALTH_INTERVAL_MS = 5000;
 
-// Services this deploy service is allowed to build/restart, mapped to their in-network
-// health URL. If a service has no HTTP health endpoint, set url to null -> we fall back
-// to `docker compose ps` state instead of an HTTP probe.
 const SERVICE_HEALTH: Record<string, string | null> = {
   api: 'http://api:3000/health',
   contractor: 'http://contractor:4100/health',
   marionette: 'http://marionette:4200/health',
-  // add more as they gain HTTP health endpoints; unknown services are rejected.
 };
 
-// Repo-relative path each service's build context lives under. Rollback must be
-// scoped to ONLY this path -- a repo-wide `git checkout <sha> -- .` would also
-// revert unrelated files (other services, shared config) that happened to change
-// in the same commit range, which is not what "rollback service X" should do.
 const SERVICE_PATH: Record<string, string> = {
   api: 'apps/api',
   contractor: 'contractor',
   marionette: 'marionette',
 };
 
-// --- types ----------------------------------------------------------------
+const GIT_IDENTITY = ['-c', 'user.name=Bentley OS', '-c', 'user.email=bentley.lujero@gmail.com'];
+
 export type JobStatus = 'queued' | 'running' | 'success' | 'rolled_back' | 'failed';
 
 export interface Job {
@@ -37,8 +29,9 @@ export interface Job {
   createdAt: string;
   startedAt?: string;
   finishedAt?: string;
-  fromCommit?: string; // rollback target captured before build
-  deployedCommit?: string; // the actual commit that was built/deployed this run
+  fromCommit?: string;
+  deployedCommit?: string;
+  commitMessage?: string;
   log: string[];
 }
 
@@ -54,7 +47,7 @@ export function listJobs(): Job[] {
   return [...jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-export function enqueue(service: string): { job?: Job; error?: string } {
+export function enqueue(service: string, commitMessage?: string): { job?: Job; error?: string } {
   if (!(service in SERVICE_HEALTH)) {
     return { error: `unknown service '${service}'. allowed: ${Object.keys(SERVICE_HEALTH).join(', ')}` };
   }
@@ -63,16 +56,16 @@ export function enqueue(service: string): { job?: Job; error?: string } {
     service,
     status: 'queued',
     createdAt: new Date().toISOString(),
+    commitMessage,
     log: [],
   };
   jobs.set(job.id, job);
   queue.push(job.id);
-  void audit('deploy.enqueued', { target: service, outcome: 'queued', payload: { job_id: job.id } });
+  void audit('deploy.enqueued', { target: service, outcome: 'queued', payload: { job_id: job.id, commit_message: commitMessage ?? null } });
   void pump();
   return { job };
 }
 
-// --- serialized worker: exactly one deploy runs at a time -----------------
 async function pump(): Promise<void> {
   if (working) return;
   working = true;
@@ -94,7 +87,6 @@ function line(job: Job, s: string): void {
   console.log(`(${job.id.slice(0, 8)}) ${s}`);
 }
 
-// run a command in REPO_DIR, streaming output into the job log. resolves with exit code.
 function run(job: Job, cmd: string, args: string[]): Promise<number> {
   return new Promise((resolve) => {
     line(job, `$ ${cmd} ${args.join(' ')}`);
@@ -112,9 +104,9 @@ function run(job: Job, cmd: string, args: string[]): Promise<number> {
   });
 }
 
-async function currentCommit(): Promise<string> {
+function capture(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve) => {
-    const child = spawn('git', ['rev-parse', 'HEAD'], { cwd: REPO_DIR });
+    const child = spawn(cmd, args, { cwd: REPO_DIR });
     let out = '';
     child.stdout.on('data', (d) => (out += d.toString()));
     child.on('close', () => resolve(out.trim()));
@@ -122,9 +114,10 @@ async function currentCommit(): Promise<string> {
   });
 }
 
-// The rollback target must be the last commit that was actually verified healthy for
-// THIS service — never "whatever HEAD is right now," since HEAD may already be the
-// broken commit we're deploying. Source of truth: audit_log, not git alone.
+async function currentCommit(): Promise<string> {
+  return capture('git', ['rev-parse', 'HEAD']);
+}
+
 async function lastGoodCommit(job: Job, service: string): Promise<string | null> {
   try {
     const res = await pool.query<{ payload: { commit?: string } }>(
@@ -143,6 +136,41 @@ async function lastGoodCommit(job: Job, service: string): Promise<string | null>
     line(job, `failed to query last-good commit from audit_log: ${String(e)}`);
     return null;
   }
+}
+
+// Commit + push the scoped path, gated by a fetch-first divergence check (Bible
+// rule, post-Copilot-agent incident: never push blind, always fetch + diff
+// origin/main first). Returns an outcome string; caller decides what's fatal.
+async function commitAndPush(
+  job: Job,
+  scopePath: string,
+  message: string,
+): Promise<'ok' | 'diverged' | 'nothing' | 'push_failed' | 'commit_failed'> {
+  const fetchCode = await run(job, 'git', ['fetch', 'origin', 'main']);
+  if (fetchCode !== 0) {
+    line(job, 'git fetch failed — refusing to commit/push without fresh origin state');
+    return 'push_failed';
+  }
+
+  const behindCount = await capture('git', ['rev-list', 'HEAD..origin/main', '--count']);
+  if (behindCount !== '0') {
+    line(job, `origin/main has ${behindCount} commit(s) not in local HEAD — refusing to commit/push, manual intervention needed (pull/rebase first)`);
+    return 'diverged';
+  }
+
+  await run(job, 'git', ['add', scopePath]);
+  const status = await capture('git', ['status', '--porcelain', '--', scopePath]);
+  if (!status) {
+    line(job, 'nothing to commit in scope path — skipping commit, proceeding to build');
+    return 'nothing';
+  }
+
+  const commitCode = await run(job, 'git', [...GIT_IDENTITY, 'commit', '-m', message, '--', scopePath]);
+  if (commitCode !== 0) return 'commit_failed';
+
+  const pushCode = await run(job, 'git', ['push', 'origin', 'main']);
+  if (pushCode !== 0) return 'push_failed';
+  return 'ok';
 }
 
 async function pollHealth(job: Job, url: string | null): Promise<boolean> {
@@ -192,13 +220,31 @@ async function runJob(job: Job): Promise<void> {
     line(job, 'rollback target = none — this deploy has no safety net if it fails');
   }
 
-  job.deployedCommit = (await currentCommit()) || undefined;
-  line(job, `deploying commit = ${job.deployedCommit || '(unknown)'}`);
   await audit('deploy.started', {
     target: job.service,
     outcome: 'running',
     payload: { job_id: job.id, from_commit: job.fromCommit },
   });
+
+  if (job.commitMessage) {
+    const scopePath = SERVICE_PATH[job.service];
+    const result = await commitAndPush(job, scopePath, job.commitMessage);
+    await audit(`deploy.commit.${result}`, {
+      target: job.service,
+      outcome: result === 'ok' || result === 'nothing' ? 'success' : 'error',
+      payload: { job_id: job.id },
+    });
+    if (result === 'diverged' || result === 'commit_failed' || result === 'push_failed') {
+      job.status = 'failed';
+      job.finishedAt = new Date().toISOString();
+      line(job, `commit/push step failed (${result}) — aborting before build, nothing deployed`);
+      return;
+    }
+  }
+
+  // Re-read AFTER any commit above, so deployedCommit reflects what's actually built.
+  job.deployedCommit = (await currentCommit()) || undefined;
+  line(job, `deploying commit = ${job.deployedCommit || '(unknown)'}`);
 
   const upOk = await buildAndUp(job);
   const healthy = upOk && (await pollHealth(job, healthUrl));

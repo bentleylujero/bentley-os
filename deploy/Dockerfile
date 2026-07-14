@@ -1,6 +1,6 @@
 FROM node:22-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg git wget \
+      ca-certificates curl gnupg git wget openssh-client \
     && install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
     && chmod a+r /etc/apt/keyrings/docker.asc \

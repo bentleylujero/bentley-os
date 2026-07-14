@@ -5,7 +5,6 @@ import { pool } from './audit.ts';
 
 const app = new Hono();
 
-// Deploy service's own health — checks it can reach Postgres (needed for audit).
 app.get('/health', async (c) => {
   try {
     await pool.query('SELECT 1');
@@ -15,9 +14,8 @@ app.get('/health', async (c) => {
   }
 });
 
-// Fast accept: enqueue and return a job id immediately. Never blocks on the build.
 app.post('/deploy', async (c) => {
-  let body: { service?: string };
+  let body: { service?: string; commit_message?: string };
   try {
     body = await c.req.json();
   } catch {
@@ -25,7 +23,7 @@ app.post('/deploy', async (c) => {
   }
   if (!body.service) return c.json({ error: 'missing "service"' }, 400);
 
-  const { job, error } = enqueue(body.service);
+  const { job, error } = enqueue(body.service, body.commit_message);
   if (error) return c.json({ error }, 400);
   return c.json({ job_id: job!.id, status: job!.status, service: job!.service }, 202);
 });
