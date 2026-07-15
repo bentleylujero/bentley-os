@@ -18,12 +18,12 @@ generated_at: 2026-07-15
 head:         5ab35ad   check: git rev-parse --short HEAD
 migrations:   7         check: ls supabase/migrations/ | wc -l
 services_up:  12        check: docker compose ps --status running | tail -n +2 | wc -l
-emails:       <EMAILS>      check: SELECT count(*) FROM emails
-classified:   <CLASSIFIED>  check: SELECT count(*) FROM emails WHERE classified_at IS NOT NULL
-embedded:     <EMBEDDED>    check: SELECT count(*) FROM emails WHERE embedded_at IS NOT NULL
-actions:      <ACTIONS>     check: SELECT count(*) FROM actions
-events:       <EVENTS>      check: SELECT count(*) FROM calendar_events
-tasks:        <TASKS>       check: SELECT count(*) FROM tasks
+emails:       876      check: SELECT count(*) FROM emails
+classified:   876  check: SELECT count(*) FROM emails WHERE classified_at IS NOT NULL
+embedded:     829    check: SELECT count(*) FROM emails WHERE embedded_at IS NOT NULL
+actions:      10     check: SELECT count(*) FROM actions
+events:       1542      check: SELECT count(*) FROM calendar_events
+tasks:        2       check: SELECT count(*) FROM tasks
 ```
 
 *Drift note: `classified` and `embedded` move on their own — the 5-min cron
