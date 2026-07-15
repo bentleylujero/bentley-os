@@ -9,6 +9,7 @@ import { createAction, listActions, getAction, approveAction, denyAction } from 
 import { auditSummary } from './audit-read.ts';
 import { classifyBatch } from './classify.ts';
 import { embedBatch } from './embed.ts';
+import { enrichBatch } from './enrich-task.ts';
 import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts';
 import { isDataQuestion, formatRetrievalForPrompt } from './data-gate.ts';
 import { retrieveContext } from './retrieve.ts';
@@ -73,6 +74,22 @@ app.post('/embed', async (c) => {
 });
 
 
+// POST /enrich-task  { "limit": 20 }   (default 20)
+// Enriches unenriched tasks (priority/reason/category). Reasoning lives here;
+// api writes the raw task row, this fills in the interpretation.
+app.post('/enrich-task', async (c) => {
+  let body: any = {};
+  try { body = await c.req.json(); } catch { /* empty body is fine */ }
+  let limit = Number(body?.limit);
+  if (!Number.isInteger(limit) || limit < 1) limit = 20;
+  if (limit > 100) limit = 100;
+  try {
+    const report = await enrichBatch(limit);
+    return c.json(report);
+  } catch (err: any) {
+    return c.json({ error: "enrich batch failed", detail: err?.message || String(err) }, 500);
+  }
+});
 // POST /think  { "request": "<what you want marionette to reason about>" }
 // Calls DeepSeek, returns a structured Decision, audits the call either way.
 // If the decision is "delegate", hands the spec to contractor and folds the
