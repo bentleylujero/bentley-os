@@ -44,6 +44,7 @@ async function runAllSyncs() {
     // Each drain isolates its own failure; marionette owns the reasoning (§9).
     await drain('/classify', 50);
     await drain('/embed', 50);
+    await drain('/enrich-task', 50);
   } finally {
     running = false;
   }
