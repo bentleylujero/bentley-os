@@ -20,21 +20,28 @@ actions.ts` forwards `intent.commit_message` through to `deploy`'s `/deploy` cal
 service=marionette) real-fetched, real-committed (`59996a1`), real-pushed to `origin/main`,
 built, and passed health — the whole chain, for real, on the actual repo.
 
-**Two real gaps surfaced by this test, neither fixed yet:**
-1. **Self-targeting `commit_deploy` (service=marionette) kills its own watcher.** When the
-   deploy rebuilds/recreates the marionette container, the in-process `void watchDeploy(...)`
-   background poll (M4 Task A) is running *inside that same container* — it gets torn down
-   mid-poll, leaving the action stuck `executing` forever even though the underlying deploy
-   actually succeeds. Action 7 was manually resolved (see §8). Needs its own session — likely
-   moving the watcher into `deploy` or `api` (neither gets torn down by a marionette-only
-   deploy) so a self-targeting action can't kill its own completion signal.
-2. **`deploy` runs git as root; commits from inside it leave root-owned `.git/objects` on the
-   host bind mount.** Hit immediately after action 7's test commit — Bentley's own `git add`
-   failed with `insufficient permission` until `sudo chown -R spaghettios:spaghettios .git`.
-   Will recur after every `commit_deploy` execution until resolved (either always chown back
-   after, or run git in the container as a non-root user matching the host UID).
+**Gap 2 — RESOLVED (`e54afc4`).** `deploy` now runs its git commands as the
+non-root `node` user (uid/gid 1000, joined to the host's `docker` group, gid
+983) instead of root. `node`'s uid exactly matches host user `spaghettios`,
+so no chown step is needed — objects land correctly owned by construction.
+Verified live: action id=9 (`commit_deploy`, service=marionette) real-ran,
+real-committed (`0b6c6b69`), real-pushed, built, passed health
+(`deploy.succeeded`, job `a2a8bb15`) — and the resulting `.git/objects` file
+was directly confirmed `spaghettios`-owned (`ls -la` on the specific object,
+not just a general sweep). A full-tree sweep
+(`find .git/objects -type f ! -user spaghettios`) also came back empty.
 
-M4 is now: gate slice ✅, Task A ✅, Task B ✅ — all done. See §4, §6, §8.)*
+**Gap 1 — still open, reproduced again by this same test.** Action 9 hit
+the identical self-deploy watcher teardown as action 7: the in-process
+`watchDeploy` poll died when its own container (marionette) was recreated
+mid-poll, leaving the action stuck `executing` despite the underlying
+deploy genuinely succeeding. Manually resolved (`UPDATE actions SET
+status='succeeded' ... WHERE id=9`, matching `action.succeeded` audit row).
+Needs its own session — tradeoffs of moving the watcher into `deploy` vs
+`api` not yet discussed.
+
+M4 is now: gate slice ✅, Task A ✅, Task B ✅ — all done, Gap 2 resolved,
+Gap 1 still open. See §4, §6, §8.)*
 
 ---
 
@@ -1276,14 +1283,14 @@ system.
   that survives a marionette-only deploy — `deploy` itself (it already knows the true
   outcome) or `api`. Same class of self-referential risk would apply to `service:"api"` or
   `service:"contractor"` self-deploys — not yet tested for those.
-- **NEW — deploy's root-owned git objects, OPEN.** `deploy` runs as root inside its
-  container; any `git commit` it performs (via Task B's `commitAndPush`) writes new objects
-  into `.git/objects` on the host bind mount as root. Bentley's own subsequent host-side
-  `git add`/`commit` then fails with `insufficient permission for adding an object to
-  repository database` until a manual `sudo chown -R spaghettios:spaghettios .git`. Hit
-  immediately after action 7's test commit. Needs a real fix before `commit_deploy` is used
-  routinely — either auto-`chown` back at the end of `commitAndPush`, or run deploy's git
-  commands as a non-root user matching the host UID/GID.
+- **NEW — deploy's root-owned git objects — RESOLVED** (`e54afc4`). `deploy`
+  now runs as non-root `node` (uid 1000, matches host `spaghettios` exactly)
+  instead of root, joined to the host's `docker` gid (983) for socket access.
+  SSH mount retargeted to `/home/node/.ssh`. Verified live via action id=9 —
+  real commit (`0b6c6b69`) confirmed `spaghettios`-owned by direct `ls -la`
+  and a full-tree ownership sweep (`find .git/objects -type f ! -user
+  spaghettios`, empty result). No chown step needed; fix is preventative by
+  construction (uid match), not reactive.
 - **M2 "what changed" view — RESOLVED** (`5955d8d` + `0004`/`b905e4b`, M2 now complete). The
   Gmail zero-width-padding **snippet polish still remains** — cosmetic, not blocking, applies
   to both the "Recent email" and "What changed" feeds.
