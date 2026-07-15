@@ -15,20 +15,22 @@ state at every checkpoint — never hand-edit it stale.*
 
 ```
 generated_at: 2026-07-15
-head:         6b3ff2b   check: git rev-parse --short HEAD
-migrations:   6         check: ls supabase/migrations/ | wc -l
+head:         5ab35ad   check: git rev-parse --short HEAD
+migrations:   7         check: ls supabase/migrations/ | wc -l
 services_up:  12        check: docker compose ps --status running | tail -n +2 | wc -l
-emails:       869       check: SELECT count(*) FROM emails
-classified:   869       check: SELECT count(*) FROM emails WHERE classified_at IS NOT NULL
-embedded:     822       check: SELECT count(*) FROM emails WHERE embedded_at IS NOT NULL
-actions:      10        check: SELECT count(*) FROM actions
-events:       1542      check: SELECT count(*) FROM calendar_events
+emails:       <EMAILS>      check: SELECT count(*) FROM emails
+classified:   <CLASSIFIED>  check: SELECT count(*) FROM emails WHERE classified_at IS NOT NULL
+embedded:     <EMBEDDED>    check: SELECT count(*) FROM emails WHERE embedded_at IS NOT NULL
+actions:      <ACTIONS>     check: SELECT count(*) FROM actions
+events:       <EVENTS>      check: SELECT count(*) FROM calendar_events
+tasks:        <TASKS>       check: SELECT count(*) FROM tasks
 ```
 
 *Drift note: `classified` and `embedded` move on their own — the 5-min cron
-auto-drains new mail. state. A gap between `emails` and `embedded` (822/869 here) is
-normal: newly-synced mail awaits the next tick, and a few token-dense bodies
-that 400'd stay unembedded until re-picked. Not a fault.*
+auto-drains new mail. A gap between `emails` and `embedded` is normal: newly-synced
+mail awaits the next tick, and a few token-dense bodies that 400'd stay unembedded
+until re-picked. Not a fault. `tasks` also moves as the owner adds/completes them;
+the same cron enriches new tasks (`reason`/`category`) without touching priority.*
 
 ---
 
@@ -36,11 +38,11 @@ that 400'd stay unembedded until re-picked. Not a fault.*
 
 | Service | Port | Role |
 |---|---|---|
-| **api** | 3000 | HTTP surface — dashboard, ingestion, OpenCode proxy, Telegram webhook |
+| **api** | 3000 | HTTP surface — dashboard, ingestion, OpenCode proxy, Telegram webhook, tasks CRUD |
 | **postgres** | 5432 | All persisted state (ontology, audit ledger) |
 | **qdrant** | 6333 | Vector index — `emails` collection, 1536-dim |
 | **redis** | 6379 | Cache (unused by app yet) |
-| **marionette** | 4200 | The AI brain — reasoning, classify, embed, action lifecycle |
+| **marionette** | 4200 | The AI brain — reasoning, classify, embed, enrich-task, action lifecycle |
 | **contractor** | 4100 | Coding/build layer — real OpenCode sessions |
 | **deploy** | 4000 | Build + health-check + audited rollback |
 | **whisper** | 4300 | Self-hosted speech-to-text (`base` model) |
@@ -60,7 +62,7 @@ Box: `spaghettios@172.16.30.4`, `/home/spaghettios/bentley-os`. One
 | — | Orchestrator (deploy, contractor, marionette, Telegram) | ✅ done |
 | 1 | Data in (Gmail + Calendar) | ✅ done |
 | 2 | Insight out (dashboard: Today, What changed, Triage) | ✅ done |
-| 3 | AI layer (classify, embed, grounded Q&A, auto-drain) | 🔨 **morning brief only remains** |
+| 3 | AI layer (classify, embed, grounded Q&A, auto-drain, **tasks panel**) | ✅ done |
 | 4 | Action layer (approval-gated) | ✅ done — no open gaps |
 | 5 | Earned autonomy (auto-execute low-risk tier) | ⬜ unblocked, not started |
 | 6 | Self-extension (system ships its own tools) | ⬜ not started |
@@ -72,13 +74,19 @@ Dashboard at `spaghettios.bentleyos.me`.
 
 ## Next action
 
-**M3 is one feature from done: the morning brief / live responsibilities
-surface on the dashboard (Clair).** Scoped but not started — a live surface of
-"what's on you right now" that routes actionable items into the existing M4
-action gate. See THE_BIBLE §8 for the design notes. This is the intended nexus:
-calendar + triaged email + audit, in one place, at the top of Clair.
+**M3 is done — M5 (earned autonomy) is next.** The final M3 piece, originally
+scoped as a "morning brief," was redefined with the owner into a **live
+responsibilities panel** and shipped: the dashboard's "Right Now" card
+(tasks + think-first email + upcoming calendar) plus a collapsed "Everything
+else" section. Manual task creation with owner-set priority (high/med/low) and
+AI-added insight (`reason`/`category`) via the enrich cron.
 
-After that, M3 closes and M5 (earned autonomy) opens.
+**Slice A (manual tasks) is complete.** Still open within the tasks feature,
+deferred deliberately: **Slice B** (self-email → task) and **Slice C**
+(insight/help layer). Neither is started.
+
+M5 opens the auto-execute low-risk tier, reusing the M4 action gate. See
+THE_BIBLE §6.
 
 ---
 
