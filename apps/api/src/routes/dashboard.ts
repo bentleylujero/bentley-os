@@ -398,7 +398,7 @@ dashboardRoute.get('/', async (c) => {
     try{
       var r=await fetch('/tasks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:title,priority:priority})});
       if(!r.ok)throw new Error('http '+r.status);
-      var t=await r.json();
+      var t=(await r.json()).task;
       var pri=(t.priority==='high'||t.priority==='low')?t.priority:'medium';
       var row=document.createElement('div');
       row.className='row task';row.dataset.id=t.id;
