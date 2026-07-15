@@ -4,7 +4,7 @@ after the github copilot curfuffle
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
 
-*Last verified: 2026-07-14 (HEAD `1cdd19f`. **This session shipped M4 Task B: `commit_deploy`
+*Last verified: 2026-07-15 (HEAD `315ca5d`. **See `STATUS.md` at repo root for the 10-second front-page snapshot — machine-checkable header, services, milestones. This block is the deep narrative; STATUS.md is the front door.** Prior session shipped M4 Task B: `commit_deploy`
 now actually commits + pushes before deploying.** `deploy/src/runner.ts`'s `commitAndPush()`
 does fetch origin/main → divergence check (refuses if origin/main has commits not in local
 HEAD, per the fetch-before-push rule from the Copilot-agent incident) → scoped `git add
@@ -440,7 +440,7 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
     consumes the `classified_at IS NULL` work-queue newest-first. **Each email audits
     independently** (`marionette.classify`, success/error per row) — one bad email can't sink
     the batch. Confirmed clean at batch size 50 (50/50 ok, 0 err, no timeout).
-  - **Live data:** 93 of 778 emails classified this session (partial drain — 685 remain).
+ - **Live data:** backlog fully drained — 869 of 869 emails classified, 822 embedded (as of 2026-07-15, HEAD `315ca5d`). Check live counts before relying on these (auto-drain cron moves them every 5 min).
     Tier spread over the classified set: ~3 high (≥70) / ~11 mid (40–69) / rest noise (<40),
     with natural score gaps at the 70 and 40 boundaries (cutoffs are robust — nothing sits at
     66–69 or 31–39). Top items correctly float up: GitHub token-expiry (90), Google security
