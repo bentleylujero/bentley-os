@@ -15,7 +15,7 @@ app.get('/health', async (c) => {
 });
 
 app.post('/deploy', async (c) => {
-  let body: { service?: string; commit_message?: string };
+  let body: { service?: string; commit_message?: string; action_id?: number };
   try {
     body = await c.req.json();
   } catch {
@@ -23,7 +23,7 @@ app.post('/deploy', async (c) => {
   }
   if (!body.service) return c.json({ error: 'missing "service"' }, 400);
 
-  const { job, error } = enqueue(body.service, body.commit_message);
+  const { job, error } = enqueue(body.service, body.commit_message, body.action_id);
   if (error) return c.json({ error }, 400);
   return c.json({ job_id: job!.id, status: job!.status, service: job!.service }, 202);
 });
