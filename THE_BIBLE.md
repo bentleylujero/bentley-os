@@ -31,19 +31,23 @@ was directly confirmed `spaghettios`-owned (`ls -la` on the specific object,
 not just a general sweep). A full-tree sweep
 (`find .git/objects -type f ! -user spaghettios`) also came back empty.
 
-**Gap 1 — still open, reproduced again by this same test.** Action 9 hit
-the identical self-deploy watcher teardown as action 7: the in-process
-`watchDeploy` poll died when its own container (marionette) was recreated
-mid-poll, leaving the action stuck `executing` despite the underlying
-deploy genuinely succeeding. Manually resolved (`UPDATE actions SET
-status='succeeded' ... WHERE id=9`, matching `action.succeeded` audit row).
-Needs its own session — tradeoffs of moving the watcher into `deploy` vs
-`api` not yet discussed.
+**Gap 1 — RESOLVED (`0af75f0`).** The self-deploy watcher race is closed.
+Terminal action-state write + Telegram notify moved OUT of marionette's
+in-process `watchDeploy` and INTO `deploy`'s runner (`resolveAction`). `deploy`
+is structurally immune — nothing can target `service:"deploy"` for a job, so it
+can never be killed by a job it runs — and it holds the outcome firsthand, so
+there is no polling and no race window at all. `marionette/src/deploy-poll.ts`
+deleted; `watchDeploy`/`notifyTelegram` removed from `actions.ts`; `action_id`
+threaded through `enqueue()` + `POST /deploy`. Verified live: action id=10
+(`commit_deploy`, service=marionette, no commit_message) real-approved ->
+marionette torn down mid-flight -> `deploy` wrote `succeeded` after marionette
+was recreated (log `(6a6fc7ad) action 10 -> succeeded`) -> check delivered to
+Telegram. The exact scenario that stranded actions 7 and 9, now self-resolving.
 
 gap 2 (root-owned git objects) is RESOLVED by commit e54afc4 ("fix(m4): run deploy container as non-root node user, joined to docker gid 983"). That commit added USER node to deploy/Dockerfile, so the deploy container now runs as node (uid=1000, gid=1000) — matching host user spaghettios (uid=1000, gid=1000) exactly. Confirmed live: all .git/objects/* entries are owned by spaghettios, not root. Gap 1 (self-deploy watcher stranding an action in `executing`) remains OPEN, unchanged.
 
-M4 is now: gate slice ✅, Task A ✅, Task B ✅ — all done, Gap 2 resolved,
-Gap 1 still open. See §4, §6, §8.)*
+M4 is now: gate slice ✅, Task A ✅, Task B ✅ — all done. Gap 1 RESOLVED, Gap 2
+resolved. **M4 fully clean, no open gaps.** See §4, §6, §8.)*
 
 ---
 
@@ -610,7 +614,7 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   `docker-compose.yml` bind-mounts Bentley's real `~/.ssh` read-only into `deploy`; Dockerfile
   adds `openssh-client`. `marionette/src/actions.ts` passes `intent.commit_message` through.
   **Verified live end-to-end** (action id=7, service=marionette): real commit `59996a1` landed
-  on `origin/main`, scoped correctly to `marionette/` only, build+health succeeded. **One gap remains open (self-deploy kills the Task A watcher mid-poll, action 7 manually resolved) — see header and §8. The root-owned git-objects gap is RESOLVED (`e54afc4`):** the deploy container now runs as non-root `node (uid 1000), matching host spaghettios`, so git writes from inside the container land with correct host ownership — verified live via object ownership on disk.
+  on `origin/main`, scoped correctly to `marionette/` only, build+health succeeded. **Both prior gaps now RESOLVED: Gap 1 (self-deploy watcher stranding actions) closed by moving terminal-write + notify into `deploy`'s `resolveAction` (`0af75f0`, verified live via action id=10); Gap 2 (root-owned git objects) closed by `e54afc4`:** the deploy container now runs as non-root `node (uid 1000), matching host spaghettios`, so git writes from inside the container land with correct host ownership — verified live via object ownership on disk.
 - **Commits:** `3a66aef` (propose/approve/deny/execute) + `b13c5ce` (Telegram buttons) +
   `80298a4`/`8ac171c` (Task A, async completion) + `1cdd19f` (Task B, commit+push wiring).
 
@@ -1000,9 +1004,8 @@ shipped.**
   pushed to Telegram. See §4.
 - ✅ Task B (`1cdd19f`): `commit_deploy` now really commits + pushes the scoped path before
   building, gated by a fetch-first divergence check. Verified live (action 7). See §4.
-- **Two open gaps, not milestone-blocking but real:** self-targeting deploys can strand the
-  Task A watcher (action stuck `executing`); `deploy`'s root-owned git objects need a manual
-  `chown` after any commit_deploy run. See §8.
+- **No open gaps.** Gap 1 (self-deploy watcher) and Gap 2 (root-owned git
+  objects) both resolved. See §4, §8.
 - Additional action types (create event, draft reply) remain future work within this
   milestone — no design started.
 
@@ -1271,17 +1274,18 @@ system.
   current repo state; contractor doesn't commit first (`TODO(steering/commit)` in
   `actions.ts`).
   - **M4 Task B — commit_deploy git-commit/push — RESOLVED** (`1cdd19f`). See §4, §6.
-- **NEW — self-deploy watcher gap, OPEN.** A `commit_deploy` action targeting
-  `service:"marionette"` tears down the marionette container mid-`watchDeploy`-poll, since
-  the poll runs in-process inside the very container being replaced. The action never
-  receives its terminal `succeeded`/`failed` write and is stuck `executing` forever, even
-  though the underlying deploy genuinely succeeds (confirmed via `audit_log` and the deploy
-  job's own record). Action id=7 hit this and was manually resolved (`UPDATE actions
-  SET status='succeeded'... WHERE id=7`, plus a matching `action.succeeded` audit row).
-  Fix needs its own session: move the watcher/terminal-write responsibility to a service
-  that survives a marionette-only deploy — `deploy` itself (it already knows the true
-  outcome) or `api`. Same class of self-referential risk would apply to `service:"api"` or
-  `service:"contractor"` self-deploys — not yet tested for those.
+- **Self-deploy watcher gap — RESOLVED (`0af75f0`).** A `commit_deploy`
+  targeting `service:"marionette"` used to tear down the marionette container
+  mid-`watchDeploy`-poll, stranding the action `executing` forever (hit by
+  actions 7 and 9, both manually resolved). Fixed by deleting the in-marionette
+  watcher/poll entirely and moving the terminal action-state write + Telegram
+  notify into `deploy`'s runner (`resolveAction`), called at all six terminal
+  branches of `runJob`. `deploy` can't be targeted by a job, so it's immune to
+  the teardown, and it has the outcome firsthand (no polling). Gated on
+  `job.actionId` (raw deploys touch nothing) and strict-guarded
+  `WHERE id=$1 AND status='executing'` (idempotent). `rolled_back` maps to
+  action `failed`. Verified live: action id=10 self-resolved to `succeeded` +
+  Telegram push, after marionette was recreated mid-flight.
 - **deploy's root-owned git objects — RESOLVED (`e54afc4`).**
   This issue is now resolved by commit `e54afc4` ("fix(m4): run deploy container as non-root node user, joined to docker gid 983"). The deploy container was updated to use `USER node` in its Dockerfile, so it runs with uid=1000, matching the host user `spaghettios`. As a result, any git operations inside the container (like `git commit`) write objects with host ownership `spaghettios:spaghettios`, not root. Verified live: all `.git/objects/*` entries on the host are owned by `spaghettios`. No manual `chown` needed anymore.
 - **M2 "what changed" view — RESOLVED** (`5955d8d` + `0004`/`b905e4b`, M2 now complete). The
