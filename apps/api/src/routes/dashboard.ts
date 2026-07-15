@@ -14,6 +14,18 @@ function esc(s: unknown): string {
     .replace(/"/g, '&quot;');
 }
 
+// Strip zero-width / BOM padding that Gmail marketing injects into snippets
+// and subjects (U+200B..U+200D, U+FEFF). Third-party text only; run before esc().
+function clean(s: unknown): string {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[\u200B-\u200D\uFEFF]/g, '');
+}
+
+// Escape + strip, for third-party display fields (subjects, snippets).
+function escT(s: unknown): string {
+  return esc(clean(s));
+}
+
 function fmtTime(d: Date | null): string {
   if (!d) return '';
   return d.toLocaleTimeString('en-US', {
@@ -157,8 +169,8 @@ dashboardRoute.get('/', async (c) => {
         <span class="time">${esc(fmtStamp(m.created_at))}</span>
         <span class="body"><span class="tag">email</span> ${
             m.is_unread ? '<span class="unread">●</span> ' : ''
-          }<b>${esc(m.subject) || '(no subject)'}</b>${
-            m.snippet ? `<span class="sub"> — ${esc(m.snippet)}</span>` : ''
+          }<b>${escT(m.subject) || '(no subject)'}</b>${
+            m.snippet ? `<span class="sub"> — ${escT(m.snippet)}</span>` : ''
           }</span>
       </div>`
         ),
@@ -173,7 +185,7 @@ dashboardRoute.get('/', async (c) => {
         <span class="body"><b>${esc(m.reason) || '(no reason given)'}</b>${
       m.is_unread ? ' <span class="unread">●</span>' : ''
     }<span class="sub"> — <span class="tag">${esc(m.category) || 'other'}</span> ${
-      esc(m.subject) || '(no subject)'
+      escT(m.subject) || '(no subject)'
     }</span></span>
       </div>`;
   }
@@ -218,8 +230,8 @@ dashboardRoute.get('/', async (c) => {
           (m) => `<div class="row">
         <span class="time">${esc(fmtTime(m.received_at))}</span>
         <span class="body">${m.is_unread ? '<span class="unread">●</span> ' : ''}<b>${
-            esc(m.subject) || '(no subject)'
-          }</b>${m.snippet ? `<span class="sub"> — ${esc(m.snippet)}</span>` : ''}</span>
+            escT(m.subject) || '(no subject)'
+          }</b>${m.snippet ? `<span class="sub"> — ${escT(m.snippet)}</span>` : ''}</span>
       </div>`
         )
         .join('');
