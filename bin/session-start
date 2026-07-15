@@ -8,7 +8,6 @@ psql() { docker exec bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentl
 
 live() {
   case "$1" in
-    head)        git rev-parse --short HEAD ;;
     migrations)  ls supabase/migrations/ | wc -l | tr -d ' ' ;;
     services_up) docker compose ps --status running | tail -n +2 | wc -l | tr -d ' ' ;;
     emails)      psql "SELECT count(*) FROM emails" ;;
@@ -25,11 +24,27 @@ echo "Bentley OS — session-start drift check"
 echo "expected (STATUS.md) vs live (box)"
 echo "----------------------------------------"
 
-# Only header rows: "field:  value  check: cmd" — anchored at line start, field is one word.
 while IFS= read -r line; do
   field=$(echo "$line"    | awk -F: '{print $1}' | tr -d '[:space:]')
   expected=$(echo "$line" | awk '{print $2}')
   [ -z "$field" ] && continue
+
+  # head is an ancestry check, not exact-match: STATUS's head being behind HEAD is
+  # expected (a commit can't record its own hash), so report "behind by N", not drift.
+  if [ "$field" = "head" ]; then
+    cur=$(git rev-parse --short HEAD)
+    if [ "$expected" = "$cur" ]; then
+      printf '  \u2713 %-12s %s\n' "$field" "$cur"
+    elif git merge-base --is-ancestor "$expected" HEAD 2>/dev/null; then
+      n=$(git rev-list --count "$expected"..HEAD)
+      printf '  \u2192 %-12s %s (STATUS behind by %s commit(s); box at %s)\n' "$field" "$expected" "$n" "$cur"
+    else
+      printf '  \u2717 %-12s expected %s, got %s (diverged/unknown — real drift)\n' "$field" "$expected" "$cur"
+      drift=1
+    fi
+    continue
+  fi
+
   got=$(live "$field")
   if [ "$expected" = "$got" ]; then
     printf '  \u2713 %-12s %s\n' "$field" "$got"
@@ -41,7 +56,7 @@ done < <(grep -E '^[a-z_]+: +[^ ]+ +check:' "$STATUS")
 
 echo "----------------------------------------"
 if [ "$drift" -eq 0 ]; then
-  echo "In sync with STATUS.md."
+  echo "In sync with STATUS.md (head may be cleanly behind — that's expected)."
 else
   echo "DRIFT detected — STATUS.md is stale or the box moved. Regenerate STATUS.md's header at the next checkpoint."
 fi
