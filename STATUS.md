@@ -15,18 +15,18 @@ state at every checkpoint — never hand-edit it stale.*
 
 ```
 generated_at: 2026-07-15
-head:         b26710c   check: git rev-parse --short HEAD
+head:         6b3ff2b   check: git rev-parse --short HEAD
 migrations:   6         check: ls supabase/migrations/ | wc -l
 services_up:  12        check: docker compose ps --status running | tail -n +2 | wc -l
-emails:       868       check: SELECT count(*) FROM emails
-classified:   868       check: SELECT count(*) FROM emails WHERE classified_at IS NOT NULL
-embedded:     821       check: SELECT count(*) FROM emails WHERE embedded_at IS NOT NULL
+emails:       869       check: SELECT count(*) FROM emails
+classified:   869       check: SELECT count(*) FROM emails WHERE classified_at IS NOT NULL
+embedded:     822       check: SELECT count(*) FROM emails WHERE embedded_at IS NOT NULL
 actions:      10        check: SELECT count(*) FROM actions
 events:       1542      check: SELECT count(*) FROM calendar_events
 ```
 
 *Drift note: `classified` and `embedded` move on their own — the 5-min cron
-auto-drains new mail. A gap between `emails` and `embedded` (821/868 here) is
+auto-drains new mail. state. A gap between `emails` and `embedded` (822/869 here) is
 normal: newly-synced mail awaits the next tick, and a few token-dense bodies
 that 400'd stay unembedded until re-picked. Not a fault.*
 
