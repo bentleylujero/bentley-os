@@ -4,36 +4,50 @@ after the github copilot curfuffle
 When this conflicts with anything older, this wins. Regenerate from the repo whenever it
 drifts; don't hand-edit it into staleness.*
 
-*Last verified: 2026-07-15 (HEAD `5ab35ad`. **See `STATUS.md` at repo root for the
-10-second front-page snapshot — machine-checkable header, services, milestones. This block
-is the deep narrative; STATUS.md is the front door.** Prior session shipped the **tasks
-feature Slice A**, redefining M3's final piece from "morning brief" -> a live
-responsibilities panel — and **closing M3**.
+*Last verified: 2026-07-15 (HEAD `eab7091`. **See `STATUS.md` at repo root for the 10-second front-page snapshot — machine-checkable header, services, milestones. This block is the deep narrative; STATUS.md is the front door.** **Latest: M3 CLOSED — the tasks panel (Slice A) shipped. New `tasks` object type (migration `0007`), owner-set priority + marionette-added insight via the enrich cron, and a rewritten `/` dashboard (Clair): a Right Now card + collapsible Everything-else, noise-tier email dropped. Live and verified in-browser. See §4 "Milestone 3 — tasks panel" and §6.** Prior session shipped M4 Task B: `commit_deploy`
+now actually commits + pushes before deploying.** `deploy/src/runner.ts`'s `commitAndPush()`
+does fetch origin/main → divergence check (refuses if origin/main has commits not in local
+HEAD, per the fetch-before-push rule from the Copilot-agent incident) → scoped `git add
+<SERVICE_PATH>` → `git commit` (via `-c user.name=/-c user.email=` flags, no global git config
+mutation) → `git push origin main`, gated entirely on whether `job.commitMessage` was passed.
+Any diverge/commit/push failure aborts before build — never deploys an uncommitted/unpushed
+state as if it were fine. `deploy` reuses Bentley's own box SSH credentials (bind-mounted
+`~/.ssh` read-only into the container, `openssh-client` added to the Dockerfile) — a
+deliberate choice over a separate deploy-only key, made explicitly aware deploy already has
+full docker.sock + repo access so this isn't a meaningful escalation. `marionette/src/
+actions.ts` forwards `intent.commit_message` through to `deploy`'s `/deploy` call.
+**Verified fully live**, not just isolation-tested: action id=7 (`commit_deploy`,
+service=marionette) real-fetched, real-committed (`59996a1`), real-pushed to `origin/main`,
+built, and passed health — the whole chain, for real, on the actual repo.
 
-**New `tasks` object type (migration `0007_tasks.sql`).** Its own table, NOT jammed into
-emails/calendar_events (ontology-first, §2/§3a). **Owner sets priority (high/med/low) on
-creation, on its OWN scale — NOT the email 0–100 importance score.** marionette's
-`enrich-task.ts` adds `reason`/`category` ONLY, and is explicitly told the owner already
-set priority and must not judge it — priority is a fact the owner asserts, reason is
-insight the AI adds. The 5-min ingestion cron now drains `/enrich-task` (limit 50)
-alongside classify+embed (thin forward in `api`, reasoning in marionette — §9-clean).
+**Gap 2 — RESOLVED (`e54afc4`).** `deploy` now runs its git commands as the
+non-root `node` user (uid/gid 1000, joined to the host's `docker` group, gid
+983) instead of root. `node`'s uid exactly matches host user `spaghettios`,
+so no chown step is needed — objects land correctly owned by construction.
+Verified live: action id=9 (`commit_deploy`, service=marionette) real-ran,
+real-committed (`0b6c6b69`), real-pushed, built, passed health
+(`deploy.succeeded`, job `a2a8bb15`) — and the resulting `.git/objects` file
+was directly confirmed `spaghettios`-owned (`ls -la` on the specific object,
+not just a general sweep). A full-tree sweep
+(`find .git/objects -type f ! -user spaghettios`) also came back empty.
 
-**Dashboard fully rewritten** (`apps/api/src/routes/dashboard.ts`, `5ab35ad`) into a
-"Right Now" card (open tasks, ordered by explicit CASE ordinal high->med->low; +
-think-first email >=70; + today's upcoming events) plus a collapsed "Everything else"
-`<details>` (peripheral email 40–69 + past events + what-changed). **Noise-tier email
-(<40) dropped from the page entirely** — no query for it at all. In-place add/complete via
-~20 lines vanilla JS, no page reload. All six prior render helpers preserved verbatim.
-Isolation-tested, deployed via audited `POST /deploy` (`deploy.succeeded`, jobs
-`45fd6b7c` then `d1bd6279` for the response-shape fix), verified live. **One bug caught +
-fixed live:** the first paste of the rewrite dropped the `(await r.json()).task` unwrap, so
-the optimistic add-row always showed `medium` regardless of the button (the DB was always
-correct — route handles priority server-side; only the instant display was wrong). Fixed,
-redeployed, live JS confirmed to contain the unwrap.
+**Gap 1 — RESOLVED (`0af75f0`).** The self-deploy watcher race is closed.
+Terminal action-state write + Telegram notify moved OUT of marionette's
+in-process `watchDeploy` and INTO `deploy`'s runner (`resolveAction`). `deploy`
+is structurally immune — nothing can target `service:"deploy"` for a job, so it
+can never be killed by a job it runs — and it holds the outcome firsthand, so
+there is no polling and no race window at all. `marionette/src/deploy-poll.ts`
+deleted; `watchDeploy`/`notifyTelegram` removed from `actions.ts`; `action_id`
+threaded through `enqueue()` + `POST /deploy`. Verified live: action id=10
+(`commit_deploy`, service=marionette, no commit_message) real-approved ->
+marionette torn down mid-flight -> `deploy` wrote `succeeded` after marionette
+was recreated (log `(6a6fc7ad) action 10 -> succeeded`) -> check delivered to
+Telegram. The exact scenario that stranded actions 7 and 9, now self-resolving.
 
-**M3 now DONE. M4 remains fully clean, no open gaps** (Gap 1 self-deploy watcher +
-Gap 2 root-owned git objects both resolved last session). **M5 (earned autonomy) is
-next.** See §4, §6, §8.)*
+gap 2 (root-owned git objects) is RESOLVED by commit e54afc4 ("fix(m4): run deploy container as non-root node user, joined to docker gid 983"). That commit added USER node to deploy/Dockerfile, so the deploy container now runs as node (uid=1000, gid=1000) — matching host user spaghettios (uid=1000, gid=1000) exactly. Confirmed live: all .git/objects/* entries are owned by spaghettios, not root. Gap 1 (self-deploy watcher stranding an action in `executing`) remains OPEN, unchanged.
+
+M4 is now: gate slice ✅, Task A ✅, Task B ✅ — all done. Gap 1 RESOLVED, Gap 2
+resolved. **M4 fully clean, no open gaps.** See §4, §6, §8.)*
 
 ---
 
@@ -187,10 +201,10 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | **postgres** | 5432 (LAN only) | All persisted state — ontology, sync tokens, audit log | Vector search (qdrant) |
 | **qdrant** | 6333 (LAN only) | Vector storage for embeddings — **`emails` collection, 1536-dim cosine, 755 points, written by `marionette/src/embed.ts`** (derived index over `emails.body`, keyed on email id) | Reasoning (marionette's job); the source-of-truth body (that stays in Postgres) |
 | **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
-| **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min; **after each sync the cron also POSTs marionette `/classify` + `/embed` (limit 50 each) to auto-drain new mail — a thin forward, no reasoning in api**), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons**; **Tasks CRUD (`POST /tasks` owner-set priority, `GET /tasks`, `POST /tasks/:id/done`) — pure CRUD, no reasoning** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
+| **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min; **after each sync the cron also POSTs marionette `/classify` + `/embed` (limit 50 each) to auto-drain new mail — a thin forward, no reasoning in api**), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
-| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, **now consumed by `/think`**: system-status questions trigger an in-process `auditSummary(60)` read, injected into the reasoning prompt so Mari narrates real activity instead of claiming blindness**. Also `POST /enrich-task` — adds `reason`/`category` to owner-created tasks, **never `priority`** (owner owns priority; Mari adds insight only) | Ingestion (api's job), deploy (deploy's job) |
+| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, **now consumed by `/think`**: system-status questions trigger an in-process `auditSummary(60)` read, injected into the reasoning prompt so Mari narrates real activity instead of claiming blindness** | Ingestion (api's job), deploy (deploy's job) |
 | **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `base` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
 | **cloudflared** | — | Public tunnel, gated on `api` health | — |
 | **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
@@ -275,8 +289,7 @@ email-intelligence columns + partial index (from `0005_email_intelligence.sql`, 
 M3 — `body`/`reason`/`confidence`/`classified_at` on `emails` + `idx_emails_unclassified`),
 and the embedding-status column + partial index (from `0006_email_embeddings.sql`, `a46d8ce`,
 M3 — `embedded_at` on `emails` + `idx_emails_unembedded`), all applied live. Migrations live
-at `supabase/migrations/` (seven files, `0001`–`0007`). `0007_tasks.sql` adds the
-`tasks` table (M3 tasks feature — see the `tasks` bullet below).
+at `supabase/migrations/` (six files, `0001`–`0006`).
 - `emails` — the Clair classifier (`marionette/src/classify.ts`) **actively writes**
   `category`, `importance`, `reason`, `confidence`, `classified_at`. Don't recreate any of
   them. Live columns confirmed via `\d emails`: `id` (uuid), `source`, `source_id`,
@@ -291,16 +304,6 @@ at `supabase/migrations/` (seven files, `0001`–`0007`). `0007_tasks.sql` adds 
   `0006`). **755 rows have a body; all 755 are embedded (`embedded_at` set, `remaining=0`).**
   (Classification is a separate axis and was NOT advanced this session — it stands where the
   classify slices left it; the embed pipeline does not classify and vice versa.)
-- `tasks` (migration `0007`) — owner-created manual tasks. Columns: `id` (uuid),
-  `title`, `notes`, `source` ('manual'), `source_id`, `status` ('open'|'done', default
-  open), `priority` (high|medium|low — **owner-set on creation, default medium**, its OWN
-  scale, NOT email importance), `reason` (text — AI insight from enrich), `category` (text
-  — AI insight), `enriched_at` (timestamptz, null = not yet enriched), `created_at`,
-  `updated_at`. Partial index `idx_tasks_unenriched` on `enriched_at IS NULL` (enrich
-  work-queue). marionette's `enrich-task.ts` writes ONLY `reason`/`category`/`enriched_at`
-  — it never touches `priority`. The dashboard renders open tasks ordered by an explicit
-  CASE ordinal (high->medium->low), NOT alpha sort (string sort would wrongly put
-  high<low<medium).
 - `calendar_events` live columns confirmed: `id` (uuid), `source`, `source_id`, `title`,
   `description`, `location`, `starts_at` (indexed), `ends_at`, `organizer_id` (→ people),
   `status`, `created_at`, `updated_at`. `organizer_id` and `event_attendees` are now
@@ -464,8 +467,7 @@ at `supabase/migrations/` (seven files, `0001`–`0007`). `0007_tasks.sql` adds 
 - **Still open in M3:** (1) **auto-drain — DONE** (`a9e7bc1`, this session): the 5-min
   ingestion cron now POSTs marionette `/classify` (limit 50) after each sync, so new mail
   self-triages; the classify backlog also drains 50/tick until caught up. (See the auto-drain
-  subsection below.) (2) **Morning brief — DONE, redefined** (`5ab35ad`): shipped as the tasks/responsibilities
-  panel, not a static brief — see the §4 top block. (3) **Grounded Q&A — DONE** (`a0ced26`,
+  subsection below.) (2) **Morning brief** — not built. (3) **Grounded Q&A — DONE** (`a0ced26`,
   live and verified end-to-end against production — see the grounded Q&A subsection below).
   (4) **Snippet zero-width-padding polish** (cosmetic, carried from M2) now also applies to
   triage subjects.
@@ -520,6 +522,52 @@ at `supabase/migrations/` (seven files, `0001`–`0007`). `0007_tasks.sql` adds 
   no chunk needed; `retrieve.ts` leaves a chunk-ready seam. See §8.
 - **Commits:** `a46d8ce` (`feat(m3): email embedding pipeline — OpenAI 3-small -> Qdrant,
   POST /embed`) → `2947a9b` (`fix(m3): cap embed input at 8k chars`).
+
+**Milestone 3 — tasks panel (Slice A) — done, live (Clair responsibilities dashboard):**
+This is the old "morning brief" roadmap item, redefined with the owner into a "breathing"
+responsibilities panel. **M3-closing feature.**
+- **New `tasks` object type** (migration `0007_tasks.sql`, applied live) — its own table, NOT
+  jammed onto `emails`/`calendar_events` (§2/§3a — a task is a distinct fact about the owner's
+  responsibilities). Columns: `id` (uuid), `title`, `notes`, `source` ('manual'), `source_id`,
+  `status` ('open'|'done', default open), `priority` (high|medium|low), `reason`, `category`,
+  `enriched_at`, `created_at`, `updated_at`. Indexes: `idx_tasks_created_at`,
+  `idx_tasks_status`, `idx_tasks_unenriched (created_at DESC) WHERE enriched_at IS NULL` (the
+  enrich work-queue, mirroring the classify/embed queues).
+- **Owner-priority / AI-insight split (the core design fact):** the OWNER asserts `priority`
+  on creation (a fact they assert, via 3 quick-pick buttons high/med/low). marionette's enrich
+  pass writes ONLY `reason`/`category`/`enriched_at` and is prompt-instructed **not to judge or
+  overwrite priority** (insight the AI adds, not a judgement it imposes). Proven live: a `high`
+  passport task got category+reason written, `priority` stayed `high` untouched.
+- **`apps/api/src/routes/tasks.ts`** — `POST /tasks` (validates priority high|medium|low,
+  defaults medium; no interpretation in api — §9-clean), `GET /tasks`, `POST /tasks/:id/done`.
+  Mounted in `routes/index.ts`.
+- **`marionette/src/enrich-task.ts`** + `/enrich-task` route — the insight engine, mirrors
+  `classify.ts`: reads `title`/`notes`/`priority` as context, writes `reason` (one-line stakes)
+  + `category` (errand|communication|admin|work|personal|other) + `enriched_at`, per-row
+  audited. Reasoning lives here, never in api (§9 held).
+- **Enrich auto-drain:** the 5-min ingestion cron (`apps/api/src/ingestion/scheduler.ts`) POSTs
+  marionette `/enrich-task` (limit 50) after each sync, alongside `/classify` + `/embed` — a
+  thin HTTP forward, no reasoning in api. New tasks self-enrich on the next tick.
+- **Dashboard `/` rewritten** (`apps/api/src/routes/dashboard.ts`): a **Right Now** card —
+  TASKS (owner-priority bands high→med→low, ordered by explicit CASE ordinal not alpha, `reason`
+  as sub-line, inline add-input + priority buttons, click-to-done) + NEEDS ATTENTION
+  (think-first email, `importance >= 70`) + NEXT UP (today's upcoming events) — plus a
+  collapsible **Everything else** `<details>` (peripheral email 40–69 + past events +
+  what-changed). **Noise-tier email (<40) dropped from the page entirely.** ~20 lines vanilla
+  JS do add-task (`POST /tasks` → prepend row in place) and mark-done (`POST /tasks/:id/done` →
+  fade row out) with **no full-page reload**. All DB-derived strings `esc()`-escaped; same
+  graceful-degradation try/catch as the sibling sections; `/health` untouched.
+- **Live + verified:** backend deployed at `29d53d4` (owner-priority model, `deploy.succeeded`
+  both marionette + api). Dashboard render deployed via api (`88df75c`/`5ab35ad`,
+  `deploy.succeeded` confirmed in `audit_log`). Verified in-browser at `spaghettios.bentleyos.me`:
+  a real high-priority task renders in the Right Now card. **Caveat:** the two dashboard commits
+  have terse messages and may be Copilot-agent work — the panel is live and behaves, but they
+  were not line-reviewed against the Slice A spec (noted in §8).
+- **Still open (tasks feature, LATER slices):** Slice B (self-email → task — a classified email
+  auto-proposing a task) and Slice C (insight/help layer). Neither started.
+- **Commits:** `251a087` (migration `0007`) → `126e86a` (cron enrich drain) → `3c6863d`
+  (`enrich-task.ts` + route) → `37d61be` (`tasks.ts` + mount) → `29d53d4` (owner-priority model)
+  → `88df75c` + `5ab35ad` (dashboard rewrite).
 
 **Telegram integration — done end-to-end:**
 - **Bot:** `@spaghettios_bot`, created via BotFather. Token stored only in `.env`
@@ -891,10 +939,10 @@ actions      (M4: mutable current-state store for proposed side-effecting ops aw
               approval; audit_log stays the ledger, target = actions.id)
 dashboard_state (M2 "what changed": singleton, one row id=1, holds last_seen_at — the one
               fact of when the owner last viewed the dashboard; not a shadow table)
-tasks        (M3 tasks feature: owner-created manual tasks — own table, own priority
-              scale (high/med/low, owner-set), NOT the email importance score.
-              reason/category are AI insight added by marionette enrich; priority is
-              never AI-set. migration 0007)
+tasks        (M3 tasks panel / Slice A: owner-created responsibilities. Owner asserts
+              priority (high|medium|low); marionette ADDS insight (reason + category)
+              via the enrich cron, never overwrites priority. Migration 0007. Its own
+              object type — NOT jammed into emails/calendar_events)
 ```
 
 The M2 dashboard reads `calendar_events` + `emails`; its only owned state is the
@@ -914,6 +962,17 @@ over these columns — no owned state of its own.
 uuid) — a derived index over `emails.body`, a utility store (§3a), NOT a source of truth. The
 body stays in Postgres; Qdrant holds only the vector + a light display payload
 (subject/received_at/sender_id).
+
+**M3 tasks panel (Slice A) adds ONE new table, `tasks` (migration `0007`)** — its own object
+type, correctly NOT jammed onto `emails`/`calendar_events` (a task is a distinct fact about
+the owner's responsibilities, not a property of a message or event). Columns: `id` (uuid),
+`title`, `notes`, `source` ('manual'), `source_id`, `status` ('open'|'done'), `priority`
+(high|medium|low), `reason`, `category`, `enriched_at`, `created_at`, `updated_at`. Work-queue
+index `idx_tasks_unenriched` WHERE `enriched_at IS NULL`. **The priority/insight split is the
+key design fact:** the OWNER asserts `priority` on creation (a fact they assert); marionette's
+enrich pass writes ONLY `reason`/`category`/`enriched_at` and is prompt-instructed NOT to judge
+or overwrite priority (insight the AI adds). The dashboard "Right Now" card is a pure read over
+`tasks` + classified `emails` + `calendar_events` — no owned state of its own beyond the table.
 
 ---
 
@@ -969,9 +1028,9 @@ actually proven — including from a live external interface.**
 - **Done when:** the dashboard shows today's real events + email at a glance AND a "what
   changed" view surfaces recent deltas. **Both conditions met.**
 
-**Milestone 3 — AI layer, read-only. ✅ DONE — classifier, triage render, embeddings,
-auto-drain, grounded Q&A, and the tasks/responsibilities panel all shipped.** In
-**marionette**, not api (reasoning), rendered by **api** (read-only views).
+**Milestone 3 — AI layer, read-only. ✅ DONE — classifier + triage render + embeddings +
+auto-drain + grounded Q&A + tasks panel all shipped.** In **marionette**, not api
+(reasoning), rendered by **api** (read-only views).
 - ✅ **Email classification shipped** (`4c39435` + `5d45b8d`): Clair two-pass consequence
   classifier writing `importance`/`category`/`reason`/`confidence`/`classified_at`, backed by
   migration `0005`. `POST /classify` batch endpoint, audited per-email. See §4.
@@ -993,16 +1052,19 @@ auto-drain, grounded Q&A, and the tasks/responsibilities panel all shipped.** In
   `try/finally` guard fix. Isolation-tested, deployed job `4c205049` (`deploy.succeeded`).
 - ✅ **Grounded Q&A shipped** (`a0ced26`): retrieval + data-gate wired into `/think`, live and
   verified end-to-end against production (real cited invoice/receipt query tested).
-- ✅ **Tasks / responsibilities panel shipped** (`5ab35ad` + migration `0007`): the
-  "morning brief" was redefined with the owner into a live responsibilities surface — a
-  "Right Now" dashboard card (open tasks + think-first email + upcoming events) plus a
-  collapsed "Everything else" section, noise-tier email dropped, in-place add/complete.
-  Owner-set priority (high/med/low, its own scale), AI-enriched `reason`/`category` via the
-  5-min cron's `/enrich-task` drain. **Slice A (manual tasks) done; Slice B (self-email ->
-  auto-task) + Slice C (insight/help layer) deferred, not started.** See §4 top block.
-- **Done when:** email auto-classified + auto-embedded on ingest AND a live
-  responsibilities surface (the redefined "brief") + grounded Q&A are live. **All
-  conditions met — M3 DONE.**
+- ✅ **Tasks panel shipped (Slice A)** — the old "morning brief" idea, redefined with the
+  owner into a "breathing" responsibilities dashboard (Clair). New `tasks` object type
+  (migration `0007`), owner-set priority + marionette-added insight (`reason`/`category`) via
+  a `/enrich-task` cron drain (thin api forward, reasoning in marionette — §9-clean). The
+  dashboard `/` was rewritten: a **Right Now** card (owner-priority tasks + think-first email
+  ≥70 + upcoming events) plus a collapsible **Everything else** `<details>` (peripheral email
+  40–69 + past events + what-changed); **noise-tier email (<40) dropped from the page
+  entirely**. Manual tasks create/complete in-place via ~20 lines vanilla JS, no reload.
+  Backend live (`29d53d4` — owner-priority model); dashboard render live (`88df75c`/`5ab35ad`,
+  `deploy.succeeded`). Verified live in-browser: a real high-priority task renders in the Right
+  Now card. Slice B (self-email → task) and Slice C (insight/help layer) are LATER.
+- **Done when:** email is auto-classified + auto-embedded on ingest AND grounded Q&A is live
+  AND the tasks/responsibilities panel is live. **All conditions met — M3 is CLOSED.**
 
 **Milestone 4 — Action layer, approval-gated. ✅ Done — gate slice, Task A, and Task B all
 shipped.**
