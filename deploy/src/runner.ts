@@ -6,6 +6,13 @@ const REPO_DIR = '/home/spaghettios/bentley-os';
 const HEALTH_RETRIES = 12;
 const HEALTH_INTERVAL_MS = 5000;
 
+// Where the ✅/❌ completion push goes. deploy cannot message out itself
+// (Bible §9) — it POSTs the outcome to api's internal notify relay, which owns
+// the single Telegram sendMessage capability. Moved here from marionette:
+// deploy is the one service that can't be torn down by a job it runs, so it is
+// the correct place to write an action's TRUE terminal state + push.
+const API_NOTIFY_URL = 'http://api:3000/telegram/notify';
+
 const SERVICE_HEALTH: Record<string, string | null> = {
   api: 'http://api:3000/health',
   contractor: 'http://contractor:4100/health',
@@ -32,6 +39,7 @@ export interface Job {
   fromCommit?: string;
   deployedCommit?: string;
   commitMessage?: string;
+  actionId?: number;
   log: string[];
 }
 
@@ -47,7 +55,11 @@ export function listJobs(): Job[] {
   return [...jobs.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-export function enqueue(service: string, commitMessage?: string): { job?: Job; error?: string } {
+export function enqueue(
+  service: string,
+  commitMessage?: string,
+  actionId?: number,
+): { job?: Job; error?: string } {
   if (!(service in SERVICE_HEALTH)) {
     return { error: `unknown service '${service}'. allowed: ${Object.keys(SERVICE_HEALTH).join(', ')}` };
   }
@@ -57,11 +69,16 @@ export function enqueue(service: string, commitMessage?: string): { job?: Job; e
     status: 'queued',
     createdAt: new Date().toISOString(),
     commitMessage,
+    actionId,
     log: [],
   };
   jobs.set(job.id, job);
   queue.push(job.id);
-  void audit('deploy.enqueued', { target: service, outcome: 'queued', payload: { job_id: job.id, commit_message: commitMessage ?? null } });
+  void audit('deploy.enqueued', {
+    target: service,
+    outcome: 'queued',
+    payload: { job_id: job.id, commit_message: commitMessage ?? null, action_id: actionId ?? null },
+  });
   void pump();
   return { job };
 }
@@ -138,9 +155,79 @@ async function lastGoodCommit(job: Job, service: string): Promise<string | null>
   }
 }
 
-// Commit + push the scoped path, gated by a fetch-first divergence check (Bible
-// rule, post-Copilot-agent incident: never push blind, always fetch + diff
-// origin/main first). Returns an outcome string; caller decides what's fatal.
+// resolveAction — write an action-originated job's TRUE terminal state, then
+// push the ✅/❌ to Telegram. Called at EVERY terminal branch of runJob.
+//
+// - Gated on job.actionId: a raw POST /deploy (no action_id) touches nothing.
+// - Strict guard `WHERE id=$1 AND status='executing'`: a row already resolved
+//   (manual fix, retry, race) updates zero rows — idempotent, never double-writes.
+// - UPDATE fires once (Postgres survives every service deploy — no retry needed).
+// - Notify is detached best-effort WITH retry (api may be mid-restart if the job
+//   IS api) — a lost push never stalls the queue; the action row is already
+//   correctly terminal by the time notify runs.
+// - Called AFTER the branch's audit() write: audit_log is the authoritative
+//   ledger (§4), the actions table is derived current-state. Ledger first.
+async function resolveAction(
+  job: Job,
+  terminal: 'succeeded' | 'failed',
+  detail: string,
+): Promise<void> {
+  if (!job.actionId) return;
+  try {
+    const res = await pool.query(
+      `UPDATE actions SET status = $1, updated_at = now()
+       WHERE id = $2 AND status = 'executing' RETURNING id`,
+      [terminal, job.actionId],
+    );
+    if (res.rowCount === 0) {
+      line(job, `action ${job.actionId} not in 'executing' — no terminal write (already resolved?)`);
+    } else {
+      line(job, `action ${job.actionId} -> ${terminal}`);
+    }
+  } catch (e) {
+    line(job, `FAILED to write terminal action state for action ${job.actionId}: ${String(e)}`);
+  }
+  void notifyTelegram({ action_id: job.actionId, state: terminal, detail });
+}
+
+// notifyTelegram — POST the completion to api's notify relay, WITH RETRY.
+// Ported from marionette's old watchDeploy notifier. Why retry: when the
+// deployed service IS api, the deploy tears down and recreates the api
+// container — the notifier — at exactly the moment we push. A single fetch
+// fired into that restart window drops silently. api is back within seconds
+// (health-gated), so we retry across ~40s. Each attempt has an AbortController
+// timeout so a hung socket during the swap is a failed attempt, not a stall.
+async function notifyTelegram(payload: {
+  action_id: number;
+  state: string;
+  detail: string;
+}): Promise<void> {
+  const ATTEMPTS = 8;
+  const SPACING_MS = 5_000;
+  const PER_ATTEMPT_TIMEOUT_MS = 4_000;
+
+  for (let i = 1; i <= ATTEMPTS; i++) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), PER_ATTEMPT_TIMEOUT_MS);
+    try {
+      const res = await fetch(API_NOTIFY_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, action_id: Number(payload.action_id) }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      if (res.ok) return; // delivered
+      console.error(`[deploy] notify attempt ${i}/${ATTEMPTS} non-ok: HTTP ${res.status}`);
+    } catch (e: any) {
+      clearTimeout(t);
+      console.error(`[deploy] notify attempt ${i}/${ATTEMPTS} failed:`, e?.message ?? e);
+    }
+    if (i < ATTEMPTS) await new Promise((r) => setTimeout(r, SPACING_MS));
+  }
+  console.error('[deploy] notify GAVE UP after all attempts — action terminal state stands, push lost');
+}
+
 async function commitAndPush(
   job: Job,
   scopePath: string,
@@ -223,7 +310,7 @@ async function runJob(job: Job): Promise<void> {
   await audit('deploy.started', {
     target: job.service,
     outcome: 'running',
-    payload: { job_id: job.id, from_commit: job.fromCommit },
+    payload: { job_id: job.id, from_commit: job.fromCommit, action_id: job.actionId ?? null },
   });
 
   if (job.commitMessage) {
@@ -238,11 +325,11 @@ async function runJob(job: Job): Promise<void> {
       job.status = 'failed';
       job.finishedAt = new Date().toISOString();
       line(job, `commit/push step failed (${result}) — aborting before build, nothing deployed`);
+      await resolveAction(job, 'failed', `${job.service} (commit ${result})`);
       return;
     }
   }
 
-  // Re-read AFTER any commit above, so deployedCommit reflects what's actually built.
   job.deployedCommit = (await currentCommit()) || undefined;
   line(job, `deploying commit = ${job.deployedCommit || '(unknown)'}`);
 
@@ -258,6 +345,7 @@ async function runJob(job: Job): Promise<void> {
       outcome: 'success',
       payload: { job_id: job.id, commit: job.deployedCommit },
     });
+    await resolveAction(job, 'succeeded', job.service);
     return;
   }
 
@@ -277,6 +365,7 @@ async function runJob(job: Job): Promise<void> {
       outcome: 'no_rollback_point',
       payload: { job_id: job.id },
     });
+    await resolveAction(job, 'failed', `${job.service} (unhealthy, no rollback point)`);
     return;
   }
 
@@ -290,6 +379,7 @@ async function runJob(job: Job): Promise<void> {
       outcome: 'no_scope_path',
       payload: { job_id: job.id, from_commit: job.fromCommit },
     });
+    await resolveAction(job, 'failed', `${job.service} (unhealthy, no scope path)`);
     return;
   }
   if (process.env.DRY_RUN === '1') {
@@ -308,6 +398,8 @@ async function runJob(job: Job): Promise<void> {
       outcome: 'recovered',
       payload: { job_id: job.id, commit: job.fromCommit },
     });
+    // rolled_back => the deploy the action asked for did NOT stick => action failed.
+    await resolveAction(job, 'failed', `${job.service} (rolled back to last-good)`);
   } else {
     job.status = 'failed';
     line(job, 'ROLLBACK FAILED — service still unhealthy, MANUAL INTERVENTION NEEDED');
@@ -316,5 +408,6 @@ async function runJob(job: Job): Promise<void> {
       outcome: 'still_unhealthy',
       payload: { job_id: job.id, commit: job.fromCommit },
     });
+    await resolveAction(job, 'failed', `${job.service} (rollback FAILED, still unhealthy)`);
   }
 }
