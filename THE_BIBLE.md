@@ -40,6 +40,8 @@ status='succeeded' ... WHERE id=9`, matching `action.succeeded` audit row).
 Needs its own session — tradeoffs of moving the watcher into `deploy` vs
 `api` not yet discussed.
 
+gap 2 (root-owned git objects) is RESOLVED by commit e54afc4 ("fix(m4): run deploy container as non-root node user, joined to docker gid 983"). That commit added USER node to deploy/Dockerfile, so the deploy container now runs as node (uid=1000, gid=1000) — matching host user spaghettios (uid=1000, gid=1000) exactly. Confirmed live: all .git/objects/* entries are owned by spaghettios, not root. Gap 1 (self-deploy watcher stranding an action in `executing`) remains OPEN, unchanged.
+
 M4 is now: gate slice ✅, Task A ✅, Task B ✅ — all done, Gap 2 resolved,
 Gap 1 still open. See §4, §6, §8.)*
 
@@ -608,10 +610,7 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   `docker-compose.yml` bind-mounts Bentley's real `~/.ssh` read-only into `deploy`; Dockerfile
   adds `openssh-client`. `marionette/src/actions.ts` passes `intent.commit_message` through.
   **Verified live end-to-end** (action id=7, service=marionette): real commit `59996a1` landed
-  on `origin/main`, scoped correctly to `marionette/` only, build+health succeeded. **Two gaps
-  found by this test, open — see header and §8:** self-deploy kills the Task A watcher
-  mid-poll (action 7 manually resolved); `deploy` running git as root leaves host `.git/
-  objects` root-owned, breaking the next host-side `git add` until manually `chown`'d.
+  on `origin/main`, scoped correctly to `marionette/` only, build+health succeeded. **One gap remains open (self-deploy kills the Task A watcher mid-poll, action 7 manually resolved) — see header and §8. The root-owned git-objects gap is RESOLVED (`e54afc4`):** the deploy container now runs as non-root `node (uid 1000), matching host spaghettios`, so git writes from inside the container land with correct host ownership — verified live via object ownership on disk.
 - **Commits:** `3a66aef` (propose/approve/deny/execute) + `b13c5ce` (Telegram buttons) +
   `80298a4`/`8ac171c` (Task A, async completion) + `1cdd19f` (Task B, commit+push wiring).
 
@@ -1283,14 +1282,8 @@ system.
   that survives a marionette-only deploy — `deploy` itself (it already knows the true
   outcome) or `api`. Same class of self-referential risk would apply to `service:"api"` or
   `service:"contractor"` self-deploys — not yet tested for those.
-- **NEW — deploy's root-owned git objects — RESOLVED** (`e54afc4`). `deploy`
-  now runs as non-root `node` (uid 1000, matches host `spaghettios` exactly)
-  instead of root, joined to the host's `docker` gid (983) for socket access.
-  SSH mount retargeted to `/home/node/.ssh`. Verified live via action id=9 —
-  real commit (`0b6c6b69`) confirmed `spaghettios`-owned by direct `ls -la`
-  and a full-tree ownership sweep (`find .git/objects -type f ! -user
-  spaghettios`, empty result). No chown step needed; fix is preventative by
-  construction (uid match), not reactive.
+- **deploy's root-owned git objects — RESOLVED (`e54afc4`).**
+  This issue is now resolved by commit `e54afc4` ("fix(m4): run deploy container as non-root node user, joined to docker gid 983"). The deploy container was updated to use `USER node` in its Dockerfile, so it runs with uid=1000, matching the host user `spaghettios`. As a result, any git operations inside the container (like `git commit`) write objects with host ownership `spaghettios:spaghettios`, not root. Verified live: all `.git/objects/*` entries on the host are owned by `spaghettios`. No manual `chown` needed anymore.
 - **M2 "what changed" view — RESOLVED** (`5955d8d` + `0004`/`b905e4b`, M2 now complete). The
   Gmail zero-width-padding **snippet polish still remains** — cosmetic, not blocking, applies
   to both the "Recent email" and "What changed" feeds.
