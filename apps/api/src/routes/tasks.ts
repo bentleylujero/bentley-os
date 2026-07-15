@@ -6,7 +6,7 @@ export const tasksRoute = new Hono();
 // POST /tasks — create a raw task. api writes the row only; marionette enriches
 // it later (priority/reason) via the enrich work-queue. No interpretation here.
 tasksRoute.post('/tasks', async (c) => {
-  let body: { title?: unknown; notes?: unknown };
+  let body: { title?: unknown; notes?: unknown; priority?: unknown };
   try {
     body = await c.req.json();
   } catch {
@@ -16,13 +16,19 @@ tasksRoute.post('/tasks', async (c) => {
   const notes = typeof body.notes === 'string' ? body.notes.trim() : null;
   if (!title) return c.json({ error: 'title required' }, 400);
 
+  // Priority is owner-set on creation (high|medium|low), default medium.
+  // marionette does NOT overwrite this — it only adds reason/category.
+  const PRIORITIES = ['high', 'medium', 'low'];
+  let priority = typeof body.priority === 'string' ? body.priority.toLowerCase() : 'medium';
+  if (!PRIORITIES.includes(priority)) priority = 'medium';
+
   try {
     const { rows } = await pool.query(
-      `insert into tasks (title, notes, source)
-       values ($1, $2, 'manual')
+      `insert into tasks (title, notes, source, priority)
+       values ($1, $2, 'manual', $3)
        returning id, title, notes, status, priority, reason, category,
                  enriched_at, created_at`,
-      [title, notes],
+      [title, notes, priority],
     );
     return c.json({ task: rows[0] }, 201);
   } catch (err) {
@@ -30,6 +36,7 @@ tasksRoute.post('/tasks', async (c) => {
     return c.json({ error: 'insert failed' }, 500);
   }
 });
+
 
 // GET /tasks — read tasks for the panel. Optional ?status= filter
 // (defaults to open). Enriched fields come back as-is (null until enriched).
