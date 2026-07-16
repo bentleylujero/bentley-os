@@ -386,9 +386,14 @@ dashboardRoute.get('/', async (c) => {
   .mon-feed .ev.err{color:#ff9b9b;}
   .mon-err{font-size:.66rem;color:#ff9b9b;background:#1a0d0d;border:1px solid #4a2020;border-radius:4px;padding:.4rem .6rem;margin:.3rem 0;white-space:pre-wrap;word-break:break-word;max-height:70px;overflow:hidden;}
   .ring-wrap{display:flex;justify-content:center;padding:.3rem 0 .1rem;}
-  .ring-wrap svg{width:100%;max-width:340px;height:auto;}
+  .ring-wrap svg{width:100%;max-width:700px;height:auto;}
   .ring-legend{display:flex;gap:.8rem;flex-wrap:wrap;justify-content:center;font-size:.58rem;color:#7a9a5a;margin-top:.2rem;letter-spacing:.05em;}
   .ring-legend span span{display:inline-block;width:8px;height:8px;border-radius:2px;vertical-align:-1px;margin-right:3px;}
+  .dock-tip{position:fixed;display:none;z-index:60;pointer-events:none;max-width:240px;background:#0d0820;border:1px solid #7CFC00;border-radius:6px;padding:.45rem .6rem;font-size:.6rem;line-height:1.45;color:#9dff3c;box-shadow:0 0 16px rgba(124,252,0,.28);font-family:'SF Mono',Menlo,Consolas,monospace;}
+  .dock-tip b{color:#7CFC00;letter-spacing:.06em;text-transform:uppercase;}
+  .dock-tip .blurb{color:#9ad46a;margin:.22rem 0 .35rem;}
+  .dock-tip .st{display:flex;justify-content:space-between;gap:1rem;color:#7a9a5a;}
+  .dock-tip .st b{color:#9dff3c;text-transform:none;letter-spacing:0;font-weight:normal;}
   @media(max-width:640px){.mon-modal{width:92%;min-width:0;}}
 </style></head>
 <body><div class="wrap">
@@ -409,7 +414,7 @@ dashboardRoute.get('/', async (c) => {
     <div class="mon-modal" id="mon-modal">
       <h2>▓ SYSTEM MONITOR — GRANULAR</h2>
       <div class="mon-sect"><h3>Host / The Situation</h3><div id="mx-host" class="mon-feed"></div></div>
-      <div class="mon-sect"><h3>The Port &mdash; live load</h3><div class="ring-wrap"><svg id="mx-ring" viewBox="-14 -10 376 320" xmlns="http://www.w3.org/2000/svg"></svg></div><div class="ring-legend"><span><span style="background:#7CFC00"></span>web/edge</span><span><span style="background:#c07bff"></span>ai/reason</span><span><span style="background:#5dcaef"></span>data/store</span><span><span style="background:#e3b341"></span>ops</span></div></div>
+      <div class="mon-sect"><h3>THE DOCK</h3><div class="ring-wrap"><svg id="mx-ring" viewBox="0 0 720 130" xmlns="http://www.w3.org/2000/svg"></svg></div><div id="dock-tip" class="dock-tip"></div><div class="ring-legend"><span><span style="background:#7CFC00"></span>docked</span><span><span style="background:#e3b341"></span>busy</span><span><span style="background:#2a2440"></span>empty berth</span></div></div>
       <div class="mon-sect"><h3>Pipeline & Data</h3><div id="mx-data" class="mon-feed"></div></div>
       <div class="mon-sect"><h3>Recent Activity</h3><div id="mx-feed" class="mon-feed"></div></div>
       <div class="mon-sect"><h3>Errors</h3><div id="mx-err"></div></div>
@@ -538,8 +543,8 @@ dashboardRoute.get('/', async (c) => {
       if(h.load)hx+=evRow('LOAD',h.load.one+' / '+h.load.five+' / '+h.load.fifteen);
       if(h.uptime_sec)hx+=evRow('UPTIME',Math.floor(h.uptime_sec/86400)+'d '+Math.floor(h.uptime_sec%86400/3600)+'h');
       document.getElementById('mx-host').innerHTML=hx||'<div class="ev">host standby</div>';
-      // containers -> station ring
-      renderRing(h.containers||[]);
+      // containers -> the dock
+      renderDock(h.containers||[]);
       // data
       var c=a.counts||{};
       var dx='';
@@ -566,45 +571,123 @@ dashboardRoute.get('/', async (c) => {
       return '#7CFC00';
     }
     var ringPhase={};var ringT=0;
-    function renderRing(all){
-      var run=all.filter(function(c){return c.state==='running';});
-      run.sort(function(a,b){return (a.name<b.name?-1:1);});
-      var slots=Math.max(run.length+2,Math.ceil(run.length*1.4));
-      var cx=170,cy=150,R=112,coreR=34;
-      var maxMem=1;for(var i=0;i<run.length;i++){var mb=run[i].mem?run[i].mem.used_bytes:0;if(mb>maxMem)maxMem=mb;}
+    var dockInfo=[];var dockHover=-1;
+    function dockMemPct(c){
+      if(c&&c.mem){
+        if(typeof c.mem.used_pct==='number')return c.mem.used_pct;
+        if(c.mem.limit_bytes>0)return (c.mem.used_bytes/c.mem.limit_bytes)*100;
+      }
+      return 0;
+    }
+    function dockBlurb(name){
+      if(/postgres/.test(name))return 'PostgreSQL — primary relational store for tasks, emails, and sync state.';
+      if(/qdrant/.test(name))return 'Qdrant — vector database powering semantic search and embeddings recall.';
+      if(/redis/.test(name))return 'Redis — in-memory cache and job queue broker.';
+      if(/marionette/.test(name))return 'Marionette — the agent brain that plans and drives actions.';
+      if(/contractor/.test(name))return 'Contractor — runs delegated work and background jobs.';
+      if(/deploy/.test(name))return 'Deploy — build and release pipeline that ships new versions.';
+      if(/whisper/.test(name))return 'Whisper — speech-to-text transcription service.';
+      if(/cloudflared/.test(name))return 'Cloudflared — Cloudflare tunnel exposing services to the internet securely.';
+      if(/portainer/.test(name))return 'Portainer — Docker management and container control UI.';
+      if(/dozzle/.test(name))return 'Dozzle — live container log viewer.';
+      if(/uptime|kuma/.test(name))return 'Uptime Kuma — uptime monitoring and status alerts.';
+      if(/api/.test(name))return 'API — the core gateway serving this dashboard and all routes.';
+      return 'Support service in the Bentley OS stack.';
+    }
+    function dockShowTip(el,idx){
+      var t=document.getElementById('dock-tip');if(!t||dockInfo[idx]==null)return;
+      dockHover=idx;
+      t.innerHTML=dockInfo[idx];
+      t.style.display='block';
+      var r=el.getBoundingClientRect();
+      var tw=t.offsetWidth,th=t.offsetHeight;
+      var left=r.left+r.width/2-tw/2;
+      var top=r.bottom+8;
+      if(top+th>window.innerHeight-8)top=r.top-th-8;
+      if(left<8)left=8;
+      if(left+tw>window.innerWidth-8)left=window.innerWidth-8-tw;
+      t.style.left=left+'px';t.style.top=top+'px';
+    }
+    function dockHideTip(){dockHover=-1;var t=document.getElementById('dock-tip');if(t)t.style.display='none';}
+    function renderDock(all){
       var svg='';
-      // spokes + core
-      for(var j=0;j<slots;j++){var a=(j/slots)*6.2832-1.5708;var x=cx+Math.cos(a)*R,y=cy+Math.sin(a)*R;
-        svg+='<line x1="'+cx+'" y1="'+cy+'" x2="'+x.toFixed(1)+'" y2="'+y.toFixed(1)+'" stroke="#1e1838" stroke-width="0.8"/>';}
-      svg+='<circle cx="'+cx+'" cy="'+cy+'" r="'+coreR+'" fill="#0d0820" stroke="#7CFC00" stroke-width="1.5"/>';
-      svg+='<text x="'+cx+'" y="'+(cy-2)+'" text-anchor="middle" fill="#9dff3c" font-size="11" letter-spacing="1">API</text>';
-      svg+='<text x="'+cx+'" y="'+(cy+10)+'" text-anchor="middle" fill="#5a8a3a" font-size="7">gateway</text>';
-      // container nodes
-      for(var k=0;k<slots;k++){var an=(k/slots)*6.2832-1.5708;var nx=cx+Math.cos(an)*R,ny=cy+Math.sin(an)*R;
-        if(k<run.length){var c=run[k];var col=ringTheme(c.name);var nodeR=14;
-          var memB=c.mem?c.mem.used_bytes:0;var fillPct=maxMem>0?(memB/maxMem)*0.9:0;
-          var cpu=c.cpu_pct||0;
+      dockInfo=[];
+      var n=all.length;
+      var host=document.getElementById('mx-ring');if(!host)return;
+      if(!n){host.innerHTML='';return;}
+      var boxTop=24,boxH=64,boxBottom=88;
+      var slotW=Math.min(60,720/n);
+      var rowW=slotW*n;
+      var startX=(720-rowW)/2;
+      // dock floor line
+      svg+='<line x1="'+startX.toFixed(1)+'" y1="'+(boxBottom+1)+'" x2="'+(startX+rowW).toFixed(1)+'" y2="'+(boxBottom+1)+'" stroke="#1e1838" stroke-width="1"/>';
+      for(var i=0;i<n;i++){
+        var c=all[i];
+        var running=c.state==='running';
+        var col=ringTheme(c.name);
+        var short=c.name.replace('bentley-os-','').replace(/-1$/,'');
+        var cellX=startX+i*slotW;
+        var cx=cellX+slotW/2;
+        var boxW=Math.min(46,slotW-14);
+        var boxX=cx-boxW/2;
+        var cpu=c.cpu_pct||0;
+        var mp=dockMemPct(c);
+        var load=(cpu+mp)/2;if(load<0)load=0;if(load>100)load=100;
+        var busy=running&&load>=90;
+        svg+='<g class="dock-berth" data-i="'+i+'" style="cursor:pointer">';
+        // transparent hit area for easy hover
+        svg+='<rect x="'+cellX.toFixed(1)+'" y="0" width="'+slotW.toFixed(1)+'" height="130" fill="transparent"/>';
+        if(running){
           if(ringPhase[c.name]==null)ringPhase[c.name]=Math.random()*6.28;
           var ph=ringPhase[c.name];
-          var lvl=fillPct+Math.sin(ringT*1.5+ph)*0.03;if(lvl<0)lvl=0;if(lvl>1)lvl=1;
-          var fillH=lvl*(nodeR*2);var fillY=ny+nodeR-fillH;
-          var pulse=((Math.sin(ringT*(1+cpu/40)+ph)*0.5+0.5)*(cpu/100)).toFixed(2);
-          var cid='rc'+k;
-          svg+='<clipPath id="'+cid+'"><circle cx="'+nx.toFixed(1)+'" cy="'+ny.toFixed(1)+'" r="'+nodeR+'"/></clipPath>';
-          svg+='<circle cx="'+nx.toFixed(1)+'" cy="'+ny.toFixed(1)+'" r="'+nodeR+'" fill="#0d0820" stroke="'+col+'" stroke-width="1.3"/>';
-          svg+='<g clip-path="url(#'+cid+')"><rect x="'+(nx-nodeR).toFixed(1)+'" y="'+fillY.toFixed(1)+'" width="'+(nodeR*2)+'" height="'+fillH.toFixed(1)+'" fill="'+col+'" fill-opacity="0.55"/></g>';
-          svg+='<circle cx="'+nx.toFixed(1)+'" cy="'+ny.toFixed(1)+'" r="'+nodeR+'" fill="none" stroke="'+col+'" stroke-width="2" opacity="'+pulse+'"/>';
-          var short=c.name.replace('bentley-os-','').replace(/-1$/,'');
-          var lr=R+nodeR+8;
-          var lx=cx+Math.cos(an)*lr;
-          var ly=cy+Math.sin(an)*lr+Math.sin(an)*4+2;
-          var lanch=Math.cos(an)>0.3?'start':(Math.cos(an)<-0.3?'end':'middle');
-          svg+='<text x="'+lx.toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="'+lanch+'" fill="#7a9a5a" font-size="6.5">'+esc(short)+'</text>';
+          var lvl=(load/100)+Math.sin(ringT*1.5+ph)*0.03;if(lvl<0)lvl=0;if(lvl>1)lvl=1;
+          var fillH=lvl*boxH;var fillY=boxBottom-fillH;
+          var clipId='dk'+i;
+          svg+='<clipPath id="'+clipId+'"><rect x="'+boxX.toFixed(1)+'" y="'+boxTop+'" width="'+boxW.toFixed(1)+'" height="'+boxH+'" rx="6"/></clipPath>';
+          svg+='<rect x="'+boxX.toFixed(1)+'" y="'+boxTop+'" width="'+boxW.toFixed(1)+'" height="'+boxH+'" rx="6" fill="#0d0820" stroke="'+col+'" stroke-width="1.3"/>';
+          svg+='<g clip-path="url(#'+clipId+')"><rect x="'+boxX.toFixed(1)+'" y="'+fillY.toFixed(1)+'" width="'+boxW.toFixed(1)+'" height="'+fillH.toFixed(1)+'" fill="'+col+'" fill-opacity="0.5"/>';
+          svg+='<rect x="'+boxX.toFixed(1)+'" y="'+fillY.toFixed(1)+'" width="'+boxW.toFixed(1)+'" height="1.6" fill="'+col+'" fill-opacity="0.9"/></g>';
+          // status lamp
+          if(busy){
+            var ap=(Math.sin(ringT*3+ph)*0.5+0.5);
+            svg+='<circle cx="'+cx.toFixed(1)+'" cy="13" r="'+(5.5+ap*3).toFixed(1)+'" fill="#e3b341" fill-opacity="'+(0.28*ap+0.06).toFixed(2)+'"/>';
+            svg+='<circle cx="'+cx.toFixed(1)+'" cy="13" r="3.2" fill="#e3b341"/>';
+          } else {
+            svg+='<circle cx="'+cx.toFixed(1)+'" cy="13" r="7" fill="#7CFC00" fill-opacity="0.16"/>';
+            svg+='<circle cx="'+cx.toFixed(1)+'" cy="13" r="3.2" fill="#7CFC00"/>';
+          }
+          svg+='<text x="'+cx.toFixed(1)+'" y="103" text-anchor="middle" fill="#7a9a5a" font-size="6.5">'+esc(short)+'</text>';
         } else {
-          svg+='<circle cx="'+nx.toFixed(1)+'" cy="'+ny.toFixed(1)+'" r="13" fill="none" stroke="#2a2440" stroke-width="0.8" stroke-dasharray="2 2"/>';
+          // dark empty berth
+          svg+='<rect x="'+boxX.toFixed(1)+'" y="'+boxTop+'" width="'+boxW.toFixed(1)+'" height="'+boxH+'" rx="6" fill="none" stroke="#2a2440" stroke-width="1" stroke-dasharray="3 3"/>';
+          svg+='<circle cx="'+cx.toFixed(1)+'" cy="13" r="3.2" fill="#1e1838" stroke="#2a2440" stroke-width="0.8"/>';
+          svg+='<text x="'+cx.toFixed(1)+'" y="103" text-anchor="middle" fill="#4a4560" font-size="6.5">'+esc(short)+'</text>';
         }
+        svg+='</g>';
+        // tooltip content
+        var memTxt=(c.mem?Math.round(mp)+'%':'n/a');
+        var tip='<b>'+esc(short)+'</b>';
+        tip+='<div class="blurb">'+dockBlurb(c.name)+'</div>';
+        tip+='<div class="st">state<b>'+esc(c.state)+'</b></div>';
+        tip+='<div class="st">cpu<b>'+(running?Math.round(cpu)+'%':'—')+'</b></div>';
+        tip+='<div class="st">mem<b>'+(running?memTxt:'—')+'</b></div>';
+        tip+='<div class="st">load<b>'+(running?Math.round(load)+'%':'—')+'</b></div>';
+        dockInfo[i]=tip;
       }
-      document.getElementById('mx-ring').innerHTML=svg;
+      host.innerHTML=svg;
+      var berths=host.querySelectorAll('.dock-berth');
+      for(var b=0;b<berths.length;b++){(function(g){
+        var idx=+g.getAttribute('data-i');
+        g.addEventListener('mouseenter',function(){dockShowTip(g,idx);});
+        g.addEventListener('mouseleave',dockHideTip);
+      })(berths[b]);}
+      // keep tooltip live/synced if still hovering across re-render
+      if(dockHover>=0){
+        if(dockHover<dockInfo.length){
+          var tt=document.getElementById('dock-tip');
+          if(tt&&tt.style.display==='block')tt.innerHTML=dockInfo[dockHover];
+        } else { dockHideTip(); }
+      }
     }
     function evRow(l,v){return '<div class="ev"><span class="t" style="min-width:120px">'+esc(l)+'</span><span>'+esc(v)+'</span></div>';}
 
@@ -616,7 +699,7 @@ dashboardRoute.get('/', async (c) => {
     setInterval(function(){
       ringT+=0.12;
       if(document.getElementById('mon-back').classList.contains('open')&&lastHost&&lastHost.host){
-        renderRing(lastHost.host.containers||[]);
+        renderDock(lastHost.host.containers||[]);
       }
     },80);
     tick();setInterval(tick,4000);
