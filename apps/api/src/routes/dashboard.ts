@@ -353,8 +353,65 @@ dashboardRoute.get('/', async (c) => {
   summary:hover{color:#e6e6e6;}
   a{color:#58a6ff;text-decoration:none;} a:hover{text-decoration:underline;}
   .muted{color:#8b949e;font-size:.85rem;}
+  /* ===== THE MONITOR ===== */
+  .mon{background:#150d24;border:1px solid #3a2a5c;border-radius:8px;padding:.9rem 1rem;margin:0 0 1.2rem;font-family:'SF Mono',Menlo,Consolas,monospace;cursor:pointer;transition:border-color .15s;}
+  .mon:hover{border-color:#7CFC00;}
+  .mon-hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem;}
+  .mon-ttl{color:#7CFC00;font-size:.8rem;letter-spacing:.15em;text-transform:uppercase;text-shadow:0 0 6px rgba(124,252,0,.35);}
+  .mon-hint{color:#5a8a3a;font-size:.65rem;letter-spacing:.05em;}
+  .mon-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.55rem .9rem;}
+  .mon-row{display:flex;align-items:center;gap:.5rem;font-size:.72rem;}
+  .mon-lbl{color:#9ad46a;min-width:52px;letter-spacing:.05em;}
+  .mon-bar{flex:1;height:9px;background:#0a0714;border:1px solid #2f2350;border-radius:2px;overflow:hidden;}
+  .mon-fill{display:block;height:100%;background:#7CFC00;box-shadow:0 0 8px rgba(124,252,0,.5);transition:width .4s ease;}
+  .mon-fill.warn{background:#e3b341;box-shadow:0 0 8px rgba(227,179,65,.5);}
+  .mon-fill.crit{background:#ff6b6b;box-shadow:0 0 8px rgba(255,107,107,.5);}
+  .mon-val{color:#c8f0a0;min-width:38px;text-align:right;font-variant-numeric:tabular-nums;}
+  .mon-led{width:9px;height:9px;border-radius:50%;flex-shrink:0;}
+  .led-ok{background:#7CFC00;box-shadow:0 0 7px #7CFC00;}
+  .led-warn{background:#e3b341;box-shadow:0 0 7px #e3b341;}
+  .led-crit{background:#ff6b6b;box-shadow:0 0 7px #ff6b6b;animation:blink 1s infinite;}
+  .led-off{background:#3a3a3a;}
+  @keyframes blink{50%{opacity:.3;}}
+  /* modal */
+  .mon-back{position:fixed;inset:0;background:rgba(5,3,12,.4);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);display:none;align-items:center;justify-content:center;z-index:50;}
+  .mon-back.open{display:flex;}
+  .mon-modal{width:44%;min-width:520px;max-width:760px;max-height:80vh;overflow-y:auto;background:#150d24;border:1px solid #7CFC00;border-radius:10px;padding:1.3rem 1.5rem;font-family:'SF Mono',Menlo,Consolas,monospace;box-shadow:0 0 40px rgba(124,252,0,.15);}
+  .mon-modal h2{color:#7CFC00;font-size:.85rem;letter-spacing:.2em;text-transform:uppercase;margin:0 0 1rem;text-shadow:0 0 8px rgba(124,252,0,.4);}
+  .mon-sect{margin:0 0 1.3rem;}
+  .mon-sect h3{color:#9ad46a;font-size:.68rem;letter-spacing:.12em;text-transform:uppercase;margin:0 0 .55rem;border-bottom:1px solid #2f2350;padding-bottom:.3rem;}
+  .mon-feed{font-size:.68rem;line-height:1.5;}
+  .mon-feed .ev{display:flex;gap:.6rem;color:#9ad46a;padding:.12rem 0;}
+  .mon-feed .ev .t{color:#5a8a3a;min-width:58px;}
+  .mon-feed .ev.err{color:#ff9b9b;}
+  .mon-err{font-size:.66rem;color:#ff9b9b;background:#1a0d0d;border:1px solid #4a2020;border-radius:4px;padding:.4rem .6rem;margin:.3rem 0;white-space:pre-wrap;word-break:break-word;max-height:70px;overflow:hidden;}
+  @media(max-width:640px){.mon-modal{width:92%;min-width:0;}}
 </style></head>
 <body><div class="wrap">
+  <div class="mon" id="mon" title="click to expand">
+    <div class="mon-hd"><span class="mon-ttl">▓ THE MONITOR</span><span class="mon-hint" id="mon-hint">click to expand ▸</span></div>
+    <div class="mon-grid" id="mon-compact">
+      <div class="mon-row"><span class="mon-lbl">CPU</span><span class="mon-bar"><span class="mon-fill" id="b-cpu" style="width:0%"></span></span><span class="mon-val" id="v-cpu">--</span></div>
+      <div class="mon-row"><span class="mon-lbl">MEM</span><span class="mon-bar"><span class="mon-fill" id="b-mem" style="width:0%"></span></span><span class="mon-val" id="v-mem">--</span></div>
+      <div class="mon-row"><span class="mon-lbl">DISK</span><span class="mon-bar"><span class="mon-fill" id="b-disk" style="width:0%"></span></span><span class="mon-val" id="v-disk">--</span></div>
+      <div class="mon-row"><span class="mon-lbl">EMBED</span><span class="mon-bar"><span class="mon-fill" id="b-embed" style="width:0%"></span></span><span class="mon-val" id="v-embed">--</span></div>
+      <div class="mon-row"><span class="mon-led led-off" id="l-mail"></span><span class="mon-lbl">MAIL</span><span class="mon-val" id="v-mail" style="text-align:left;color:#9ad46a">--</span></div>
+      <div class="mon-row"><span class="mon-led led-off" id="l-cal"></span><span class="mon-lbl">CAL</span><span class="mon-val" id="v-cal" style="text-align:left;color:#9ad46a">--</span></div>
+      <div class="mon-row"><span class="mon-led led-off" id="l-svc"></span><span class="mon-lbl">SVCS</span><span class="mon-val" id="v-svc" style="text-align:left;color:#9ad46a">--</span></div>
+      <div class="mon-row"><span class="mon-led led-off" id="l-err"></span><span class="mon-lbl">ERRORS</span><span class="mon-val" id="v-err" style="text-align:left;color:#9ad46a">--</span></div>
+    </div>
+  </div>
+  <div class="mon-back" id="mon-back">
+    <div class="mon-modal" id="mon-modal">
+      <h2>▓ SYSTEM MONITOR — GRANULAR</h2>
+      <div class="mon-sect"><h3>Host / The Situation</h3><div id="mx-host" class="mon-feed"></div></div>
+      <div class="mon-sect"><h3>Containers</h3><div id="mx-cont" class="mon-feed"></div></div>
+      <div class="mon-sect"><h3>Pipeline & Data</h3><div id="mx-data" class="mon-feed"></div></div>
+      <div class="mon-sect"><h3>Recent Activity</h3><div id="mx-feed" class="mon-feed"></div></div>
+      <div class="mon-sect"><h3>Errors</h3><div id="mx-err"></div></div>
+    </div>
+  </div>
+
   <h1><span class="dot"></span>Bentley OS</h1>
 
   <h2>Right now</h2>
@@ -420,6 +477,98 @@ dashboardRoute.get('/', async (c) => {
       if(row){row.classList.add('fading');setTimeout(function(){row.remove();},350);}
     }catch(e){alert('Could not complete task: '+e.message);}
   }
+  // ===== THE MONITOR =====
+  (function(){
+    function cls(p){return p>=90?'crit':p>=70?'warn':'';}
+    function setBar(id,vid,p,txt){var b=document.getElementById(id),v=document.getElementById(vid);if(!b)return;p=Math.max(0,Math.min(100,p||0));b.style.width=p+'%';b.className='mon-fill '+cls(p);if(v)v.textContent=txt!=null?txt:p+'%';}
+    function led(id,state){var e=document.getElementById(id);if(e)e.className='mon-led led-'+state;}
+    function ago(ts){if(!ts)return 1e9;return (Date.now()-new Date(ts).getTime())/1000;}
+    function fmtAgo(s){if(s>=1e8)return 'never';if(s<60)return Math.round(s)+'s';if(s<3600)return Math.round(s/60)+'m';return Math.round(s/3600)+'h';}
+    function hhmm(ts){try{return new Date(ts).toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit',hour12:false});}catch(e){return '';}}
+
+    var lastHost=null,lastApp=null;
+
+    async function tick(){
+      try{
+        var[hr,ar]=await Promise.all([
+          fetch('/metrics/host').then(r=>r.json()).catch(()=>({ok:false})),
+          fetch('/metrics/app').then(r=>r.json()).catch(()=>({ok:false}))
+        ]);
+        lastHost=hr;lastApp=ar;
+        // host bars
+        var h=hr&&hr.host||{};
+        setBar('b-cpu','v-cpu',h.cpu_pct,(h.cpu_pct==null?'--':h.cpu_pct+'%'));
+        setBar('b-mem','v-mem',h.mem&&h.mem.used_pct,(h.mem?h.mem.used_pct+'%':'--'));
+        setBar('b-disk','v-disk',h.disk&&h.disk.used_pct,(h.disk?h.disk.used_pct+'%':'--'));
+        // services led
+        var cs=h.containers||[];var down=cs.filter(function(c){return c.state!=='running';}).length;
+        if(!cs.length){led('l-svc','off');setTxt('v-svc','--');}
+        else{led('l-svc',down?'crit':'ok');setTxt('v-svc',down?down+' down':cs.length+' up');}
+        // app: embed %
+        var c=ar&&ar.counts||{};
+        var emb=c.embedded||0,tot=(c.embedded||0)+(c.unembedded||0);
+        var ep=tot?Math.round(emb/tot*100):100;
+        setBar('b-embed','v-embed',ep,ep+'%');
+        // sync leds
+        var sync=(ar&&ar.sync)||[];
+        var gm=sync.find(function(x){return x.source==='gmail';});
+        var gc=sync.find(function(x){return x.source==='gcal';});
+        function syncLed(lid,vid,row){var a=ago(row&&row.updated_at);led(lid,a<600?'ok':a<1800?'warn':'crit');setTxt(vid,fmtAgo(a));}
+        syncLed('l-mail','v-mail',gm);syncLed('l-cal','v-cal',gc);
+        // errors led
+        var errs=(ar&&ar.errors)||[];
+        var recentErr=errs.filter(function(e){return ago(e.at)<86400;}).length;
+        led('l-err',recentErr?'crit':'ok');setTxt('v-err',recentErr?recentErr+' (24h)':'clean');
+        if(document.getElementById('mon-back').classList.contains('open'))renderModal();
+      }catch(e){/* keep last paint */}
+    }
+    function setTxt(id,t){var e=document.getElementById(id);if(e)e.textContent=t;}
+
+    function renderModal(){
+      var h=lastHost&&lastHost.host||{},a=lastApp||{};
+      // host
+      var hx='';
+      if(h.cpu_pct!=null)hx+=evRow('CPU',h.cpu_pct+'%');
+      if(h.mem)hx+=evRow('MEM',h.mem.used_pct+'%  ('+Math.round((h.mem.total_kb-h.mem.avail_kb)/1048576)+'/'+Math.round(h.mem.total_kb/1048576)+' GB)');
+      if(h.disk)hx+=evRow('DISK',h.disk.used_pct+'%  ('+Math.round(h.disk.used_bytes/1e9)+'/'+Math.round(h.disk.total_bytes/1e9)+' GB)');
+      if(h.load)hx+=evRow('LOAD',h.load.one+' / '+h.load.five+' / '+h.load.fifteen);
+      if(h.uptime_sec)hx+=evRow('UPTIME',Math.floor(h.uptime_sec/86400)+'d '+Math.floor(h.uptime_sec%86400/3600)+'h');
+      document.getElementById('mx-host').innerHTML=hx||'<div class="ev">host standby</div>';
+      // containers
+      var cs=h.containers||[];
+      document.getElementById('mx-cont').innerHTML=cs.length?cs.map(function(c){
+        var st=c.state==='running'?'ok':'crit';
+        return '<div class="ev"><span class="mon-led led-'+st+'" style="margin-top:3px"></span><span>'+esc(c.name)+'</span><span class="t" style="margin-left:auto">'+esc(c.status)+'</span></div>';
+      }).join(''):'<div class="ev">no data</div>';
+      // data
+      var c=a.counts||{};
+      var dx='';
+      dx+=evRow('EMAILS',c.emails);dx+=evRow('EMBEDDED',c.embedded+' / '+((c.embedded||0)+(c.unembedded||0)));
+      dx+=evRow('UNCLASSIFIED',c.unclassified);dx+=evRow('EVENTS',c.events);
+      dx+=evRow('OPEN TASKS',c.open_tasks);dx+=evRow('PENDING ACTIONS',c.pending_actions);
+      document.getElementById('mx-data').innerHTML=dx;
+      // feed
+      var rec=a.recent||[];
+      document.getElementById('mx-feed').innerHTML=rec.map(function(r){
+        var err=r.outcome!=='success'&&r.outcome!=='queued'&&r.outcome!=='running'&&r.outcome!=='recovered';
+        return '<div class="ev'+(err?' err':'')+'"><span class="t">'+hhmm(r.at)+'</span><span>'+esc(r.action)+'</span><span class="t" style="margin-left:auto">'+esc(r.outcome)+'</span></div>';
+      }).join('')||'<div class="ev">no activity</div>';
+      // errors
+      var errs=a.errors||[];
+      document.getElementById('mx-err').innerHTML=errs.length?errs.map(function(e){
+        return '<div class="mon-err">'+hhmm(e.at)+' · '+esc(e.action)+'<br>'+esc((e.detail||'').slice(0,180))+'</div>';
+      }).join(''):'<div class="ev" style="color:#7CFC00;font-size:.7rem">no errors ▓</div>';
+    }
+    function evRow(l,v){return '<div class="ev"><span class="t" style="min-width:120px">'+esc(l)+'</span><span>'+esc(v)+'</span></div>';}
+
+    var mon=document.getElementById('mon'),back=document.getElementById('mon-back'),modal=document.getElementById('mon-modal');
+    if(mon){mon.addEventListener('click',function(){renderModal();back.classList.add('open');});}
+    if(back){back.addEventListener('click',function(e){if(e.target===back)back.classList.remove('open');});}
+    document.addEventListener('keydown',function(e){if(e.key==='Escape'&&back)back.classList.remove('open');});
+
+    tick();setInterval(tick,4000);
+  })();
+
 </script>
 </body></html>`);
 });

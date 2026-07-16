@@ -73,6 +73,9 @@ services:
     volumes:
       - /home/spaghettios/bentley-os/client_secret.json:/secrets/client_secret.json:ro
       - /home/spaghettios/bentley-os/token.json:/secrets/token.json:ro
+      - /proc:/host/proc:ro
+      - /:/host/root:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
   deploy:
     build:
