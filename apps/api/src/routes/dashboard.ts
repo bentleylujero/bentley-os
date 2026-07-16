@@ -409,7 +409,7 @@ dashboardRoute.get('/', async (c) => {
     <div class="mon-modal" id="mon-modal">
       <h2>▓ SYSTEM MONITOR — GRANULAR</h2>
       <div class="mon-sect"><h3>Host / The Situation</h3><div id="mx-host" class="mon-feed"></div></div>
-      <div class="mon-sect"><h3>The Port &mdash; live load</h3><div class="ring-wrap"><svg id="mx-ring" viewBox="0 0 340 300" xmlns="http://www.w3.org/2000/svg"></svg></div><div class="ring-legend"><span><span style="background:#7CFC00"></span>web/edge</span><span><span style="background:#c07bff"></span>ai/reason</span><span><span style="background:#5dcaef"></span>data/store</span><span><span style="background:#e3b341"></span>ops</span></div></div>
+      <div class="mon-sect"><h3>The Port &mdash; live load</h3><div class="ring-wrap"><svg id="mx-ring" viewBox="-14 -10 376 320" xmlns="http://www.w3.org/2000/svg"></svg></div><div class="ring-legend"><span><span style="background:#7CFC00"></span>web/edge</span><span><span style="background:#c07bff"></span>ai/reason</span><span><span style="background:#5dcaef"></span>data/store</span><span><span style="background:#e3b341"></span>ops</span></div></div>
       <div class="mon-sect"><h3>Pipeline & Data</h3><div id="mx-data" class="mon-feed"></div></div>
       <div class="mon-sect"><h3>Recent Activity</h3><div id="mx-feed" class="mon-feed"></div></div>
       <div class="mon-sect"><h3>Errors</h3><div id="mx-err"></div></div>
@@ -595,8 +595,11 @@ dashboardRoute.get('/', async (c) => {
           svg+='<g clip-path="url(#'+cid+')"><rect x="'+(nx-nodeR).toFixed(1)+'" y="'+fillY.toFixed(1)+'" width="'+(nodeR*2)+'" height="'+fillH.toFixed(1)+'" fill="'+col+'" fill-opacity="0.55"/></g>';
           svg+='<circle cx="'+nx.toFixed(1)+'" cy="'+ny.toFixed(1)+'" r="'+nodeR+'" fill="none" stroke="'+col+'" stroke-width="2" opacity="'+pulse+'"/>';
           var short=c.name.replace('bentley-os-','').replace(/-1$/,'');
-          var ly=an>0.2?ny+nodeR+9:ny-nodeR-4;
-          svg+='<text x="'+nx.toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="middle" fill="#7a9a5a" font-size="6.5">'+esc(short)+'</text>';
+          var lr=R+nodeR+8;
+          var lx=cx+Math.cos(an)*lr;
+          var ly=cy+Math.sin(an)*lr+Math.sin(an)*4+2;
+          var lanch=Math.cos(an)>0.3?'start':(Math.cos(an)<-0.3?'end':'middle');
+          svg+='<text x="'+lx.toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="'+lanch+'" fill="#7a9a5a" font-size="6.5">'+esc(short)+'</text>';
         } else {
           svg+='<circle cx="'+nx.toFixed(1)+'" cy="'+ny.toFixed(1)+'" r="13" fill="none" stroke="#2a2440" stroke-width="0.8" stroke-dasharray="2 2"/>';
         }
