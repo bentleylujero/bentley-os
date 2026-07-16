@@ -394,6 +394,34 @@ dashboardRoute.get('/', async (c) => {
   .dock-tip .blurb{color:#9ad46a;margin:.22rem 0 .35rem;}
   .dock-tip .st{display:flex;justify-content:space-between;gap:1rem;color:#7a9a5a;}
   .dock-tip .st b{color:#9dff3c;text-transform:none;letter-spacing:0;font-weight:normal;}
+  /* ===== HOST HARDWARE MONITORS ===== */
+  /* 1 - CPU digital twin (per-core die grid) */
+  .cpu-twin{display:flex;align-items:center;justify-content:center;gap:1.2rem;padding:.2rem 0 .1rem;}
+  .cpu-socket{position:relative;display:grid;grid-template-columns:repeat(4,1fr);gap:5px;padding:11px;background:#120a24;border:1px solid #241a44;border-radius:6px;box-shadow:inset 0 0 14px rgba(0,0,0,.55);}
+  .cpu-socket::before{content:'';position:absolute;top:4px;left:4px;width:7px;height:7px;border-top:1px solid #3a2a5c;border-left:1px solid #3a2a5c;}
+  .cpu-socket::after{content:'';position:absolute;inset:0;pointer-events:none;border-radius:6px;background:repeating-linear-gradient(0deg,rgba(124,252,0,0.03) 0 1px,transparent 1px 3px);}
+  .cpu-core{width:19px;height:19px;border-radius:3px;background:#1a1030;transition:background .35s ease,box-shadow .35s ease;}
+  .cpu-agg{text-align:center;min-width:96px;}
+  .cpu-agg-val{font-size:2.1rem;line-height:1;color:#c8f0a0;text-shadow:0 0 14px rgba(157,255,60,.55);font-variant-numeric:tabular-nums;}
+  .cpu-agg-lbl{font-size:.6rem;color:#5a8a3a;letter-spacing:.24em;text-transform:uppercase;margin-top:.3rem;}
+  /* 2 - network throughput scope */
+  .scope{position:relative;background:#120a24;border:1px solid #241a44;border-radius:6px;overflow:hidden;}
+  .scope svg{display:block;width:100%;height:82px;}
+  .scope::after{content:'';position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(0deg,rgba(124,252,0,0.03) 0 1px,transparent 1px 3px);}
+  .scope-readouts{position:absolute;top:6px;right:9px;display:flex;gap:.9rem;font-size:.62rem;font-variant-numeric:tabular-nums;text-shadow:0 0 6px rgba(0,0,0,.85);}
+  .net-rx-r{color:#5dcaef;} .net-tx-r{color:#c07bff;}
+  /* 3 - core-four vitals gauges */
+  .gauge-row{display:flex;justify-content:space-around;align-items:flex-end;gap:.6rem;flex-wrap:wrap;}
+  .gauge{display:flex;flex-direction:column;align-items:center;flex:1;min-width:74px;}
+  .g-svg{width:100%;max-width:96px;height:auto;}
+  .g-num{fill:#c8f0a0;font-size:15px;font-family:ui-monospace,monospace;font-variant-numeric:tabular-nums;}
+  .g-lbl{font-size:.58rem;color:#7a9a5a;letter-spacing:.16em;text-transform:uppercase;margin-top:.15rem;}
+  .load-gauge{justify-content:flex-end;}
+  .load-bars{width:100%;max-width:96px;display:flex;flex-direction:column;gap:5px;padding:0 2px 8px;}
+  .lb{display:flex;align-items:center;gap:.4rem;font-size:.55rem;color:#7a9a5a;}
+  .lb-t{min-width:22px;letter-spacing:.05em;}
+  .lb-track{flex:1;height:7px;background:#1a1030;border:1px solid #241a44;border-radius:2px;overflow:hidden;}
+  .lb-fill{display:block;height:100%;width:0;background:#7CFC00;box-shadow:0 0 6px rgba(124,252,0,.5);transition:width .5s ease,background .3s ease;}
   @media(max-width:640px){.mon-modal{width:92%;min-width:0;}}
 </style></head>
 <body><div class="wrap">
@@ -415,6 +443,14 @@ dashboardRoute.get('/', async (c) => {
       <h2>▓ SYSTEM MONITOR — GRANULAR</h2>
       <div class="mon-sect"><h3>Host / The Situation</h3><div id="mx-host" class="mon-feed"></div></div>
       <div class="mon-sect"><h3>THE DOCK</h3><div class="ring-wrap"><svg id="mx-ring" viewBox="0 0 720 130" xmlns="http://www.w3.org/2000/svg"></svg></div><div id="dock-tip" class="dock-tip"></div><div class="ring-legend"><span><span style="background:#7CFC00"></span>docked</span><span><span style="background:#e3b341"></span>busy</span><span><span style="background:#2a2440"></span>empty berth</span></div></div>
+      <div class="mon-sect"><h3>CPU Digital Twin</h3><div class="cpu-twin"><div class="cpu-socket" id="cpu-die"></div><div class="cpu-agg"><div class="cpu-agg-val" id="cpu-agg">--</div><div class="cpu-agg-lbl">CPU</div></div></div></div>
+      <div class="mon-sect"><h3>Network Throughput</h3><div class="scope"><svg id="net-scope" viewBox="0 0 300 82" preserveAspectRatio="none"><polyline id="net-rx" fill="none" stroke="#5dcaef" stroke-width="1.3" stroke-linejoin="round"></polyline><polyline id="net-tx" fill="none" stroke="#c07bff" stroke-width="1.3" stroke-linejoin="round"></polyline></svg><div class="scope-readouts"><span class="net-rx-r" id="net-rx-v">&#8595; --</span><span class="net-tx-r" id="net-tx-v">&#8593; --</span></div></div></div>
+      <div class="mon-sect"><h3>Core Vitals</h3><div class="gauge-row">
+        <div class="gauge"><svg class="g-svg" viewBox="0 0 90 66"><path d="M10,55 A35,35 0 0,1 80,55" stroke="#241a44" stroke-width="6" fill="none" stroke-linecap="round"></path><path id="g-cpu-arc" d="M10,55 A35,35 0 0,1 10,55" stroke="#7CFC00" stroke-width="6" fill="none" stroke-linecap="round"></path><text id="g-cpu-num" x="45" y="50" text-anchor="middle" class="g-num">--</text></svg><div class="g-lbl">CPU</div></div>
+        <div class="gauge"><svg class="g-svg" viewBox="0 0 90 66"><path d="M10,55 A35,35 0 0,1 80,55" stroke="#241a44" stroke-width="6" fill="none" stroke-linecap="round"></path><path id="g-mem-arc" d="M10,55 A35,35 0 0,1 10,55" stroke="#7CFC00" stroke-width="6" fill="none" stroke-linecap="round"></path><text id="g-mem-num" x="45" y="50" text-anchor="middle" class="g-num">--</text></svg><div class="g-lbl">MEM</div></div>
+        <div class="gauge"><svg class="g-svg" viewBox="0 0 90 66"><path d="M10,55 A35,35 0 0,1 80,55" stroke="#241a44" stroke-width="6" fill="none" stroke-linecap="round"></path><path id="g-disk-arc" d="M10,55 A35,35 0 0,1 10,55" stroke="#7CFC00" stroke-width="6" fill="none" stroke-linecap="round"></path><text id="g-disk-num" x="45" y="50" text-anchor="middle" class="g-num">--</text></svg><div class="g-lbl">DISK</div></div>
+        <div class="gauge load-gauge"><div class="load-bars"><div class="lb"><span class="lb-t">1m</span><span class="lb-track"><span class="lb-fill" id="ld-1"></span></span></div><div class="lb"><span class="lb-t">5m</span><span class="lb-track"><span class="lb-fill" id="ld-5"></span></span></div><div class="lb"><span class="lb-t">15m</span><span class="lb-track"><span class="lb-fill" id="ld-15"></span></span></div></div><div class="g-lbl">LOAD</div></div>
+      </div></div>
       <div class="mon-sect"><h3>Pipeline & Data</h3><div id="mx-data" class="mon-feed"></div></div>
       <div class="mon-sect"><h3>Recent Activity</h3><div id="mx-feed" class="mon-feed"></div></div>
       <div class="mon-sect"><h3>Errors</h3><div id="mx-err"></div></div>
@@ -707,6 +743,109 @@ dashboardRoute.get('/', async (c) => {
       }
     },80);
     tick();setInterval(tick,4000);
+  })();
+
+  // ===== HOST HARDWARE MONITORS (fake-data twin) =====
+  (function(){
+    // SWAP-SEAM: replace with live /metrics/host reads. Everything below is a
+    // hardcoded fake seed; tick() bounded-random-walks each value once per second.
+    var CONFIG={
+      cores:[18,24,12,40,33,9,55,21,14,62,28,7,45,19,31,11], // 16 logical cores, util %
+      rx:245000,          // bytes/sec inbound
+      tx:88000,           // bytes/sec outbound
+      mem:47,             // memory used %
+      disk:63,            // root fs used %
+      load:[1.9,2.3,2.1], // 1 / 5 / 15 min load average
+      coreCount:16
+    };
+    var NET_RX_MAX=5*1048576, NET_TX_MAX=3*1048576, BUF=60;
+    var rxBuf=[], txBuf=[];
+    for(var s=0;s<BUF;s++){rxBuf.push(CONFIG.rx);txBuf.push(CONFIG.tx);}
+
+    function walk(v,min,max,step){var n=v+(Math.random()-0.5)*2*step;if(n<min)n=min;if(n>max)n=max;return n;}
+    function lerp(a,b,t){return Math.round(a+(b-a)*t);}
+    function rampArr(u){return u>=85?[255,107,107]:u>=65?[227,179,65]:[124,252,0];}
+    function rampCol(v){return v>=85?'#ff6b6b':v>=65?'#e3b341':'#7CFC00';}
+    function humanBps(b){if(b>=1048576)return (b/1048576).toFixed(1)+' MB/s';if(b>=1024)return (b/1024).toFixed(0)+' KB/s';return Math.round(b)+' B/s';}
+
+    // Build the 16-core die grid once.
+    var die=document.getElementById('cpu-die');
+    if(die){var dh='';for(var di=0;di<16;di++){dh+='<div class="cpu-core"></div>';}die.innerHTML=dh;}
+
+    var cpuAgg=0;
+    function renderCPU(){
+      if(!die)return;
+      var cells=die.querySelectorAll('.cpu-core');
+      var sum=0;
+      for(var i=0;i<cells.length;i++){
+        var u=CONFIG.cores[i]||0;sum+=u;
+        var tgt=rampArr(u);
+        var t=Math.min(1,u/100+0.12);
+        cells[i].style.background='rgb('+lerp(26,tgt[0],t)+','+lerp(16,tgt[1],t)+','+lerp(48,tgt[2],t)+')';
+        cells[i].style.boxShadow='0 0 '+(2+u/100*11).toFixed(1)+'px rgba('+tgt[0]+','+tgt[1]+','+tgt[2]+','+(u/100*0.9).toFixed(2)+')';
+      }
+      cpuAgg=Math.round(sum/(cells.length||1));
+      var av=document.getElementById('cpu-agg');if(av)av.textContent=cpuAgg+'%';
+    }
+
+    function scopePts(buf,peak){
+      var pts=[];
+      for(var i=0;i<buf.length;i++){pts.push((i/(BUF-1)*300).toFixed(1)+','+(80-buf[i]/peak*74).toFixed(1));}
+      return pts.join(' ');
+    }
+    function renderNet(){
+      rxBuf.push(CONFIG.rx);rxBuf.shift();
+      txBuf.push(CONFIG.tx);txBuf.shift();
+      var peak=1;
+      for(var i=0;i<BUF;i++){if(rxBuf[i]>peak)peak=rxBuf[i];if(txBuf[i]>peak)peak=txBuf[i];}
+      var rx=document.getElementById('net-rx'),tx=document.getElementById('net-tx');
+      if(rx)rx.setAttribute('points',scopePts(rxBuf,peak));
+      if(tx)tx.setAttribute('points',scopePts(txBuf,peak));
+      var rv=document.getElementById('net-rx-v'),tv=document.getElementById('net-tx-v');
+      if(rv)rv.textContent='↓ '+humanBps(CONFIG.rx);
+      if(tv)tv.textContent='↑ '+humanBps(CONFIG.tx);
+    }
+
+    function dialPath(v){
+      var ang=Math.PI*(1-v/100);
+      return 'M10,55 A35,35 0 0,1 '+(45+35*Math.cos(ang)).toFixed(2)+','+(55-35*Math.sin(ang)).toFixed(2);
+    }
+    function setDial(arcId,numId,v){
+      var arc=document.getElementById(arcId),num=document.getElementById(numId);
+      if(arc){arc.setAttribute('d',dialPath(v));arc.setAttribute('stroke',rampCol(v));}
+      if(num)num.textContent=Math.round(v)+'%';
+    }
+    function setLoad(id,val){
+      var e=document.getElementById(id);if(!e)return;
+      var p=Math.min(100,val/CONFIG.coreCount*100);
+      e.style.width=p+'%';e.style.background=rampCol(p);
+    }
+    function renderGauges(){
+      setDial('g-cpu-arc','g-cpu-num',cpuAgg);
+      setDial('g-mem-arc','g-mem-num',CONFIG.mem);
+      setDial('g-disk-arc','g-disk-num',CONFIG.disk);
+      setLoad('ld-1',CONFIG.load[0]);setLoad('ld-5',CONFIG.load[1]);setLoad('ld-15',CONFIG.load[2]);
+    }
+
+    function tick(){
+      // cores jitter independently -> uneven die shimmer
+      for(var i=0;i<CONFIG.cores.length;i++){CONFIG.cores[i]=walk(CONFIG.cores[i],2,99,14);}
+      if(Math.random()<0.15){var k=Math.floor(Math.random()*CONFIG.cores.length);CONFIG.cores[k]=Math.min(99,CONFIG.cores[k]+28);}
+      // network base walk + occasional spikes
+      CONFIG.rx=walk(CONFIG.rx,2048,NET_RX_MAX,90000);
+      CONFIG.tx=walk(CONFIG.tx,1024,NET_TX_MAX,60000);
+      if(Math.random()<0.10)CONFIG.rx=Math.min(NET_RX_MAX,CONFIG.rx+Math.random()*2*1048576);
+      if(Math.random()<0.08)CONFIG.tx=Math.min(NET_TX_MAX,CONFIG.tx+Math.random()*1.4*1048576);
+      // mem/disk drift; 5m and 15m load trail the 1m sample
+      CONFIG.mem=walk(CONFIG.mem,20,95,1.6);
+      CONFIG.disk=walk(CONFIG.disk,10,92,0.3);
+      CONFIG.load[0]=walk(CONFIG.load[0],0,CONFIG.coreCount*1.6,0.5);
+      CONFIG.load[1]=CONFIG.load[1]+(CONFIG.load[0]-CONFIG.load[1])*0.1;
+      CONFIG.load[2]=CONFIG.load[2]+(CONFIG.load[1]-CONFIG.load[2])*0.05;
+      renderCPU();renderNet();renderGauges();
+    }
+    tick();
+    setInterval(tick,1000);
   })();
 
 </script>
