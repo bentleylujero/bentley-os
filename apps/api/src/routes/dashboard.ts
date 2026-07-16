@@ -621,6 +621,8 @@ dashboardRoute.get('/', async (c) => {
       var startX=(720-rowW)/2;
       // dock floor line
       svg+='<line x1="'+startX.toFixed(1)+'" y1="'+(boxBottom+1)+'" x2="'+(startX+rowW).toFixed(1)+'" y2="'+(boxBottom+1)+'" stroke="#1e1838" stroke-width="1"/>';
+      // relative fill basis: largest raw mem among running containers (min 1 to avoid div-by-zero)
+      var maxMem=1;for(var mi=0;mi<n;mi++){if(all[mi].state==='running'){var mb=all[mi].mem?all[mi].mem.used_bytes:0;if(mb>maxMem)maxMem=mb;}}
       for(var i=0;i<n;i++){
         var c=all[i];
         var running=c.state==='running';
@@ -640,7 +642,9 @@ dashboardRoute.get('/', async (c) => {
         if(running){
           if(ringPhase[c.name]==null)ringPhase[c.name]=Math.random()*6.28;
           var ph=ringPhase[c.name];
-          var lvl=(load/100)+Math.sin(ringT*1.5+ph)*0.03;if(lvl<0)lvl=0;if(lvl>1)lvl=1;
+          var frac=(c.mem?c.mem.used_bytes:0)/maxMem*0.92;
+          var amp=0.02*(load/100);
+          var lvl=frac+Math.sin(ringT*1.5+ph)*amp;if(lvl<0)lvl=0;if(lvl>1)lvl=1;
           var fillH=lvl*boxH;var fillY=boxBottom-fillH;
           var clipId='dk'+i;
           svg+='<clipPath id="'+clipId+'"><rect x="'+boxX.toFixed(1)+'" y="'+boxTop+'" width="'+boxW.toFixed(1)+'" height="'+boxH+'" rx="6"/></clipPath>';
