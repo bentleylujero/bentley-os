@@ -385,6 +385,10 @@ dashboardRoute.get('/', async (c) => {
   .mon-feed .ev .t{color:#5a8a3a;min-width:58px;}
   .mon-feed .ev.err{color:#ff9b9b;}
   .mon-err{font-size:.66rem;color:#ff9b9b;background:#1a0d0d;border:1px solid #4a2020;border-radius:4px;padding:.4rem .6rem;margin:.3rem 0;white-space:pre-wrap;word-break:break-word;max-height:70px;overflow:hidden;}
+  .ring-wrap{display:flex;justify-content:center;padding:.3rem 0 .1rem;}
+  .ring-wrap svg{width:100%;max-width:340px;height:auto;}
+  .ring-legend{display:flex;gap:.8rem;flex-wrap:wrap;justify-content:center;font-size:.58rem;color:#7a9a5a;margin-top:.2rem;letter-spacing:.05em;}
+  .ring-legend span span{display:inline-block;width:8px;height:8px;border-radius:2px;vertical-align:-1px;margin-right:3px;}
   @media(max-width:640px){.mon-modal{width:92%;min-width:0;}}
 </style></head>
 <body><div class="wrap">
@@ -405,7 +409,7 @@ dashboardRoute.get('/', async (c) => {
     <div class="mon-modal" id="mon-modal">
       <h2>▓ SYSTEM MONITOR — GRANULAR</h2>
       <div class="mon-sect"><h3>Host / The Situation</h3><div id="mx-host" class="mon-feed"></div></div>
-      <div class="mon-sect"><h3>Containers</h3><div id="mx-cont" class="mon-feed"></div></div>
+      <div class="mon-sect"><h3>The Port &mdash; live load</h3><div class="ring-wrap"><svg id="mx-ring" viewBox="0 0 340 300" xmlns="http://www.w3.org/2000/svg"></svg></div><div class="ring-legend"><span><span style="background:#7CFC00"></span>web/edge</span><span><span style="background:#c07bff"></span>ai/reason</span><span><span style="background:#5dcaef"></span>data/store</span><span><span style="background:#e3b341"></span>ops</span></div></div>
       <div class="mon-sect"><h3>Pipeline & Data</h3><div id="mx-data" class="mon-feed"></div></div>
       <div class="mon-sect"><h3>Recent Activity</h3><div id="mx-feed" class="mon-feed"></div></div>
       <div class="mon-sect"><h3>Errors</h3><div id="mx-err"></div></div>
@@ -534,12 +538,8 @@ dashboardRoute.get('/', async (c) => {
       if(h.load)hx+=evRow('LOAD',h.load.one+' / '+h.load.five+' / '+h.load.fifteen);
       if(h.uptime_sec)hx+=evRow('UPTIME',Math.floor(h.uptime_sec/86400)+'d '+Math.floor(h.uptime_sec%86400/3600)+'h');
       document.getElementById('mx-host').innerHTML=hx||'<div class="ev">host standby</div>';
-      // containers
-      var cs=h.containers||[];
-      document.getElementById('mx-cont').innerHTML=cs.length?cs.map(function(c){
-        var st=c.state==='running'?'ok':'crit';
-        return '<div class="ev"><span class="mon-led led-'+st+'" style="margin-top:3px"></span><span>'+esc(c.name)+'</span><span class="t" style="margin-left:auto">'+esc(c.status)+'</span></div>';
-      }).join(''):'<div class="ev">no data</div>';
+      // containers -> station ring
+      renderRing(h.containers||[]);
       // data
       var c=a.counts||{};
       var dx='';
@@ -559,6 +559,50 @@ dashboardRoute.get('/', async (c) => {
         return '<div class="mon-err">'+hhmm(e.at)+' · '+esc(e.action)+'<br>'+esc((e.detail||'').slice(0,180))+'</div>';
       }).join(''):'<div class="ev" style="color:#7CFC00;font-size:.7rem">no errors ▓</div>';
     }
+    function ringTheme(name){
+      if(/postgres|qdrant|redis/.test(name))return '#5dcaef';
+      if(/marionette|contractor/.test(name))return '#c07bff';
+      if(/deploy|portainer|dozzle|kuma|uptime/.test(name))return '#e3b341';
+      return '#7CFC00';
+    }
+    var ringPhase={};var ringT=0;
+    function renderRing(all){
+      var run=all.filter(function(c){return c.state==='running';});
+      run.sort(function(a,b){return (a.name<b.name?-1:1);});
+      var slots=Math.max(run.length+2,Math.ceil(run.length*1.4));
+      var cx=170,cy=150,R=112,coreR=34;
+      var maxMem=1;for(var i=0;i<run.length;i++){var mb=run[i].mem?run[i].mem.used_bytes:0;if(mb>maxMem)maxMem=mb;}
+      var svg='';
+      // spokes + core
+      for(var j=0;j<slots;j++){var a=(j/slots)*6.2832-1.5708;var x=cx+Math.cos(a)*R,y=cy+Math.sin(a)*R;
+        svg+='<line x1="'+cx+'" y1="'+cy+'" x2="'+x.toFixed(1)+'" y2="'+y.toFixed(1)+'" stroke="#1e1838" stroke-width="0.8"/>';}
+      svg+='<circle cx="'+cx+'" cy="'+cy+'" r="'+coreR+'" fill="#0d0820" stroke="#7CFC00" stroke-width="1.5"/>';
+      svg+='<text x="'+cx+'" y="'+(cy-2)+'" text-anchor="middle" fill="#9dff3c" font-size="11" letter-spacing="1">API</text>';
+      svg+='<text x="'+cx+'" y="'+(cy+10)+'" text-anchor="middle" fill="#5a8a3a" font-size="7">gateway</text>';
+      // container nodes
+      for(var k=0;k<slots;k++){var an=(k/slots)*6.2832-1.5708;var nx=cx+Math.cos(an)*R,ny=cy+Math.sin(an)*R;
+        if(k<run.length){var c=run[k];var col=ringTheme(c.name);var nodeR=14;
+          var memB=c.mem?c.mem.used_bytes:0;var fillPct=maxMem>0?(memB/maxMem)*0.9:0;
+          var cpu=c.cpu_pct||0;
+          if(ringPhase[c.name]==null)ringPhase[c.name]=Math.random()*6.28;
+          var ph=ringPhase[c.name];
+          var lvl=fillPct+Math.sin(ringT*1.5+ph)*0.03;if(lvl<0)lvl=0;if(lvl>1)lvl=1;
+          var fillH=lvl*(nodeR*2);var fillY=ny+nodeR-fillH;
+          var pulse=((Math.sin(ringT*(1+cpu/40)+ph)*0.5+0.5)*(cpu/100)).toFixed(2);
+          var cid='rc'+k;
+          svg+='<clipPath id="'+cid+'"><circle cx="'+nx.toFixed(1)+'" cy="'+ny.toFixed(1)+'" r="'+nodeR+'"/></clipPath>';
+          svg+='<circle cx="'+nx.toFixed(1)+'" cy="'+ny.toFixed(1)+'" r="'+nodeR+'" fill="#0d0820" stroke="'+col+'" stroke-width="1.3"/>';
+          svg+='<g clip-path="url(#'+cid+')"><rect x="'+(nx-nodeR).toFixed(1)+'" y="'+fillY.toFixed(1)+'" width="'+(nodeR*2)+'" height="'+fillH.toFixed(1)+'" fill="'+col+'" fill-opacity="0.55"/></g>';
+          svg+='<circle cx="'+nx.toFixed(1)+'" cy="'+ny.toFixed(1)+'" r="'+nodeR+'" fill="none" stroke="'+col+'" stroke-width="2" opacity="'+pulse+'"/>';
+          var short=c.name.replace('bentley-os-','').replace(/-1$/,'');
+          var ly=an>0.2?ny+nodeR+9:ny-nodeR-4;
+          svg+='<text x="'+nx.toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="middle" fill="#7a9a5a" font-size="6.5">'+esc(short)+'</text>';
+        } else {
+          svg+='<circle cx="'+nx.toFixed(1)+'" cy="'+ny.toFixed(1)+'" r="13" fill="none" stroke="#2a2440" stroke-width="0.8" stroke-dasharray="2 2"/>';
+        }
+      }
+      document.getElementById('mx-ring').innerHTML=svg;
+    }
     function evRow(l,v){return '<div class="ev"><span class="t" style="min-width:120px">'+esc(l)+'</span><span>'+esc(v)+'</span></div>';}
 
     var mon=document.getElementById('mon'),back=document.getElementById('mon-back'),modal=document.getElementById('mon-modal');
@@ -566,6 +610,12 @@ dashboardRoute.get('/', async (c) => {
     if(back){back.addEventListener('click',function(e){if(e.target===back)back.classList.remove('open');});}
     document.addEventListener('keydown',function(e){if(e.key==='Escape'&&back)back.classList.remove('open');});
 
+    setInterval(function(){
+      ringT+=0.12;
+      if(document.getElementById('mon-back').classList.contains('open')&&lastHost&&lastHost.host){
+        renderRing(lastHost.host.containers||[]);
+      }
+    },80);
     tick();setInterval(tick,4000);
   })();
 
