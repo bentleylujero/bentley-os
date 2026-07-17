@@ -768,12 +768,16 @@ still required. The auto-execute-low-risk tier (M5 proper) is a later step ON TO
   system state`) on top of `9f3f054` (`feat(marionette): audit-sight read endpoint`).
 
 **Whisper — self-hosted speech-to-text, done end-to-end:**
-- **Server:** `~/bentley-os/whisper/Dockerfile` builds `whisper.cpp` from source
-  (`ggerganov/whisper.cpp`, `whisper-server` target) and bundles a `ggml-*.bin` model.
-  Currently **`ggml-base.bin`** (74MB) — reverted from `ggml-small.en.bin` (487MB) after
-  small.en proved too slow for daily push-to-talk use on CPU-only inference. `CMD` runs
-  `whisper-server -m models/ggml-base.bin --host 0.0.0.0 --port 4300`.
-- **API contract (confirmed via direct testing, not assumed):** `POST /inference`,
+- **Server:** `~/bentley-os/whisper/Dockerfile` builds `whisper.cpp` **v1.7.6** from source
+  (`ggerganov/whisper.cpp`, Vulkan backend, `GGML_VULKAN=1`, shared libs installed via
+  `cmake --install`) and bundles a `ggml-*.bin` model. Currently **`ggml-small.en.bin`**
+  (487MB), GPU-accelerated on the box's AMD RX 5700 XT via Vulkan/RADV — base/CPU was too
+  slow, small.en on GPU runs ~1.3s for an 11s clip (~8.5x realtime). `CMD` runs
+  `whisper-server -m models/ggml-small.en.bin --host 0.0.0.0 --port 4300`. **v1.7.6 is pinned
+  deliberately** — master/v1.8.0+ broke the Vulkan build on bookworm (`vk::LayerSettingEXT`,
+  issue #3455); do not bump without re-testing. GPU passthrough: `docker-compose.yml` whisper
+  block adds `devices:` (`/dev/dri/renderD128`, `/dev/dri/card1`) + `group_add: ["44","991"]`
+  (host video/render GIDs).- **API contract (confirmed via direct testing, not assumed):** `POST /inference`,
   multipart form, field `file` (audio, wav tested at 16kHz mono), optional
   `response_format=json` → `{"text": " transcribed words\n"}`. No auth of its own — auth is
   entirely Cloudflare Access in front of it.
