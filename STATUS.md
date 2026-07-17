@@ -49,7 +49,7 @@ block + the relevant section below. That's the only time this file changes.*
 | **redis** | 6379 | Cache (unused by app yet) |
 | **marionette** | 4200 | The AI brain — reasoning, classify, embed, task-enrich, action lifecycle |
 | **contractor** | 4100 | Coding/build layer — real OpenCode sessions |
-| **deploy** | 4000 | Build + health-check + audited rollback |
+| **deploy** | 4000 | Build + restart + health-check + audited rollback (dispatches on `job.kind`: build/deploy + `service-restart`) |
 | **whisper** | 4300 | Self-hosted speech-to-text (`base` model) |
 | **cloudflared** | — | Public tunnel (gated on api health) |
 | portainer / dozzle / uptime-kuma | 9000 / 8080 / 3001 | Ops visibility |
@@ -69,7 +69,7 @@ Box: `spaghettios@172.16.30.4`, `/home/spaghettios/bentley-os`. One
 | 2 | Insight out (dashboard: Today, What changed, Triage) | ✅ done |
 | 3 | AI layer (classify, embed, grounded Q&A, auto-drain, tasks panel) | ✅ done |
 | 4 | Action layer (approval-gated) | ✅ done — no open gaps |
-| 5 | Earned autonomy (auto-execute low-risk tier) | ⬜ unblocked, not started |
+| 5 | Earned autonomy (auto-execute low-risk tier) | 🟡 first hand `service-restart` shipped; auto-execute tier not started |
 | 6 | Self-extension (system ships its own tools) | ⬜ not started |
 
 **Command interfaces:** Telegram live (allow-listed, webhook-secret gated).
@@ -79,24 +79,36 @@ Dashboard at `spaghettios.bentleyos.me` (Clair).
 
 ## Next action
 
-**M3 + M4 both closed, no open gaps.** Most recent ship: the **CRT dashboard +
-THE MONITOR** — a two-color CRT reskin of `/` (Right Now card, Priority triage,
-What changed, Everything-else all preserved) plus a sidebar MONITOR modal:
-host/situation feed, THE DOCK (container berths + load), CPU digital twin
-(per-core die grid), core-four gauges. Real host vitals via a new
-`apps/api/src/routes/metrics.ts` (`GET /metrics/host`, `GET /metrics/app` over
-the Docker socket), behind the same Cloudflare Access "Me" gate.
+**Most recent ship: Mari's first homelab "hand" — `service-restart`.** An
+approval-gated `service-restart` action, ridden on the M4 action lifecycle as a
+new `job.kind` (NOT a parallel mechanism). Built as a sibling `runRestartJob` in
+deploy (`docker compose restart <svc>` → health-poll → resolve, no build/commit/
+rollback); target allow-listed to `{api, contractor, marionette}` at propose
+time in marionette. Verified live end-to-end via contractor (direct API) and
+marionette (real Telegram Approve tap, incl. the self-teardown edge). This is the
+first hand PROVEN, not autonomy turned on — an Approve tap is still required. See
+Bible §4 Milestone 5 subsection + §6/§8.
+
+**Before that:** the **CRT dashboard + THE MONITOR** — a two-color CRT reskin of
+`/` (Right Now card, Priority triage, What changed, Everything-else all
+preserved) plus a sidebar MONITOR modal: host/situation feed, THE DOCK (container
+berths + load), CPU digital twin (per-core die grid), core-four gauges. Real host
+vitals via `apps/api/src/routes/metrics.ts` (`GET /metrics/host`, `GET /metrics/app`
+over the Docker socket), behind the same Cloudflare Access "Me" gate.
 
 **Debt on that ship:** it went out iteratively with **no isolation-test / spec
 pass** — observed-working, not reviewed. Worth a deliberate review later.
 
-**Open choices, not yet started:**
-- Mari's homelab "hands" — **DECIDED (design)**: Option C, first hand `service-restart`
-  via a sibling `runRestartJob` in deploy, production-zone + allow-listed + approval-gated.
-  Not built. `update_docs` is hand #2, blocked on a generation-source call. See Bible §8.
-- Tasks feature follow-ons: Slice B (self-email → task), Slice C (insight/help layer).
-
-After those, **M5 (earned autonomy)** opens.
+**Open choices / next work:**
+- **Hand #2 = `update_docs`** — BLOCKED on a generation-source call (Bible §8):
+  (A) marionette regenerates prose from box state vs. (B) a deterministic box
+  script templates the mechanical parts. Decide in its own session before
+  building. (Ironic-but-intended: the system can't yet safely write its own docs
+  — that's the whole point of hand #2.)
+- **M5 proper — auto-execute the low-risk action tier** — a step ON TOP of the
+  hands; the hands stay approval-gated until it lands. Not started.
+- Tasks feature follow-ons: Slice B (self-email → task), Slice C (insight/help
+  layer).
 
 ---
 
