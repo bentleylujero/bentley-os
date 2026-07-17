@@ -9,3 +9,5 @@ client_secret.json
 token.json
 whisper/Dockerfile.bak
 .claude/
+whisper/ggml-small.en.bin
+whisper/jfk.wav

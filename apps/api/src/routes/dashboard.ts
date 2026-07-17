@@ -443,6 +443,12 @@ dashboardRoute.get('/', async (c) => {
   .pbtn[data-p="high"]:hover{border-color:var(--green);color:var(--green);text-shadow:0 0 5px var(--green);}
   .pbtn[data-p="medium"]:hover{border-color:var(--green-ghost);color:var(--green-dim);}
   .pbtn[data-p="low"]:hover{border-color:var(--purple-border);color:var(--text);}
+  .docdrop{margin-top:.75rem;border:1px dashed var(--purple-border);border-radius:6px;padding:.5rem .6rem;color:var(--green-faint);font-size:.66rem;text-transform:uppercase;letter-spacing:.06em;cursor:pointer;transition:border-color .15s,color .15s;text-align:center;}
+  .docdrop:hover,.docdrop.drag{border-color:var(--green);color:var(--green-dim);}
+  .docdrop b{color:var(--green-dim);text-transform:none;letter-spacing:0;}
+  #doclist{margin-top:.4rem;}
+  #doclist .docrow{font-size:.7rem;color:var(--green-dim);padding:.2rem 0;}
+  #doclist .docrow .ok{color:var(--green);margin-right:.4rem;}
   .muted{color:var(--green-faint);font-size:.8rem;}
   .empty-ph{color:var(--green-faint);font-size:.78rem;padding:1.5rem .5rem;text-align:center;border:1px dashed var(--purple-border);border-radius:7px;letter-spacing:.05em;}
   /* ---- FLOATING CHATBAR ---- */
@@ -545,6 +551,11 @@ dashboardRoute.get('/', async (c) => {
           <button class="pbtn" data-p="medium" onclick="addTask('medium')">Med</button>
           <button class="pbtn" data-p="low" onclick="addTask('low')">Low</button>
         </div>
+        <div class="docdrop" id="docdrop" onclick="document.getElementById('docfile').click()">
+          Drop a doc here or <b>click to upload</b> (.md / .txt)
+        </div>
+        <input id="docfile" type="file" accept=".md,.txt,text/markdown,text/plain" style="display:none">
+        <div id="doclist"></div>
       </section>
 
       <!-- NEEDS ATTENTION -->
@@ -649,6 +660,40 @@ dashboardRoute.get('/', async (c) => {
       if(row){row.classList.add('fading');setTimeout(function(){row.remove();},350);}
     }catch(e){alert('Could not complete task: '+e.message);}
   }
+
+  // ===== document upload =====
+  // Thin multipart POST to /documents. api writes the row; marionette embeds it
+  // later via the /embed-doc drain. No content-type header — the browser sets the
+  // multipart boundary itself.
+  async function uploadDoc(file){
+    if(!file)return;
+    var fd=new FormData();
+    fd.append('file',file);
+    try{
+      var r=await fetch('/documents',{method:'POST',body:fd});
+      if(!r.ok)throw new Error('http '+r.status);
+      var d=(await r.json()).document;
+      var row=document.createElement('div');
+      row.className='docrow';
+      row.innerHTML='<span class="ok">✓</span><b>'+esc(d.title)+'</b> queued';
+      var list=document.getElementById('doclist');
+      list.insertBefore(row,list.firstChild);
+    }catch(e){alert('Could not upload document: '+e.message);}
+  }
+  (function(){
+    var zone=document.getElementById('docdrop');
+    var picker=document.getElementById('docfile');
+    picker.addEventListener('change',function(){
+      if(picker.files&&picker.files[0])uploadDoc(picker.files[0]);
+      picker.value='';
+    });
+    zone.addEventListener('dragover',function(e){e.preventDefault();zone.classList.add('drag');});
+    zone.addEventListener('dragleave',function(){zone.classList.remove('drag');});
+    zone.addEventListener('drop',function(e){
+      e.preventDefault();zone.classList.remove('drag');
+      if(e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0])uploadDoc(e.dataTransfer.files[0]);
+    });
+  })();
 
   // ===== chatbar (STUB: wire to marionette /think next pass) =====
   function chatSubmit(){

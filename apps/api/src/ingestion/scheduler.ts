@@ -45,6 +45,7 @@ async function runAllSyncs() {
     await drain('/classify', 50);
     await drain('/embed', 50);
     await drain('/enrich-task', 50);
+    await drain('/embed-doc', 50);
   } finally {
     running = false;
   }
