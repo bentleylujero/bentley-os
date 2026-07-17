@@ -179,7 +179,7 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | **qdrant** | 6333 (LAN only) | Vector storage for embeddings — **`emails` collection, 1536-dim cosine, one point per embedded email (count: see STATUS header), written by `marionette/src/embed.ts`** (derived index over `emails.body`, keyed on email id) | Reasoning (marionette's job); the source-of-truth body (that stays in Postgres) |
 | **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
 | **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min; **after each sync the cron also POSTs marionette `/classify` + `/embed` (limit 50 each) to auto-drain new mail — a thin forward, no reasoning in api**), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons**, **host/container metrics (`metrics.ts` — `GET /metrics/host` reads host CPU/mem/disk vitals; `GET /metrics/app` streams per-container CPU/mem via the Docker socket) feeding THE MONITOR dashboard modal** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
-| **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
+| **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log`. **Dispatches on `job.kind` (`'deploy'` | `'restart'`): `runJob` for build/commit/deploy+rollback, `runRestartJob` for `service-restart` (Mari's first hand — `docker compose restart <svc>` → health-poll → resolve, no build/commit/rollback; see §4)** | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
 | **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, **now consumed by `/think`**: system-status questions trigger an in-process `auditSummary(60)` read, injected into the reasoning prompt so Mari narrates real activity instead of claiming blindness** | Ingestion (api's job), deploy (deploy's job) |
 | **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `base` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
@@ -675,6 +675,41 @@ marionette can't reach the host), exactly the api-side read endpoint §8 anticip
 - **Commits:** `3a66aef` (propose/approve/deny/execute) + `b13c5ce` (Telegram buttons) +
   `80298a4`/`8ac171c` (Task A, async completion) + `1cdd19f` (Task B, commit+push wiring).
 
+**Milestone 5 — first hand `service-restart` — SHIPPED, verified live (`12b0211`):**
+Mari's first homelab "hand" — a `service-restart` action, ridden on the existing M4 action
+lifecycle as a new `kind` (NOT a parallel mechanism, per the M5 design in §6/§8). Approval-gated
+like every M4 action; this is the FIRST HAND built, not autonomy turned on — an Approve tap is
+still required. The auto-execute-low-risk tier (M5 proper) is a later step ON TOP of the hands.
+- **Verified end-to-end and committed at `12b0211` on origin/main**, clean tree, all services
+  healthy. Verified two ways: contractor path via direct API, and marionette path via a real
+  Telegram Approve tap — including the marionette self-teardown edge (a `service-restart`
+  targeting `marionette` recreates the container mid-flight), which held because `deploy` owns
+  the terminal write per `0af75f0`. ✅ completion push confirmed received in the Telegram app.
+- **The 4 committed code changes:**
+  - **`deploy/src/runner.ts`** — new **`runRestartJob(job)`**: `docker compose restart <svc>`
+    → `pollHealth` → `resolveAction` + audit. **No build, no commit, no rollback** — a restart
+    changes nothing on disk, so there's no last-good to roll back to; an unhealthy restart is a
+    terminal `failed` + notify (human-intervention, not auto-recover). Reuses `run` / `pollHealth`
+    / `audit` / `resolveAction` only. Dispatched in `pump()` by the new `job.kind` field.
+    `Job` gained **`kind: 'deploy' | 'restart'`**; `enqueue` gained a `kind` param **defaulting
+    to `'deploy'`** (existing deploys unaffected). The restart's `deploy.succeeded` row carries
+    current HEAD as `commit` so it stays a valid `lastGoodCommit` rollback baseline for later
+    build-deploys.
+  - **`deploy/src/index.ts`** — `POST /deploy` reads `body.kind` → passes it to `enqueue`.
+  - **`marionette/src/actions.ts`** — `executeAction` forks on `action.kind`: `service-restart`
+    → POSTs `{service, kind:'restart', action_id}`; everything else → the existing
+    `{service, commit_message, action_id}` path.
+  - **`marionette/src/index.ts`** — `POST /actions` validates a `service-restart` target against
+    the allow-list `{api, contractor, marionette}` at **propose** time (rejects e.g. `postgres`
+    with 400), not only at deploy time.
+- **Audit names reused** (`deploy.succeeded` / `deploy.failed`, NOT new `restart.*`) —
+  deliberate; the `kind:restart` marker in the payload distinguishes restart rows from
+  build-deploy rows on the same action names.
+- **Invocation is human-triggered:** Mari proposes → `/telegram/surface/:id` → Approve tap →
+  execute. The condition under which Mari self-proposes a restart is still deferred (row shape
+  already supports it via `proposed_by`).
+- **Commit:** `12b0211` (`service-restart` — Mari's first hand).
+
 **Marionette audit-sight — read endpoint AND `/think` integration both done, live:**
 - **`marionette/src/audit-read.ts`** — Mari's read-only "sight" over her own ledger. The
   read side of `audit.ts`: no new state, no shadow table, only SELECTs from `audit_log`
@@ -813,6 +848,8 @@ web UI; see §8**) → `5d45b8d` (feat(m3): Clair classifier — POST /classify)
 whisper/Dockerfile.bak) → `8ac171c` / `80298a4` (feat(m4): async deploy-completion → Telegram)
 → `7d79632` (feat(m2): Today dashboard) → `27f18b3` / `9f3f054` (feat(marionette):
 audit-sight) → `b13c5ce` / `3a66aef` (feat(m4): approval gate + Telegram buttons).
+(Since that last structural verification, `12b0211` shipped Mari's first hand `service-restart`
+— see the Milestone 5 subsection above. Confirm current HEAD/sync via `bin/session-start`.)
 
 **NOTE on the rollback-fix hash:** older text in this doc (§4 deploy subsection, §8) still
 refers to `52c3f72` as the rollback fix. The current impl is `b153b1e` (a `DRY_RUN=1` guard
@@ -843,8 +880,12 @@ scoped-git-checkout rollback (`52c3f72`).
 
 **Deploy service** (`~/bentley-os/deploy/`): serialized queue, reads last-good commit from
 `audit_log` → build → `up -d` → poll real `/health` over `backend` → success or
-auto-rollback, every step audited. `SERVICE_HEALTH` map covers `api`, `contractor`,
-`marionette` — **not `whisper`**, which must be rebuilt directly via
+auto-rollback, every step audited. **Now dispatches on `job.kind` in `pump()`: `'deploy'`
+(the build/commit/deploy + rollback flow via `runJob`) and `'restart'` (Mari's first hand
+`service-restart` via `runRestartJob` — `docker compose restart` + health-poll + resolve, no
+build/commit/rollback; see the Milestone 5 subsection). `enqueue`'s `kind` param defaults to
+`'deploy'`, so existing deploys are unaffected.** `SERVICE_HEALTH` map covers `api`,
+`contractor`, `marionette` — **not `whisper`**, which must be rebuilt directly via
 `docker compose up -d --build whisper` until it's added to the map. Deploys for covered
 services go through `POST /deploy` — never raw compose for those. Most recently used for the
 M2 dashboard deploy (job `b3da007c`), isolation-tested first, confirmed via `audit_log`'s
@@ -895,6 +936,11 @@ trigger for the same `/think` → `delegate` path.
   success.
 - `MARIONETTE_MODEL` env var (default `deepseek-v4-pro`; set `deepseek-v4-flash` for cheap
   iteration).
+- **Owns the M4 action lifecycle incl. the first hand.** `POST /actions` validates a
+  `service-restart` target against the `{api, contractor, marionette}` allow-list at propose
+  time; `executeAction` forks on `action.kind` (`service-restart` → `{service, kind:'restart',
+  action_id}` to deploy; everything else → the existing `{service, commit_message, action_id}`
+  path). See the Milestone 5 subsection (`12b0211`).
 - **Can now:** narrate her own system activity. `/think` consumes audit-sight — a
   keyword-gated in-process `auditSummary(60)` read is injected into the reasoning prompt for
   system-status questions, so Mari answers "what have you done today?" / "anything failing?"
@@ -908,8 +954,9 @@ trigger for the same `/think` → `delegate` path.
   neither recalls what the owner said two messages ago — "the file I just wrote" still means
   nothing), no delegation targets beyond contractor, no *autonomous* production-zone write
   actions — the M4 approval-gate layer IS built (propose→approve→deny→execute + Telegram
-  buttons, see M4 subsection), but contractor's own writes remain sandbox-only and nothing
-  auto-commits/auto-deploys from a delegated task without the human approval tap.
+  buttons, see M4 subsection) and the first hand `service-restart` ships on it (`12b0211`),
+  but contractor's own writes remain sandbox-only and nothing auto-commits/auto-deploys/
+  auto-restarts from a delegated task without the human approval tap.
 
 **OpenCode permission policy** (`~/bentley-os/opencode.json`) — **decided and live**:
 - Bentley doesn't use OpenCode interactively; only marionette/contractor call it, always
@@ -1105,11 +1152,19 @@ shipped.**
 **Milestone 5 — Earned autonomy.** Auto-execute low-risk tier only. **Rollback-scope fix
 done (`52c3f72`) — no longer blocked.**
 - **Design decided (2026-07-17): Mari's "hands" = fixed named actions via the M4 lifecycle,
-  Option C.** First hand `service-restart` (production-zone, allow-listed, approval-gated),
-  built as a sibling `runRestartJob` in deploy. This is the DESIGN of the hands, not
-  autonomy turned on — the first hand still requires a human Approve tap. See §8 for full
-  scope + the open `update_docs` generation-source fork. M5's auto-execute-low-risk-tier
-  is a later step ON TOP of these hands, not this.
+  Option C.**
+- ✅ **First hand `service-restart` — SHIPPED, verified live (`12b0211`).** Production-zone,
+  allow-listed (`{api, contractor, marionette}`), approval-gated (M4 tap — still requires a
+  human Approve). Built as a sibling `runRestartJob` in deploy, dispatched by a new `job.kind`
+  field; propose-time allow-list validation in marionette. Verified end-to-end via contractor
+  (direct API) and marionette (real Telegram Approve tap, incl. the self-teardown edge held by
+  `0af75f0`). This is the DESIGN of the hands proven with a real hand — NOT autonomy turned on.
+  See the Milestone 5 subsection in §4 and the hands entry in §8.
+- ⬜ **Hand #2 = `update_docs`** — BLOCKED on the open `update_docs` generation-source fork
+  (§8): where does regenerated prose come from — (A) marionette from box state, or (B) a
+  deterministic box script for the mechanical parts. Decide in its own session before building.
+- ⬜ **M5 proper — auto-execute the low-risk action tier** — a step ON TOP of the hands, NOT
+  started. The hands stay approval-gated until this lands.
 
 **Milestone 6 — Self-extension.** Tool registry + isolated test + approval + git automation +
 rollback, **reusing `deploy`'s** job/audit machinery — not a parallel build-and-rollback
@@ -1412,32 +1467,36 @@ system.
   host access, which lives in `api` not marionette (backend-only) — so a thin api-side read
   endpoint marionette calls, or proper metrics infra (cAdvisor/node-exporter). Decide
   cheap-path vs proper-infra when reached.
-  - **Mari's homelab "hands" — DECIDED (design), not built.** Option C: a small set of
+  - **Mari's homelab "hands" — hand #1 SHIPPED, hand #2 blocked.** Option C: a small set of
   fixed, named actions Mari can propose/execute, each a new `kind` in the existing M4
   `actions` lifecycle (NOT a parallel mechanism), widened deliberately. Reading real
   `runner.ts` (`d5c033f`) settled the shape:
-  - **First hand = `service-restart`** (chosen over `update_docs` for #1 — it has zero
-    generation step, so it proves the whole new muscle with nothing unresolved in the
-    middle). Fixed intent `{service}`, target constrained to the `SERVICE_HEALTH`
-    allow-list (api/contractor/marionette only — never postgres/qdrant/cloudflared).
-    Production zone, approval-gated (M4 tap), no auto-execute. `update_docs` is hand #2.
-  - **Deploy-side shape:** a SEPARATE `runRestartJob(job)` beside `runJob`, dispatched in
-    `pump()` by a new `job.kind` field (existing enqueues default to `'deploy'`). Reuses
-    the primitives (`run`, `pollHealth`, `audit`, `resolveAction`) but owns its short flow
-    — `runJob`'s build→health→rollback assumptions don't fit a restart, and threading
-    guards through it would risk the trusted `commit_deploy` path. `enqueue`'s
-    `SERVICE_HEALTH` gate still applies, so the allow-list guardrail is free.
-  - **Restart health semantics:** a restart that comes back unhealthy has NO last-good to
-    roll back to (nothing changed on disk) — terminal state is just `failed` + notify, a
-    human-intervention event, not auto-recover. Confirm this is intended before build.
-  - **api-restart notify edge:** restarting `api` kills the notify relay mid-push, but
+  - ✅ **First hand = `service-restart` — SHIPPED, verified live (`12b0211`).** (chosen over
+    `update_docs` for #1 — it has zero generation step, so it proves the whole new muscle with
+    nothing unresolved in the middle). Fixed intent `{service}`, target constrained to the
+    `{api, contractor, marionette}` allow-list at propose time (never postgres/qdrant/
+    cloudflared). Production zone, approval-gated (M4 tap), no auto-execute. Built as
+    `runRestartJob` dispatched by `job.kind` in deploy; verified end-to-end via contractor
+    (direct API) and marionette (real Telegram Approve tap, incl. the self-teardown edge held
+    by `0af75f0`). See the Milestone 5 subsection in §4 for the 4 committed changes.
+  - **Deploy-side shape (as built):** a SEPARATE `runRestartJob(job)` beside `runJob`,
+    dispatched in `pump()` by the `job.kind` field (existing enqueues default to `'deploy'`).
+    Reuses the primitives (`run`, `pollHealth`, `audit`, `resolveAction`) but owns its short
+    flow — `runJob`'s build→health→rollback assumptions don't fit a restart, and threading
+    guards through it would risk the trusted `commit_deploy` path. `enqueue`'s `SERVICE_HEALTH`
+    gate still applies, so the allow-list guardrail is free.
+  - **Restart health semantics (as built):** a restart that comes back unhealthy has NO
+    last-good to roll back to (nothing changed on disk) — terminal state is just `failed` +
+    notify, a human-intervention event, not auto-recover. Confirmed and shipped as designed.
+  - **api-restart notify edge (held):** restarting `api` kills the notify relay mid-push, but
     `notifyTelegram`'s ~40s retry already covers exactly this case (the commit_deploy-of-api
     scenario). No new stranding risk; `marionette` restart is fine (deploy owns the terminal
     write per `0af75f0`).
-  - **Invocation:** ship human-triggered first (Mari proposes → `/telegram/surface/:id` →
-    Approve tap → execute). The CONDITION under which Mari self-proposes a restart is
+  - **Invocation (as built):** human-triggered — Mari proposes → `/telegram/surface/:id` →
+    Approve tap → execute. The CONDITION under which Mari self-proposes a restart is
     deferred; row shape already supports it via `proposed_by`.
-- **`update_docs` generation source — OPEN, blocks hand #2 (not hand #1).** The valuable
+- **`update_docs` generation source — OPEN, now the thing blocking hand #2.** With hand #1
+  (`service-restart`) shipped, this fork is the immediate blocker on hand #2. The valuable
   part (regenerating Bible/STATUS *prose* to match reality) is the part that needs Mari's
   reasoning (§9) — and also the part most likely to LOSE hard-won detail (the exact failure
   the Copilot agent already causes). Two paths: (A) marionette generates the prose from
@@ -1446,8 +1505,10 @@ system.
   (counts/HEAD/service table) and deploy just commits it (no §9 concern, but can't touch
   the narrative — which is basically what `bin/session-start` already does for STATUS's
   header). Decide in its own session before hand #2 starts.
-- **`job.kind` dispatch default** — introducing `job.kind` in deploy means every existing
-  enqueue path must default to `'deploy'`. Trivial, logged so it's not missed at build.
+- **`job.kind` dispatch default — RESOLVED (shipped, `12b0211`).** `job.kind` was introduced
+  in deploy with `enqueue` defaulting to `'deploy'`, so every existing enqueue path is
+  unaffected; `pump()` dispatches `'restart'` to `runRestartJob` and `'deploy'` to `runJob`.
+  Confirmed live via the `service-restart` end-to-end runs.
 
 ---
 
