@@ -1,53 +1,30 @@
 # Bentley OS — The Bible
 after the github copilot curfuffle
-*The single source of truth. Rules, architecture, project map, current state — all here.
-When this conflicts with anything older, this wins. Regenerate from the repo whenever it
-drifts; don't hand-edit it into staleness.*
+*The reference doc: rules, architecture, project map, lessons, and the deep "why"
+narrative. When this conflicts with anything older, this wins.*
 
-*Last verified: 2026-07-15 (HEAD `eab7091`. **See `STATUS.md` at repo root for the 10-second front-page snapshot — machine-checkable header, services, milestones. This block is the deep narrative; STATUS.md is the front door.** **Latest: M3 CLOSED — the tasks panel (Slice A) shipped. New `tasks` object type (migration `0007`), owner-set priority + marionette-added insight via the enrich cron, and a rewritten `/` dashboard (Clair): a Right Now card + collapsible Everything-else, noise-tier email dropped. Live and verified in-browser. See §4 "Milestone 3 — tasks panel" and §6.** Prior session shipped M4 Task B: `commit_deploy`
-now actually commits + pushes before deploying.** `deploy/src/runner.ts`'s `commitAndPush()`
-does fetch origin/main → divergence check (refuses if origin/main has commits not in local
-HEAD, per the fetch-before-push rule from the Copilot-agent incident) → scoped `git add
-<SERVICE_PATH>` → `git commit` (via `-c user.name=/-c user.email=` flags, no global git config
-mutation) → `git push origin main`, gated entirely on whether `job.commitMessage` was passed.
-Any diverge/commit/push failure aborts before build — never deploys an uncommitted/unpushed
-state as if it were fine. `deploy` reuses Bentley's own box SSH credentials (bind-mounted
-`~/.ssh` read-only into the container, `openssh-client` added to the Dockerfile) — a
-deliberate choice over a separate deploy-only key, made explicitly aware deploy already has
-full docker.sock + repo access so this isn't a meaningful escalation. `marionette/src/
-actions.ts` forwards `intent.commit_message` through to `deploy`'s `/deploy` call.
-**Verified fully live**, not just isolation-tested: action id=7 (`commit_deploy`,
-service=marionette) real-fetched, real-committed (`59996a1`), real-pushed to `origin/main`,
-built, and passed health — the whole chain, for real, on the actual repo.
+> **Read this first — the two-file split.**
+> - **`STATUS.md`** (repo root) is the front door: the machine-checkable header (HEAD,
+>   migration count, live row counts, services up), plus a thin "where we are / what's
+>   next". It is regenerated from the box by **`bin/session-start`** — never hand-typed.
+>   **All live counts live there, nowhere else.**
+> - **This file** is the reference: rules (§2), system map (§3), lessons (§7), guardrails
+>   (§9), and the milestone narrative. It carries **no live counts** — where a number
+>   would go, it says "(see STATUS header)". Regenerate it only when a **rule or decision**
+>   changes, not when a count moves.
+>
+> **The drift test for where a line belongs:** *does it change when the 5-min cron runs?*
+> Yes → STATUS.md. No → here. (This split exists because the docs kept drifting: counts
+> got hand-typed and rotted, and the Copilot cloud agent periodically regenerates docs to
+> a stale snapshot — see §8. Facts a human never types can't rot.)
+>
+> **At session start:** run `bin/session-start` on the box and paste its header block.
+> That, not this file and not memory, is ground truth for current counts/HEAD.
 
-**Gap 2 — RESOLVED (`e54afc4`).** `deploy` now runs its git commands as the
-non-root `node` user (uid/gid 1000, joined to the host's `docker` group, gid
-983) instead of root. `node`'s uid exactly matches host user `spaghettios`,
-so no chown step is needed — objects land correctly owned by construction.
-Verified live: action id=9 (`commit_deploy`, service=marionette) real-ran,
-real-committed (`0b6c6b69`), real-pushed, built, passed health
-(`deploy.succeeded`, job `a2a8bb15`) — and the resulting `.git/objects` file
-was directly confirmed `spaghettios`-owned (`ls -la` on the specific object,
-not just a general sweep). A full-tree sweep
-(`find .git/objects -type f ! -user spaghettios`) also came back empty.
-
-**Gap 1 — RESOLVED (`0af75f0`).** The self-deploy watcher race is closed.
-Terminal action-state write + Telegram notify moved OUT of marionette's
-in-process `watchDeploy` and INTO `deploy`'s runner (`resolveAction`). `deploy`
-is structurally immune — nothing can target `service:"deploy"` for a job, so it
-can never be killed by a job it runs — and it holds the outcome firsthand, so
-there is no polling and no race window at all. `marionette/src/deploy-poll.ts`
-deleted; `watchDeploy`/`notifyTelegram` removed from `actions.ts`; `action_id`
-threaded through `enqueue()` + `POST /deploy`. Verified live: action id=10
-(`commit_deploy`, service=marionette, no commit_message) real-approved ->
-marionette torn down mid-flight -> `deploy` wrote `succeeded` after marionette
-was recreated (log `(6a6fc7ad) action 10 -> succeeded`) -> check delivered to
-Telegram. The exact scenario that stranded actions 7 and 9, now self-resolving.
-
-gap 2 (root-owned git objects) is RESOLVED by commit e54afc4 ("fix(m4): run deploy container as non-root node user, joined to docker gid 983"). That commit added USER node to deploy/Dockerfile, so the deploy container now runs as node (uid=1000, gid=1000) — matching host user spaghettios (uid=1000, gid=1000) exactly. Confirmed live: all .git/objects/* entries are owned by spaghettios, not root. Gap 1 (self-deploy watcher stranding an action in `executing`) remains OPEN, unchanged.
-
-M4 is now: gate slice ✅, Task A ✅, Task B ✅ — all done. Gap 1 RESOLVED, Gap 2
-resolved. **M4 fully clean, no open gaps.** See §4, §6, §8.)*
+*Last structural verification: 2026-07-17, against HEAD `f7b6819`. Milestone state: M0–M4
+complete (M4 clean, no open gaps — gate slice, Task A, Task B all shipped; both self-deploy
+and root-owned-git-object gaps resolved). M5 unblocked, not started. See §4/§6 for detail
+and §8 for the resolved-gap history.*
 
 ---
 
@@ -199,9 +176,9 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | Service | Port | Owns | Does NOT own |
 |---|---|---|---|
 | **postgres** | 5432 (LAN only) | All persisted state — ontology, sync tokens, audit log | Vector search (qdrant) |
-| **qdrant** | 6333 (LAN only) | Vector storage for embeddings — **`emails` collection, 1536-dim cosine, 755 points, written by `marionette/src/embed.ts`** (derived index over `emails.body`, keyed on email id) | Reasoning (marionette's job); the source-of-truth body (that stays in Postgres) |
+| **qdrant** | 6333 (LAN only) | Vector storage for embeddings — **`emails` collection, 1536-dim cosine, one point per embedded email (count: see STATUS header), written by `marionette/src/embed.ts`** (derived index over `emails.body`, keyed on email id) | Reasoning (marionette's job); the source-of-truth body (that stays in Postgres) |
 | **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
-| **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min; **after each sync the cron also POSTs marionette `/classify` + `/embed` (limit 50 each) to auto-drain new mail — a thin forward, no reasoning in api**), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
+| **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min; **after each sync the cron also POSTs marionette `/classify` + `/embed` (limit 50 each) to auto-drain new mail — a thin forward, no reasoning in api**), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons**, **host/container metrics (`metrics.ts` — `GET /metrics/host` reads host CPU/mem/disk vitals; `GET /metrics/app` streams per-container CPU/mem via the Docker socket) feeding THE MONITOR dashboard modal** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log` | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
 | **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, **now consumed by `/think`**: system-status questions trigger an in-process `auditSummary(60)` read, injected into the reasoning prompt so Mari narrates real activity instead of claiming blindness** | Ingestion (api's job), deploy (deploy's job) |
@@ -260,7 +237,7 @@ Running on the box at `~/bentley-os` (Ubuntu, LAN IP `172.16.30.4`). Absolute pa
 `/home/spaghettios/bentley-os` — always exact, never an alias (see §7 bind-mount lesson).
 
 **Infrastructure — all up:** api (healthy, 3000), postgres (healthy, 5432), redis (6379),
-qdrant (6333/6334 — reachable, `emails` collection with 755 points, actively used by the embed pipeline), cloudflared, dozzle (8080),
+qdrant (6333/6334 — reachable, `emails` collection (point count: see STATUS header), actively used by the embed pipeline), cloudflared, dozzle (8080),
 portainer (9000/8000/9443), uptime-kuma (healthy, 3001), deploy (healthy, 4000 /
 127.0.0.1), contractor (healthy, 4100, backend only), marionette (healthy, 4200, backend
 only), whisper (healthy, 4300, backend only, `base` model).
@@ -272,7 +249,7 @@ The pipeline lives in `marionette/src/embed.ts` (`POST /embed`) — see the embe
 below. **Local embeddings were considered and deliberately deferred:** a small local model
 (BGE-M3/Jina on the box's idle AMD RX 5700 XT) would arguably fit the whisper-class exception
 (small, mature, no frontier need) and keep email bodies off OpenAI's servers (privacy). But
-cost is a non-argument — embedding all 755 emails is ~2¢ one-time, well under $1/yr ongoing —
+cost is a non-argument — embedding the full backlog is ~2¢ one-time, well under $1/yr ongoing —
 so the only real driver for local would be privacy, and it carries the same unfinished
 ROCm/HIP GPU-setup cost parked for whisper (§8). Chose OpenAI to ship a working pipeline now;
 `embedText()` in `embed.ts` is a clean single-function swap seam if privacy ever wins. See §8.
@@ -301,7 +278,7 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   `0006`). Partial indexes: `idx_emails_unclassified btree (received_at DESC) WHERE
   classified_at IS NULL` (classifier work-queue, `0005`) and `idx_emails_unembedded btree
   (received_at DESC) WHERE body IS NOT NULL AND embedded_at IS NULL` (embed work-queue,
-  `0006`). **755 rows have a body; all 755 are embedded (`embedded_at` set, `remaining=0`).**
+  `0006`). **All rows with a body are embedded (live counts: see STATUS header — `emails` vs `embedded`).**
   (Classification is a separate axis and was NOT advanced this session — it stands where the
   classify slices left it; the embed pipeline does not classify and vice versa.)
 - `calendar_events` live columns confirmed: `id` (uuid), `source`, `source_id`, `title`,
@@ -314,7 +291,7 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   `marionette.think`, `marionette.delegate`, `marionette.classify` (Clair — one row per
   email classified, `target` = email id, `payload` = importance/category/confidence/passes),
   `marionette.embed` (one row per email embedded, `target` = email id, `payload` = model/dim;
-  755 success rows from this session's backlog drain), and `contractor.execute` — **including rows
+  one success row per email embedded, from the backlog drain), and `contractor.execute` — **including rows
   originating from Telegram messages**, indistinguishable in `audit_log` from any other
   `/think` caller (the audit trail doesn't currently tag which interface originated a
   request — see §8). Ingestion (gcal/gmail) does **not** currently write to `audit_log` —
@@ -440,7 +417,7 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
     consumes the `classified_at IS NULL` work-queue newest-first. **Each email audits
     independently** (`marionette.classify`, success/error per row) — one bad email can't sink
     the batch. Confirmed clean at batch size 50 (50/50 ok, 0 err, no timeout).
- - **Live data:** backlog fully drained — 869 of 869 emails classified, 822 embedded (as of 2026-07-15, HEAD `315ca5d`). Check live counts before relying on these (auto-drain cron moves them every 5 min).
+ - **Live data:** classification backlog fully drained (all emails classified; live counts in STATUS header). The auto-drain cron re-runs classify + embed every 5 min, so counts move on their own — always read STATUS, never a number pasted here.
     Tier spread over the classified set: ~3 high (≥70) / ~11 mid (40–69) / rest noise (<40),
     with natural score gaps at the 70 and 40 boundaries (cutoffs are robust — nothing sits at
     66–69 or 31–39). Top items correctly float up: GitHub token-expiry (90), Google security
@@ -503,7 +480,7 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   `body IS NOT NULL AND embedded_at IS NULL` work-queue newest-first; each email audits
   independently as `marionette.embed`.
 - **Qdrant `emails` collection** — created via REST PUT (size 1536, distance Cosine). Holds
-  **755 points** after the drain.
+  one point per embedded email after the drain (count: see STATUS header).
 - **Isolation-tested** twice (throwaway `docker run` on `bentley-os_backend` + `.env`, probed
   via in-container `node -e fetch` — no curl in `node:22-slim`): first a 3-email smoke test
   (all four checks green: embed report, Qdrant point count, `embedded_at` set, audit rows),
@@ -511,8 +488,8 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   (30/30 ok). **Deployed** via audited `POST /deploy {"service":"marionette"}` — job
   `0df49452` (initial) + `bf991272` (char-cap fix), both confirmed by `deploy.succeeded` audit
   rows, no rollback.
-- **Backlog fully drained:** 755/755 embedded (`remaining=0`, `done=755`), Qdrant
-  `points_count=755` — exact match. Total OpenAI cost ~2¢.
+- **Backlog fully drained:** every email with a body embedded (`remaining=0`), Qdrant
+  `points_count` matches the embedded count exactly (live: see STATUS header). Total OpenAI cost ~2¢.
 - **Still open in M3 (embed-adjacent):** (1) **embed auto-drain — DONE** (`a9e7bc1`, this
   session): the 5-min ingestion cron now auto-embeds new mail (POSTs marionette `/embed`
   limit 50 after each sync, alongside `/classify`). See the auto-drain subsection below. (2) **Grounded Q&A — DONE** (`a0ced26`): `retrieve.ts`
@@ -568,6 +545,40 @@ responsibilities panel. **M3-closing feature.**
 - **Commits:** `251a087` (migration `0007`) → `126e86a` (cron enrich drain) → `3c6863d`
   (`enrich-task.ts` + route) → `37d61be` (`tasks.ts` + mount) → `29d53d4` (owner-priority model)
   → `88df75c` + `5ab35ad` (dashboard rewrite).
+
+**CRT dashboard shell + THE MONITOR (host vitals) — done, live (`c0988b1`):**
+The tasks-panel `/` render (above) was reskinned into a **two-color CRT aesthetic** (phosphor
+green + purple only) and a live **host/container monitoring** modal was added. Still pure
+read/render in **api** — §9-clean, no reasoning; host access lives in api (backend-only
+marionette can't reach the host), exactly the api-side read endpoint §8 anticipated for
+"Tier 3" audit-sight.
+- **Main page `/` (`apps/api/src/routes/dashboard.ts`)** — the tasks-panel structure
+  SURVIVED the reskin: **Right Now** card (owner-priority tasks + think-first email `≥70` +
+  today's upcoming events), **Priority triage** projection, **What changed**, and a collapsed
+  **Everything else** (peripheral email 40–69 + past events + what-changed). Noise-tier email
+  (<40) still dropped. All DB strings `esc()`-escaped; same graceful-degradation try/catch;
+  `/health` untouched. The file is large (~709 lines after `c0988b1`, `+401/-308` over the
+  prior render) — mostly inline CSS/JS for the CRT shell.
+- **New route `apps/api/src/routes/metrics.ts`** — the host/container reader, mounted in
+  `routes/index.ts`. Two endpoints: **`GET /metrics/host`** (host CPU%/mem/disk vitals) and
+  **`GET /metrics/app`** (per-container CPU/mem, read from the Docker socket via
+  `/containers/{id}/stats?stream=false`). Read-only; no state of its own (utility, §3a — it
+  observes, it doesn't persist a fact about the owner's world).
+- **THE MONITOR modal** — opened from the sidebar (the earlier always-on compact bar was
+  removed). Sections: **Host / The Situation** feed, **THE DOCK** (containers as horizontal
+  berths, cargo-fill = load, CRT hover tooltip — evolved from an earlier "THE PORT" orbiting
+  ring that was replaced), **CPU Digital Twin** (per-core die grid), and **core-four vitals
+  gauges**. The dashboard polls `/metrics/host` + `/metrics/app` client-side.
+- **Real data, not mocked:** an earlier iteration (`2a2328f`) shipped the host-hardware
+  sections with fake data; `c0988b1` replaced it with real vitals off `/metrics/host` and
+  dropped the placeholders. Confirmed in the render (`h.cpu_pct` etc. read from the endpoint).
+- **NOT line-reviewed against a written spec** — this feature grew iteratively across
+  `a3cd82d`→`c0988b1` (see git log). It's live and behaves, but there was no isolation-test /
+  spec-conformance pass logged the way the M2/M3 slices were. Treat the render as
+  "observed-working," not "verified" — re-check against the actual page if precision matters.
+- **`/metrics/*` has no auth of its own** — it sits behind the same Cloudflare Access "Me"
+  gate as the rest of `spaghettios.bentleyos.me`. Fine at single-user scale; note it exposes
+  host telemetry, so don't widen that trust boundary without adding a gate.
 
 **Telegram integration — done end-to-end:**
 - **Bot:** `@spaghettios_bot`, created via BotFather. Token stored only in `.env`
@@ -775,8 +786,20 @@ responsibilities panel. **M3-closing feature.**
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `2947a9b`, working tree clean.
-Recent commits (newest first): `2947a9b` (fix(m3): cap embed input at 8k chars) → `a46d8ce`
+Local in sync with `origin/main` at `f7b6819`, working tree clean (`.claude/` untracked —
+skills dir, candidate for `.gitignore`). Confirm current HEAD/sync via `bin/session-start`,
+never trust a hash pasted in this doc.
+Recent commits (newest first): `f7b6819` / `a41fa7d` (docs: regen to c0988b1 — CRT dashboard;
+**Copilot-agent doc regens, see §8**) → `c0988b1` (feat(dashboard): full-screen CRT shell +
+real host vitals, drop fake data — the live monitoring dashboard) → `2a2328f` (feat(monitor):
+host-hardware sections — CPU per-core die grid + dual network scope + core-four gauges, fake
+data) → `934db8a` (fix(monitor): THE DOCK relative-bytes cargo fill) → `c2c684f`
+(feat(monitor): THE DOCK — horizontal berths, cargo-fill load, CRT hover tooltip) → `02516e2`
+(fix(monitor): ring labels radial fan-out) → `f896bdd` (feat(monitor): THE PORT station ring —
+containers orbit API core) → `47ca146` (feat(monitor): per-container CPU/mem via docker stats
+stream) → `a3cd82d` (feat(monitor): THE MONITOR dashboard panel) → `d72cdcf` / `835e673` /
+`e589a50` (**Copilot-agent STATUS/Bible regens, see §8**) → `eab7091` (prior verified HEAD) →
+… → `2947a9b` (fix(m3): cap embed input at 8k chars) → `a46d8ce`
 (feat(m3): email embedding pipeline — OpenAI 3-small -> Qdrant, POST /embed) → `b153b1e`
 (merge: DRY_RUN-aware scoped rollback into main — the current rollback impl; supersedes the
 `52c3f72` scoped-checkout described in older text, and deleted the redundant
@@ -878,7 +901,7 @@ trigger for the same `/think` → `delegate` path.
   from the real `audit_log` (see the audit-sight subsection above). This is *self*-sight over
   the ledger, NOT general memory — see the limit below.
 - **Still cannot:** ground answers in email *content* yet — the embed pipeline populated
-  Qdrant (755 vectors) but `retrieve.ts` + the `/think` data-question gate aren't built, so
+  Qdrant (see STATUS header for vector count) but `retrieve.ts` + the `/think` data-question gate aren't built, so
   Mari can't yet answer "what did the accountant's email say?" from real bodies (next slice).
   No cross-message conversation memory (`/think` is stateless — each Telegram message is a
   fresh request; audit-sight sees the *ledger*, retrieval will see email *content*, but
@@ -923,34 +946,6 @@ trigger for the same `/think` → `delegate` path.
 **Milestone 1 gap — resolved.** `event_attendees` and `organizer_id` population is
 **verified live** (organizer_id populated on real rows, event_attendees confirmed via a
 real test event). Milestone 1 is complete; see §6.
-
-**Dashboard rewritten (commit c0988b1):** full-screen CRT shell — fixed left sidebar
-(static ontology nav + status dots) + responsive card grid + floating chatbar STUB;
-two-color theme (phosphor green + purple only), scanline texture.
-- **Real host vitals:** the MONITOR modal's CPU die grid (8 cells), core-four gauges, and
-  load bars now derive from the live `/metrics/host` payload (`cpu_pct`/`mem`/`load`/`disk`).
-  The fake-data CONFIG random-walk IIFE was DELETED. The network throughput scope was DROPPED
-  entirely (no real backing in `/metrics/host`).
-- **MONITOR compact bar** removed from page body; the modal now opens from the SERVICES
-  sidebar item.
-- **Chatbar** is a STUB (appends to an in-DOM list, no `/think` fetch) — next pass wires it
-  to marionette `/think` as a thin api forward (§9), same pattern as the Telegram webhook.
-- **Preserved untouched:** all Postgres queries, `esc`/`clean`/`escT`/`fmtTime`/`fmtStamp`/`tierOf`
-  helpers, the `last_seen_at` fire-and-forget UPDATE, `addTask`/`markDone`, THE DOCK logic,
-  the 4s poll, `/health`.
-- **Note:** `/metrics/host` returns only aggregate `cpu_pct` (no per-core array); the 8-cell
-  die is a derived visualization of real aggregate heat (`cpu_pct` + `load-per-core` + `mem`),
-   not fabricated per-core data.
-
-### 2025-04-07
-
-Dashboard / rewritten (commit c0988b1):
-- Full-screen CRT shell: fixed left sidebar (static ontology nav + status dots) + responsive card grid + floating chatbar STUB; two-color theme (phosphor green + purple only), scanline texture.
-- Real host vitals: the MONITOR modal's CPU die grid (8 cells), core-four gauges, and load bars now derive from the live /metrics/host payload (cpu_pct/mem/load/disk). The fake-data CONFIG random-walk IIFE was DELETED. The network throughput scope was DROPPED entirely (no real backing in /metrics/host).
-- MONITOR compact bar removed from page body; the modal now opens from the SERVICES sidebar item.
-- Chatbar is a STUB (appends to an in-DOM list, no /think fetch) — next pass wires it to marionette /think as a thin api forward (§9), same pattern as the Telegram webhook.
-- Preserved untouched: all Postgres queries, esc/clean/escT/fmtTime/fmtStamp/tierOf helpers, the last_seen_at fire-and-forget UPDATE, addTask/markDone, THE DOCK logic, the 4s poll, /health.
-- Note: /metrics/host returns only aggregate cpu_pct (no per-core array); the 8-cell die is a derived visualization of real aggregate heat (cpu_pct + load-per-core + mem), not fabricated per-core data.
 
 ---
 
@@ -1067,8 +1062,8 @@ auto-drain + grounded Q&A + tasks panel all shipped.** In **marionette**, not ap
   a pure read view. Isolation-tested, deployed via audited `POST /deploy`, verified live. See §4.
 - ✅ **Embedding pipeline shipped** (`a46d8ce` + `2947a9b`): OpenAI `text-embedding-3-small`
   → Qdrant, via `marionette/src/embed.ts` + `POST /embed`, migration `0006`
-  (`embedded_at` + `idx_emails_unembedded`). Full 755-email backlog embedded, Qdrant
-  `emails` collection = 755 points. Embeddings-provider decision RESOLVED = OpenAI (§8).
+  (`embedded_at` + `idx_emails_unembedded`). Full backlog embedded, Qdrant
+  `emails` collection populated one point per email (counts: see STATUS header). Embeddings-provider decision RESOLVED = OpenAI (§8).
   Isolation-tested, deployed via audited `POST /deploy` (`deploy.succeeded`). See §4.
 - ⏳ **Grounded Q&A** — now **UNBLOCKED** (embeddings done). Next slice: `retrieve.ts` (embed
   query → Qdrant top-k → SELECT bodies from Postgres → inject as grounding via the pre-fetch
@@ -1274,6 +1269,16 @@ system.
   reverts THE_BIBLE.md to a stale cached snapshot when it runs (seen 3 times now) — so
   **`git fetch` + diff `origin/main` before every push is now standing practice**, not a
   one-off precaution.
+  - **Update (2026-07-17): the agent also regenerates *docs*, not just code.** Commits
+    `e589a50` ("Update STATUS.md with new counts"), `835e673` ("Revise THE_BIBLE.md"),
+    `d72cdcf` ("Refactor STATUS.md"), and the two terse `docs: regen to c0988b1`
+    (`a41fa7d`/`f7b6819`) are all agent-authored doc rewrites (terse capitalized messages are
+    its signature). **This is the confirmed root cause of the STATUS/Bible drift** that
+    prompted the two-file split: an agent was writing the docs to its own (stale) model of
+    state. The structural mitigation is now in place — **`bin/session-start`** regenerates
+    STATUS's fact header from the box (a human/agent never types the counts), and this Bible
+    carries no live counts to rot. If the agent starts reverting STATUS.md's header too,
+    revisit with a pre-push guard; until then the split + `git fetch`-before-push is enough.
 - **Docs cleanup:** old `.md` files (`00_NORTH_STAR`, `01_CURRENT_STATE`, `02_DECISIONS`,
   `03_ROADMAP`) retired in favor of this Bible. Remove from the project once trusted.
 - **Rollback scope — RESOLVED** (current impl `b153b1e`, supersedes `52c3f72`): unscoped
@@ -1297,7 +1302,7 @@ system.
   true "last synced" signal.
 - **Embeddings provider — RESOLVED = OpenAI `text-embedding-3-small`** (1536-dim, cosine),
   external API, consistent with §2.4. The embed pipeline (`marionette/src/embed.ts`,
-  `POST /embed`, migration `0006`) is live and the full 755-email backlog is embedded; Qdrant
+  `POST /embed`, migration `0006`) is live and the full backlog is embedded; Qdrant
   is now used. **Local-model alternative deliberately deferred, not foreclosed:** a small
   local model on the box's idle AMD RX 5700 XT would plausibly fit the whisper-class exception
   and keep email bodies off OpenAI (privacy), but cost is a non-argument (~2¢ one-time, <$1/yr)
@@ -1316,7 +1321,7 @@ system.
   `runAllSyncs` body is now `try/finally`-wrapped so the `running` guard can't strand `true`.
   Isolation-tested on `bentley-os_backend`, deployed job `4c205049` (`deploy.succeeded`). New
   mail self-triages and self-embeds; backlog also drains 50+50/tick until caught up. (Note:
-  the historical "685 unclassified / 778 total" figures elsewhere in this doc are stale —
+  any hardcoded email-count figures in older revisions of this doc are stale —
   check live counts before relying on them.)
 - **`whisper-laptop` Cloudflare service token exposed in plaintext in chat multiple times
   across sessions** (initial setup, then again during the Service Auth policy debugging).
