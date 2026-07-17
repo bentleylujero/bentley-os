@@ -1,63 +1,39 @@
 #!/usr/bin/env bash
+# Bentley OS — session-start: emit ground-truth header from the box.
+# Read-only. Paste output at the top of a new Claude session.
 set -euo pipefail
-
 cd "$(dirname "$0")/.."
-STATUS="STATUS.md"
 
-psql() { docker exec bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -t -c "$1" | tr -d '[:space:]'; }
+git fetch origin --quiet 2>/dev/null || true
 
-live() {
-  case "$1" in
-    migrations)  ls supabase/migrations/ | wc -l | tr -d ' ' ;;
-    services_up) docker compose ps --status running | tail -n +2 | wc -l | tr -d ' ' ;;
-    emails)      psql "SELECT count(*) FROM emails" ;;
-    classified)  psql "SELECT count(*) FROM emails WHERE classified_at IS NOT NULL" ;;
-    embedded)    psql "SELECT count(*) FROM emails WHERE embedded_at IS NOT NULL" ;;
-    actions)     psql "SELECT count(*) FROM actions" ;;
-    events)      psql "SELECT count(*) FROM calendar_events" ;;
-    *)           echo "?" ;;
-  esac
-}
+HEAD_SHORT=$(git rev-parse --short HEAD)
+SYNC=$(git status -sb | head -1)
+MIGRATIONS=$(ls supabase/migrations/ | wc -l | tr -d ' ')
+SERVICES=$(docker compose ps --status running | tail -n +2 | wc -l | tr -d ' ')
 
-drift=0
-echo "Bentley OS — session-start drift check"
-echo "expected (STATUS.md) vs live (box)"
-echo "----------------------------------------"
+read -r EMAILS CLASSIFIED EMBEDDED ACTIONS EVENTS TASKS <<<"$(
+  docker exec bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -tA -F' ' -c "
+    SELECT
+      (SELECT count(*) FROM emails),
+      (SELECT count(*) FROM emails WHERE classified_at IS NOT NULL),
+      (SELECT count(*) FROM emails WHERE embedded_at IS NOT NULL),
+      (SELECT count(*) FROM actions),
+      (SELECT count(*) FROM calendar_events),
+      (SELECT count(*) FROM tasks);"
+)"
 
-while IFS= read -r line; do
-  field=$(echo "$line"    | awk -F: '{print $1}' | tr -d '[:space:]')
-  expected=$(echo "$line" | awk '{print $2}')
-  [ -z "$field" ] && continue
-
-  # head is an ancestry check, not exact-match: STATUS's head being behind HEAD is
-  # expected (a commit can't record its own hash), so report "behind by N", not drift.
-  if [ "$field" = "head" ]; then
-    cur=$(git rev-parse --short HEAD)
-    if [ "$expected" = "$cur" ]; then
-      printf '  \u2713 %-12s %s\n' "$field" "$cur"
-    elif git merge-base --is-ancestor "$expected" HEAD 2>/dev/null; then
-      n=$(git rev-list --count "$expected"..HEAD)
-      printf '  \u2192 %-12s %s (STATUS behind by %s commit(s); box at %s)\n' "$field" "$expected" "$n" "$cur"
-    else
-      printf '  \u2717 %-12s expected %s, got %s (diverged/unknown — real drift)\n' "$field" "$expected" "$cur"
-      drift=1
-    fi
-    continue
-  fi
-
-  got=$(live "$field")
-  if [ "$expected" = "$got" ]; then
-    printf '  \u2713 %-12s %s\n' "$field" "$got"
-  else
-    printf '  \u2717 %-12s expected %s, got %s (drift)\n' "$field" "$expected" "$got"
-    drift=1
-  fi
-done < <(grep -E '^[a-z_]+: +[^ ]+ +check:' "$STATUS")
-
-echo "----------------------------------------"
-if [ "$drift" -eq 0 ]; then
-  echo "In sync with STATUS.md (head may be cleanly behind — that's expected)."
-else
-  echo "DRIFT detected — STATUS.md is stale or the box moved. Regenerate STATUS.md's header at the next checkpoint."
-fi
-exit "$drift"
+cat <<REPORT
+=== BENTLEY OS — GROUND TRUTH @ $(date -u +%Y-%m-%dT%H:%MZ) ===
+generated_at: $(date -u +%Y-%m-%d)
+head:         $HEAD_SHORT
+git_sync:     $SYNC
+migrations:   $MIGRATIONS
+services_up:  $SERVICES
+emails:       $EMAILS
+classified:   $CLASSIFIED
+embedded:     $EMBEDDED   (gap from emails is normal — cron drains on next tick)
+actions:      $ACTIONS
+events:       $EVENTS
+tasks:        $TASKS
+=== paste this block at the start of a Claude session ===
+REPORT
