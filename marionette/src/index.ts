@@ -9,6 +9,7 @@ import { createAction, listActions, getAction, approveAction, denyAction } from 
 import { auditSummary } from './audit-read.ts';
 import { classifyBatch } from './classify.ts';
 import { embedBatch } from './embed.ts';
+import { embedDocBatch } from './embed-doc.ts';
 import { enrichBatch } from './enrich-task.ts';
 import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts';
 import { isDataQuestion, formatRetrievalForPrompt } from './data-gate.ts';
@@ -72,6 +73,25 @@ app.post('/embed', async (c) => {
     return c.json({ error: 'embed batch failed', detail: err?.message || String(err) }, 500);
   }
 });
+// POST /embed-doc  { "limit": 20 }   (default 20, cap 200)
+// Chunks + embeds un-embedded documents (body present, embedded_at null) via
+// Chonkie -> OpenAI, upserts chunk vectors into Qdrant's `documents` collection.
+// Mirrors /embed: batch-bounded, per-DOCUMENT audit, one bad doc can't sink the
+// batch. Chunking/embedding lives here, not api. First long-form source (§8).
+app.post('/embed-doc', async (c) => {
+  let body: any = {};
+  try { body = await c.req.json(); } catch { /* empty body is fine */ }
+  let limit = Number(body?.limit);
+  if (!Number.isInteger(limit) || limit < 1) limit = 20;
+  if (limit > 200) limit = 200;
+  try {
+    const report = await embedDocBatch(limit);
+    return c.json(report);
+  } catch (err: any) {
+    return c.json({ error: 'embed-doc batch failed', detail: err?.message || String(err) }, 500);
+  }
+});
+
 
 
 // POST /enrich-task  { "limit": 20 }   (default 20)
