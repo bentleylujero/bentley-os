@@ -924,6 +924,24 @@ trigger for the same `/think` → `delegate` path.
 **verified live** (organizer_id populated on real rows, event_attendees confirmed via a
 real test event). Milestone 1 is complete; see §6.
 
+**Dashboard rewritten (commit c0988b1):** full-screen CRT shell — fixed left sidebar
+(static ontology nav + status dots) + responsive card grid + floating chatbar STUB;
+two-color theme (phosphor green + purple only), scanline texture.
+- **Real host vitals:** the MONITOR modal's CPU die grid (8 cells), core-four gauges, and
+  load bars now derive from the live `/metrics/host` payload (`cpu_pct`/`mem`/`load`/`disk`).
+  The fake-data CONFIG random-walk IIFE was DELETED. The network throughput scope was DROPPED
+  entirely (no real backing in `/metrics/host`).
+- **MONITOR compact bar** removed from page body; the modal now opens from the SERVICES
+  sidebar item.
+- **Chatbar** is a STUB (appends to an in-DOM list, no `/think` fetch) — next pass wires it
+  to marionette `/think` as a thin api forward (§9), same pattern as the Telegram webhook.
+- **Preserved untouched:** all Postgres queries, `esc`/`clean`/`escT`/`fmtTime`/`fmtStamp`/`tierOf`
+  helpers, the `last_seen_at` fire-and-forget UPDATE, `addTask`/`markDone`, THE DOCK logic,
+  the 4s poll, `/health`.
+- **Note:** `/metrics/host` returns only aggregate `cpu_pct` (no per-core array); the 8-cell
+  die is a derived visualization of real aggregate heat (`cpu_pct` + `load-per-core` + `mem`),
+  not fabricated per-core data.
+
 ---
 
 ## 5. Data model
