@@ -1104,6 +1104,12 @@ shipped.**
 
 **Milestone 5 — Earned autonomy.** Auto-execute low-risk tier only. **Rollback-scope fix
 done (`52c3f72`) — no longer blocked.**
+- **Design decided (2026-07-17): Mari's "hands" = fixed named actions via the M4 lifecycle,
+  Option C.** First hand `service-restart` (production-zone, allow-listed, approval-gated),
+  built as a sibling `runRestartJob` in deploy. This is the DESIGN of the hands, not
+  autonomy turned on — the first hand still requires a human Approve tap. See §8 for full
+  scope + the open `update_docs` generation-source fork. M5's auto-execute-low-risk-tier
+  is a later step ON TOP of these hands, not this.
 
 **Milestone 6 — Self-extension.** Tool registry + isolated test + approval + git automation +
 rollback, **reusing `deploy`'s** job/audit machinery — not a parallel build-and-rollback
@@ -1406,6 +1412,42 @@ system.
   host access, which lives in `api` not marionette (backend-only) — so a thin api-side read
   endpoint marionette calls, or proper metrics infra (cAdvisor/node-exporter). Decide
   cheap-path vs proper-infra when reached.
+  - **Mari's homelab "hands" — DECIDED (design), not built.** Option C: a small set of
+  fixed, named actions Mari can propose/execute, each a new `kind` in the existing M4
+  `actions` lifecycle (NOT a parallel mechanism), widened deliberately. Reading real
+  `runner.ts` (`d5c033f`) settled the shape:
+  - **First hand = `service-restart`** (chosen over `update_docs` for #1 — it has zero
+    generation step, so it proves the whole new muscle with nothing unresolved in the
+    middle). Fixed intent `{service}`, target constrained to the `SERVICE_HEALTH`
+    allow-list (api/contractor/marionette only — never postgres/qdrant/cloudflared).
+    Production zone, approval-gated (M4 tap), no auto-execute. `update_docs` is hand #2.
+  - **Deploy-side shape:** a SEPARATE `runRestartJob(job)` beside `runJob`, dispatched in
+    `pump()` by a new `job.kind` field (existing enqueues default to `'deploy'`). Reuses
+    the primitives (`run`, `pollHealth`, `audit`, `resolveAction`) but owns its short flow
+    — `runJob`'s build→health→rollback assumptions don't fit a restart, and threading
+    guards through it would risk the trusted `commit_deploy` path. `enqueue`'s
+    `SERVICE_HEALTH` gate still applies, so the allow-list guardrail is free.
+  - **Restart health semantics:** a restart that comes back unhealthy has NO last-good to
+    roll back to (nothing changed on disk) — terminal state is just `failed` + notify, a
+    human-intervention event, not auto-recover. Confirm this is intended before build.
+  - **api-restart notify edge:** restarting `api` kills the notify relay mid-push, but
+    `notifyTelegram`'s ~40s retry already covers exactly this case (the commit_deploy-of-api
+    scenario). No new stranding risk; `marionette` restart is fine (deploy owns the terminal
+    write per `0af75f0`).
+  - **Invocation:** ship human-triggered first (Mari proposes → `/telegram/surface/:id` →
+    Approve tap → execute). The CONDITION under which Mari self-proposes a restart is
+    deferred; row shape already supports it via `proposed_by`.
+- **`update_docs` generation source — OPEN, blocks hand #2 (not hand #1).** The valuable
+  part (regenerating Bible/STATUS *prose* to match reality) is the part that needs Mari's
+  reasoning (§9) — and also the part most likely to LOSE hard-won detail (the exact failure
+  the Copilot agent already causes). Two paths: (A) marionette generates the prose from
+  box state (§9-pure, architecturally right, operationally risky — wholesale LLM regen can
+  hallucinate away detail); (B) a deterministic box script templates the mechanical parts
+  (counts/HEAD/service table) and deploy just commits it (no §9 concern, but can't touch
+  the narrative — which is basically what `bin/session-start` already does for STATUS's
+  header). Decide in its own session before hand #2 starts.
+- **`job.kind` dispatch default** — introducing `job.kind` in deploy means every existing
+  enqueue path must default to `'deploy'`. Trivial, logged so it's not missed at build.
 
 ---
 
