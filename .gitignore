@@ -8,3 +8,4 @@ volumes/
 client_secret.json
 token.json
 whisper/Dockerfile.bak
+.claude/
