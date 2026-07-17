@@ -28,6 +28,8 @@ embedded:     check: SELECT count(*) FROM emails WHERE embedded_at IS NOT NULL
 actions:      check: SELECT count(*) FROM actions
 events:       check: SELECT count(*) FROM calendar_events
 tasks:        check: SELECT count(*) FROM tasks
+documents:    check: SELECT count(*) FROM documents
+doc_chunks:   check: SELECT count(*) FROM document_chunks
 ```
 
 *Normal, not a fault: `embedded` trails `emails`. Newly-synced mail waits for
@@ -43,14 +45,14 @@ block + the relevant section below. That's the only time this file changes.*
 
 | Service | Port | Role |
 |---|---|---|
-| **api** | 3000 | HTTP surface — dashboard (CRT + MONITOR), ingestion, host/app metrics, OpenCode proxy, Telegram webhook, tasks CRUD |
+| **api** | 3000 | HTTP surface — dashboard (CRT + MONITOR), ingestion, host/app metrics, OpenCode proxy, Telegram webhook, tasks CRUD, document upload |
 | **postgres** | 5432 | All persisted state (ontology, audit ledger) |
 | **qdrant** | 6333 | Vector index — `emails` collection, 1536-dim |
 | **redis** | 6379 | Cache (unused by app yet) |
-| **marionette** | 4200 | The AI brain — reasoning, classify, embed, task-enrich, action lifecycle |
+| **marionette** | 4200 | The AI brain — reasoning, classify, embed, task-enrich, document-embed (Chonkie chunks → Qdrant), action lifecycle |
 | **contractor** | 4100 | Coding/build layer — real OpenCode sessions |
 | **deploy** | 4000 | Build + restart + health-check + audited rollback (dispatches on `job.kind`: build/deploy + `service-restart`) |
-| **whisper** | 4300 | Self-hosted speech-to-text (`base` model) |
+| **whisper** | 4300 | Self-hosted speech-to-text (`small.en` model, Vulkan GPU) |
 | **cloudflared** | — | Public tunnel (gated on api health) |
 | portainer / dozzle / uptime-kuma | 9000 / 8080 / 3001 | Ops visibility |
 
@@ -67,7 +69,7 @@ Box: `spaghettios@172.16.30.4`, `/home/spaghettios/bentley-os`. One
 | — | Orchestrator (deploy, contractor, marionette, Telegram) | ✅ done |
 | 1 | Data in (Gmail + Calendar) | ✅ done |
 | 2 | Insight out (dashboard: Today, What changed, Triage) | ✅ done |
-| 3 | AI layer (classify, embed, grounded Q&A, auto-drain, tasks panel) | ✅ done |
+| 3 | AI layer (classify, embed, grounded Q&A, auto-drain, tasks panel, document ingestion) | ✅ done |
 | 4 | Action layer (approval-gated) | ✅ done — no open gaps |
 | 5 | Earned autonomy (auto-execute low-risk tier) | 🟡 first hand `service-restart` shipped; auto-execute tier not started |
 | 6 | Self-extension (system ships its own tools) | ⬜ not started |
@@ -79,7 +81,19 @@ Dashboard at `spaghettios.bentleyos.me` (Clair).
 
 ## Next action
 
-**Most recent ship: Mari's first homelab "hand" — `service-restart`.** An
+**Most recent ship: document ingestion (`1eef3dc` + `d8342f7`).** The first
+long-form RAG source. api `POST /documents` (multipart, `extractText()` md/txt
+seam — DOCX/PDF → clean 415, the deferred follow-on) writes a `documents` row;
+a dashboard dropzone at the bottom of the Right Now card uploads with no reload;
+the 5-min cron drains marionette `/embed-doc` (limit 50) each tick. Marionette
+`/embed-doc` chunks each doc via Chonkie `RecursiveChunker` (512-token) → shared
+`embedText()` → Qdrant `documents` collection, migration `0008` (`documents` +
+`document_chunks`). Deployed via audited `POST /deploy` (job `100e39e3`,
+`deploy.succeeded`); verified end-to-end with both downstream effects checked
+directly (`documents.embedded_at` timestamp + Qdrant point count), not the drain's
+own report. See Bible §4 document-ingestion subsection + §6/§8.
+
+**Before that: Mari's first homelab "hand" — `service-restart`** (`12b0211`). An
 approval-gated `service-restart` action, ridden on the M4 action lifecycle as a
 new `job.kind` (NOT a parallel mechanism). Built as a sibling `runRestartJob` in
 deploy (`docker compose restart <svc>` → health-poll → resolve, no build/commit/
@@ -94,10 +108,9 @@ Bible §4 Milestone 5 subsection + §6/§8.
 preserved) plus a sidebar MONITOR modal: host/situation feed, THE DOCK (container
 berths + load), CPU digital twin (per-core die grid), core-four gauges. Real host
 vitals via `apps/api/src/routes/metrics.ts` (`GET /metrics/host`, `GET /metrics/app`
-over the Docker socket), behind the same Cloudflare Access "Me" gate.
-
-**Debt on that ship:** it went out iteratively with **no isolation-test / spec
-pass** — observed-working, not reviewed. Worth a deliberate review later.
+over the Docker socket), behind the same Cloudflare Access "Me" gate. **Debt:** it
+went out iteratively with **no isolation-test / spec pass** — observed-working, not
+reviewed. Worth a deliberate review later.
 
 **Open choices / next work:**
 - **Hand #2 = `update_docs`** — BLOCKED on a generation-source call (Bible §8):
@@ -107,6 +120,10 @@ pass** — observed-working, not reviewed. Worth a deliberate review later.
   — that's the whole point of hand #2.)
 - **M5 proper — auto-execute the low-risk action tier** — a step ON TOP of the
   hands; the hands stay approval-gated until it lands. Not started.
+- **Document ingestion follow-on: DOCX/PDF extraction** — the `extractText()`
+  seam in `documents.ts` is ready (other mimes → clean 415 today); wiring a real
+  extractor is the next slice. Grounded Q&A over documents (`retrieve.ts` reading
+  the `documents` Qdrant collection) is the other natural next step.
 - Tasks feature follow-ons: Slice B (self-email → task), Slice C (insight/help
   layer).
 

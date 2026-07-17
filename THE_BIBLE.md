@@ -21,10 +21,12 @@ narrative. When this conflicts with anything older, this wins.*
 > **At session start:** run `bin/session-start` on the box and paste its header block.
 > That, not this file and not memory, is ground truth for current counts/HEAD.
 
-*Last structural verification: 2026-07-17, against HEAD `f7b6819`. Milestone state: M0–M4
+*Last structural verification: 2026-07-17, against HEAD `d8342f7`. Milestone state: M0–M4
 complete (M4 clean, no open gaps — gate slice, Task A, Task B all shipped; both self-deploy
-and root-owned-git-object gaps resolved). M5 unblocked, not started. See §4/§6 for detail
-and §8 for the resolved-gap history.*
+and root-owned-git-object gaps resolved). M3 extended with the document-ingestion pipeline
+(marionette `1eef3dc` + api `d8342f7`, live) — DOCX/PDF extraction the deferred follow-on.
+M5's first hand `service-restart` shipped (`12b0211`); auto-execute tier not started. See §4/§6
+for detail and §8 for the resolved-gap history.*
 
 ---
 
@@ -176,7 +178,7 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | Service | Port | Owns | Does NOT own |
 |---|---|---|---|
 | **postgres** | 5432 (LAN only) | All persisted state — ontology, sync tokens, audit log | Vector search (qdrant) |
-| **qdrant** | 6333 (LAN only) | Vector storage for embeddings — **`emails` collection, 1536-dim cosine, one point per embedded email (count: see STATUS header), written by `marionette/src/embed.ts`** (derived index over `emails.body`, keyed on email id) | Reasoning (marionette's job); the source-of-truth body (that stays in Postgres) |
+| **qdrant** | 6333 (LAN only) | Vector storage for embeddings — **two 1536-dim cosine collections: `emails` (one point per embedded email, written by `marionette/src/embed.ts`, keyed on email id) and `documents` (one point per Chonkie chunk, written by `marionette/src/embed-doc.ts`, keyed on chunk id; counts: see STATUS header)** (derived indexes over `emails.body` / `document_chunks.text`) | Reasoning (marionette's job); the source-of-truth body/chunk text (that stays in Postgres) |
 | **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
 | **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min; **after each sync the cron also POSTs marionette `/classify` + `/embed` (limit 50 each) to auto-drain new mail — a thin forward, no reasoning in api**), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons**, **host/container metrics (`metrics.ts` — `GET /metrics/host` reads host CPU/mem/disk vitals; `GET /metrics/app` streams per-container CPU/mem via the Docker socket) feeding THE MONITOR dashboard modal** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log`. **Dispatches on `job.kind` (`'deploy'` | `'restart'`): `runJob` for build/commit/deploy+rollback, `runRestartJob` for `service-restart` (Mari's first hand — `docker compose restart <svc>` → health-poll → resolve, no build/commit/rollback; see §4)** | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
@@ -225,8 +227,10 @@ storing vectors is a derived index over ontology objects (utility); a service lo
 asked about X on date Y" as a queryable fact would not be.
 
 **Current utility services:** `redis` (cache), `qdrant` (vector index — now populated: the
-`emails` collection holds one 1536-dim vector per embedded email, a derived index over
-`emails.body`; the body itself stays in Postgres, the one source of truth), `portainer` /
+`emails` collection holds one 1536-dim vector per embedded email (derived index over
+`emails.body`), and the `documents` collection holds one vector per Chonkie chunk (derived index
+over `document_chunks.text`); the bodies/chunk text stay in Postgres, the one source of truth),
+`portainer` /
 `dozzle` / `uptime-kuma` (ops visibility), `deploy` (build/rollback — audits *to*
 `audit_log`, doesn't own a fact of its own).
 ---
@@ -265,8 +269,11 @@ state).
 email-intelligence columns + partial index (from `0005_email_intelligence.sql`, `4c39435`,
 M3 — `body`/`reason`/`confidence`/`classified_at` on `emails` + `idx_emails_unclassified`),
 and the embedding-status column + partial index (from `0006_email_embeddings.sql`, `a46d8ce`,
-M3 — `embedded_at` on `emails` + `idx_emails_unembedded`), all applied live. Migrations live
-at `supabase/migrations/` (six files, `0001`–`0006`).
+M3 — `embedded_at` on `emails` + `idx_emails_unembedded`), the `tasks` object type (from
+`0007_tasks.sql`, M3 — see the tasks-panel subsection below), and the document-ingestion
+ontology (from `0008_documents.sql`, M3 — `documents` + `document_chunks` tables +
+`idx_documents_unembedded`, see the document-ingestion subsection below), all applied live.
+Migrations live at `supabase/migrations/` (eight files, `0001`–`0008`).
 - `emails` — the Clair classifier (`marionette/src/classify.ts`) **actively writes**
   `category`, `importance`, `reason`, `confidence`, `classified_at`. Don't recreate any of
   them. Live columns confirmed via `\d emails`: `id` (uuid), `source`, `source_id`,
@@ -291,8 +298,9 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   `marionette.think`, `marionette.delegate`, `marionette.classify` (Clair — one row per
   email classified, `target` = email id, `payload` = importance/category/confidence/passes),
   `marionette.embed` (one row per email embedded, `target` = email id, `payload` = model/dim;
-  one success row per email embedded, from the backlog drain), and `contractor.execute` — **including rows
-  originating from Telegram messages**, indistinguishable in `audit_log` from any other
+  one success row per email embedded, from the backlog drain), `marionette.embed_doc` (one row
+  per document embedded, `target` = document id, `payload` = model/dim/chunks), and
+  `contractor.execute` — **including rows originating from Telegram messages**, indistinguishable in `audit_log` from any other
   `/think` caller (the audit trail doesn't currently tag which interface originated a
   request — see §8). Ingestion (gcal/gmail) does **not** currently write to `audit_log` —
   stdout only. Open item.
@@ -499,6 +507,71 @@ at `supabase/migrations/` (six files, `0001`–`0006`).
   no chunk needed; `retrieve.ts` leaves a chunk-ready seam. See §8.
 - **Commits:** `a46d8ce` (`feat(m3): email embedding pipeline — OpenAI 3-small -> Qdrant,
   POST /embed`) → `2947a9b` (`fix(m3): cap embed input at 8k chars`).
+
+**Milestone 3 — document ingestion pipeline — done, live (first long-form RAG source):**
+The long-form counterpart to the email embedding pipeline above — the "first long-form source"
+that email's one-vector design deferred chunking to. **Email = one vector; a document = many
+chunks = many vectors.** Ships in two halves: marionette embeds (`1eef3dc`), api uploads
+(`d8342f7`, HEAD).
+- **Migration `0008_documents.sql`** (applied live): two ontology-bound object types (§3a — docs
+  are durable facts about the owner's world). `documents` — one row per uploaded file; `body` is
+  the source of truth in Postgres (`id` uuid, `title`, `source` default `'upload'`, `source_id`,
+  `mime`, `body`, `char_count`, `created_at`, `embedded_at` — null = not yet chunked/embedded).
+  `document_chunks` — one row per Chonkie chunk, the RAG granularity unit (`document_id` FK
+  ON DELETE CASCADE, `chunk_index`, `text`, `token_count`, `UNIQUE (document_id, chunk_index)`).
+  Partial index `idx_documents_unembedded (created_at DESC) WHERE embedded_at IS NULL` — the embed
+  work-queue, mirroring `0006`'s `idx_emails_unembedded`.
+- **`marionette/src/embed-doc.ts`** (`1eef3dc`) — clones `embed.ts` structure: same
+  `postgres(DATABASE_URL, {max:2, idle_timeout:20})` client, per-**document** independent audit
+  (`marionette.embed_doc`), one bad document can't sink the batch.
+  - **Chunking via Chonkie `RecursiveChunker`** (`@chonkiejs/core`, 512-token target, safely under
+    3-small's 8191-token cap). **This is the chunker the email pipeline's §8 note left "not
+    chosen" — now chosen and shipped, in TypeScript (§2 — no Python service).**
+  - **Reuses the shared `embedText()` — the §8 swap seam — does NOT reimplement it.** Same OpenAI
+    `text-embedding-3-small`, 1536-dim, cosine.
+  - **`upsertChunkVector`** — Qdrant `PUT /collections/documents/points`, point id = the chunk
+    uuid, light payload (`document_id`/`chunk_index`/`title`) for display/filter at retrieval.
+    **Chunk TEXT is NOT stored in Qdrant** — it stays in Postgres (`document_chunks`, one source of
+    truth); `retrieve.ts` will SELECT it back by id.
+  - **All-chunks-or-none:** chunk rows upsert first (idempotent on the `(document_id, chunk_index)`
+    unique constraint), then embed + Qdrant-upsert, and only after every chunk lands is
+    `documents.embedded_at` stamped. A mid-document failure leaves `embedded_at` NULL, so the whole
+    doc is re-picked on the next drain — nothing corrupts, nothing double-counts (verified: a
+    re-run drain does not grow the point count).
+  - **`POST /embed-doc {"limit":N}`** (default 20, cap 200) in `marionette/src/index.ts`, mirrors
+    `/embed` — drains the `body IS NOT NULL AND embedded_at IS NULL` queue newest-first.
+- **`apps/api/src/routes/documents.ts`** (`d8342f7`) — `POST /documents`, multipart, mirrors
+  `tasks.ts` (§9-clean — no reasoning in api; it extracts text + writes the row, marionette embeds
+  later).
+  - **`extractText()` is the single content seam.** Today: `text/markdown` / `text/x-markdown` /
+    `text/plain` read as real text. **Any other mime → a clean `415`** (via an `UnsupportedType`
+    error mapped to 415, NOT a 500) — the deferred rejection seam for DOCX/PDF, which land here
+    later (see §8). api does NO interpretation of the text (§9).
+  - Writes the `documents` row only (`title`/`source='upload'`/`mime`/`body`/`char_count`,
+    `embedded_at` NULL), returns `201 {document}`. Mounted in `routes/index.ts`.
+- **Dashboard dropzone** (`d8342f7`, `apps/api/src/routes/dashboard.ts`) — at the bottom of the
+  **Right Now** card: a dashed drop target (drag-drop + click-to-pick, `.md`/`.txt`). `uploadDoc()`
+  mirrors `addTask()` — a thin multipart POST to `/documents`, prepends a "✓ <title> queued" row in
+  place, **no full-page reload**. Every DB/response string `esc()`-escaped; `/health` untouched.
+- **Cron drain** (`d8342f7`, `apps/api/src/ingestion/scheduler.ts`) — `runAllSyncs` now POSTs
+  marionette `/embed-doc` (limit 50) after `/enrich-task`, alongside `/classify` + `/embed` +
+  `/enrich-task`, on each 5-min tick. Thin HTTP forward, no reasoning in api (§9). Uploaded docs
+  self-embed on the next tick; backlog drains 50/tick until caught up.
+- **`.gitignore`** (`d8342f7`) — added `whisper/ggml-small.en.bin` + `whisper/jfk.wav` (large
+  binaries that must never enter a commit; same `git add`-by-path discipline as §8).
+- **Deployed + verified live:** api deployed via audited `POST /deploy {"service":"api"}` (job
+  `100e39e3`, `deploy.succeeded`). **Verified end-to-end, downstream effects independently
+  confirmed** (not the drain's own `{ok:true}` self-report): uploaded
+  `philosophical_llm_finetuning_plan.md` → Postgres `documents` row → `/embed-doc` drain → 12
+  Chonkie chunks → Qdrant `documents` collection, with `documents.embedded_at` flipped to a real
+  timestamp AND Qdrant `points_count` = 12 both checked directly. Live chunk/doc counts: see STATUS
+  header — this subsection carries none.
+- **Commits:** `1eef3dc` (`feat(m3): document embedding pipeline — Chonkie chunks -> OpenAI 3-small
+  -> Qdrant documents collection, POST /embed-doc`) → `d8342f7` (`feat(slice1): api document upload
+  — POST /documents + dashboard dropzone + embed-doc cron drain`).
+- **Still open (deferred follow-on):** DOCX/PDF (and other-mime) text extraction — the
+  `extractText()` seam is ready (throws `UnsupportedType` → 415 today); wiring a real extractor is
+  the next slice. See §8.
 
 **Milestone 3 — tasks panel (Slice A) — done, live (Clair responsibilities dashboard):**
 This is the old "morning brief" roadmap item, redefined with the owner into a "breathing"
@@ -827,10 +900,16 @@ still required. The auto-execute-low-risk tier (M5 proper) is a later step ON TO
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `f7b6819`, working tree clean (`.claude/` untracked —
-skills dir, candidate for `.gitignore`). Confirm current HEAD/sync via `bin/session-start`,
+Local in sync with `origin/main` at `d8342f7`, working tree clean (`.claude/` now gitignored
+via `9c7978a`). Confirm current HEAD/sync via `bin/session-start`,
 never trust a hash pasted in this doc.
-Recent commits (newest first): `f7b6819` / `a41fa7d` (docs: regen to c0988b1 — CRT dashboard;
+Recent commits (newest first): `d8342f7` (feat(slice1): api document upload — POST /documents +
+dashboard dropzone + embed-doc cron drain) → `1eef3dc` (feat(m3): document embedding pipeline —
+Chonkie chunks -> OpenAI 3-small -> Qdrant documents collection, POST /embed-doc) → `8a0f224` /
+`5787bd2` / `a1b32f6` / `1de5d79` / `72dae3e` (whisper: Vulkan GPU build v1.7.6 + small.en model —
+see the whisper subsection) → `030e2b8` / `58e4d72` / `12b0211` (feat(m5): service-restart —
+Mari's first homelab hand, + STATUS) → `9c7978a` (chore: gitignore .claude/) → `f7b6819` /
+`a41fa7d` (docs: regen to c0988b1 — CRT dashboard;
 **Copilot-agent doc regens, see §8**) → `c0988b1` (feat(dashboard): full-screen CRT shell +
 real host vitals, drop fake data — the live monitoring dashboard) → `2a2328f` (feat(monitor):
 host-hardware sections — CPU per-core die grid + dual network scope + core-four gauges, fake
@@ -854,8 +933,9 @@ web UI; see §8**) → `5d45b8d` (feat(m3): Clair classifier — POST /classify)
 whisper/Dockerfile.bak) → `8ac171c` / `80298a4` (feat(m4): async deploy-completion → Telegram)
 → `7d79632` (feat(m2): Today dashboard) → `27f18b3` / `9f3f054` (feat(marionette):
 audit-sight) → `b13c5ce` / `3a66aef` (feat(m4): approval gate + Telegram buttons).
-(Since that last structural verification, `12b0211` shipped Mari's first hand `service-restart`
-— see the Milestone 5 subsection above. Confirm current HEAD/sync via `bin/session-start`.)
+(This list is current through the `d8342f7` structural verification — the document-ingestion
+slice and Mari's first hand `service-restart` (`12b0211`) are both documented above. Confirm
+current HEAD/sync via `bin/session-start`, never trust a hash pasted here.)
 
 **NOTE on the rollback-fix hash:** older text in this doc (§4 deploy subsection, §8) still
 refers to `52c3f72` as the rollback fix. The current impl is `b153b1e` (a `DRY_RUN=1` guard
@@ -1139,8 +1219,17 @@ auto-drain + grounded Q&A + tasks panel all shipped.** In **marionette**, not ap
   Backend live (`29d53d4` — owner-priority model); dashboard render live (`88df75c`/`5ab35ad`,
   `deploy.succeeded`). Verified live in-browser: a real high-priority task renders in the Right
   Now card. Slice B (self-email → task) and Slice C (insight/help layer) are LATER.
+- ✅ **Document ingestion pipeline shipped** (`1eef3dc` + `d8342f7`) — the first long-form RAG
+  source the email pipeline deferred chunking to. Marionette `POST /embed-doc` chunks each
+  document via Chonkie `RecursiveChunker` (512-token) → shared `embedText()` → Qdrant `documents`
+  collection, migration `0008` (`documents` + `document_chunks`). api `POST /documents` (multipart,
+  `extractText()` md/txt seam, DOCX/PDF → 415) + dashboard dropzone + `/embed-doc` cron drain.
+  Deployed via audited `POST /deploy` (`deploy.succeeded`), verified end-to-end with both
+  downstream effects (`embedded_at` timestamp + Qdrant point count) checked directly. See §4.
+  **DOCX/PDF extraction is the deferred follow-on — the `extractText()` seam is ready (§8).**
 - **Done when:** email is auto-classified + auto-embedded on ingest AND grounded Q&A is live
-  AND the tasks/responsibilities panel is live. **All conditions met — M3 is CLOSED.**
+  AND the tasks/responsibilities panel is live. **All conditions met — M3 is CLOSED** (the
+  document-ingestion pipeline extends M3's read-only AI layer to long-form sources).
 
 **Milestone 4 — Action layer, approval-gated. ✅ Done — gate slice, Task A, and Task B all
 shipped.**
@@ -1375,11 +1464,22 @@ system.
   and keep email bodies off OpenAI (privacy), but cost is a non-argument (~2¢ one-time, <$1/yr)
   and it carries the same unfinished ROCm/HIP setup parked for whisper. `embedText()` in
   `embed.ts` is a clean single-function swap seam if privacy ever wins.
-- **Chunking — deferred to the first long-form ingestion source** (PDFs / web pages, the
-  ontology-bound sources in §3a). Email is short: one email = one vector, no chunking, and
-  `retrieve.ts` (next session) leaves a chunk-ready seam without importing a chunker. When
-  added, it must be TS (§2 — Python basically never), not a Python service. Candidate libs
-  (Chonkie/llm-chunk) noted but not chosen.
+- **Chunking — RESOLVED = Chonkie `RecursiveChunker`** (`1eef3dc`). The first long-form
+  ingestion source (uploaded documents) landed, so chunking is no longer deferred. `@chonkiejs/core`'s
+  `RecursiveChunker` at a 512-token target (safely under 3-small's 8191-token cap) chunks each
+  document body in `marionette/src/embed-doc.ts`; one `document_chunks` row + one Qdrant `documents`
+  point per chunk. **TypeScript, not a Python service (§2 held)** — of the candidate libs
+  (Chonkie/llm-chunk) noted earlier, Chonkie was chosen. Email stays one-vector, no chunker; the
+  document pipeline is where chunking lives. Web pages remain a future source that will reuse the
+  same chunker.
+- **DOCX/PDF (and other-mime) text extraction — deferred follow-on to the document slice.** The
+  `extractText()` function in `apps/api/src/routes/documents.ts` is the ready seam: today it reads
+  `text/markdown`/`text/x-markdown`/`text/plain` as real text and throws `UnsupportedType` → a
+  clean **415** for anything else (deliberately NOT a 500 — a clean rejection, not a crash). Wiring
+  a real DOCX/PDF extractor (still §9-clean — api extracts raw text only, no interpretation) is the
+  next document-ingestion slice; the marionette embed side (`/embed-doc`) needs no change since it
+  operates on `documents.body` regardless of how the text was extracted. Keep any extractor TS
+  where possible (§2).
 - **Drains not automated (M3) — RESOLVED** (`a9e7bc1`, this session). The 5-min ingestion
   cron now auto-runs BOTH classification and embedding on new mail: after each gcal+gmail
   sync, `apps/api/src/ingestion/scheduler.ts` POSTs marionette `/classify` (limit 50) then
