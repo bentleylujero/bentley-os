@@ -91,10 +91,10 @@ the Docker socket), behind the same Cloudflare Access "Me" gate.
 pass** — observed-working, not reviewed. Worth a deliberate review later.
 
 **Open choices, not yet started:**
+- Mari's homelab "hands" — **DECIDED (design)**: Option C, first hand `service-restart`
+  via a sibling `runRestartJob` in deploy, production-zone + allow-listed + approval-gated.
+  Not built. `update_docs` is hand #2, blocked on a generation-source call. See Bible §8.
 - Tasks feature follow-ons: Slice B (self-email → task), Slice C (insight/help layer).
-- Architectural call: build Mari's homelab-doing "hands" (fixed actions like
-  `update_docs`, start-fixed-widen-later) before/alongside further work. Parked
-  for a talk-it-through.
 
 After those, **M5 (earned autonomy)** opens.
 
