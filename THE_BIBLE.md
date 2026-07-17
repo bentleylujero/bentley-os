@@ -1410,7 +1410,14 @@ system.
   path) actually proves a password matches; a loopback `select 1` is a false positive. (2)
   `.env.bak` sitting in the working tree is a reinfection hazard (holds the stale secret) —
   deleted.
-
+- **`docker compose up -d --force-recreate <svc>` also recreates postgres on an
+  initialized-volume cluster.** Postgres's env interpolates `${POSTGRES_PASSWORD}`, so
+  rotating that value changes postgres's config hash — and `--force-recreate` on any service
+  whose stack shares that interpolation triggers dependency convergence that bounces the DB
+  too. Symptom: recreating `api`/`contractor`/`marionette`/`deploy` after a password rotation
+  also restarts postgres (a brief full-DB blip; harmless — named volume persists, ledger
+  intact). Use `--no-deps` to recreate only the named services and avoid the blip. Complements
+  the trust-vs-scram / `.env.bak` lesson above — same rotation context, different failure mode.
 ---
 
 ## 8. Open questions (decided-when-we-get-there, not blocking)
@@ -1446,11 +1453,19 @@ system.
   **not the same thing yet** — contractor calls the systemd server via SDK, doesn't replace
   it. When the container reaches parity, repoint `apps/api/src/routes/opencode.ts`'s
   `baseUrl` to `http://contractor:4100` in the *same* deploy that retires the systemd unit.
-- **Postgres password rotation** — flagged (pasted plaintext into a chat), still not done.
-  **Re-exposed again during the shell-var/`ALTER ROLE` debugging session** — the real
-  `b08a...` value was pasted multiple times. Rotate whenever the batch rotation happens.
-- **DeepSeek API key fragment** — a masked fragment printed into a chat, not usable alone,
-  noted alongside the Postgres rotation. Both still pending.
+- **Postgres password rotation — RESOLVED (2026-07-17).** The live `POSTGRES_PASSWORD`
+  (previously leaked in chat) was rotated via an atomic script: backup → prove old value via
+  scram → `ALTER` over the trust path → prove new value via scram → rewrite both `.env` lines
+  → recreate the 4 consumers (`api`/`contractor`/`marionette`/`deploy`). New value is
+  `openssl rand -hex 24`, lives only in `.env` on the box (gitignored, never committed). The
+  old plaintext value is dead (rejected on scram). Verified live: `.env` authenticates via
+  `-h postgres`, deploy `/health` → `db:connected`, a fresh `deploy.succeeded` row landed on
+  the new creds (full lifecycle — proves the ledger writes, not just reads, post-rotation),
+  ledger intact. Timestamped backup was taken at `$HOME/.env.rotation-backup-<ts>` (chmod
+  600, outside the tree) and retired after this commit landed.
+- **DeepSeek API key fragment** — a masked fragment printed into a chat, not usable alone.
+  Postgres rotation is now done (above); the DeepSeek fragment rotation is still pending, low
+  priority. Rotate in the DeepSeek dashboard → swap in `.env` → redeploy `marionette` only.
 - **Shared audit module** — deploy + marionette + contractor each duplicate `audit_log`
   write logic; unify eventually. Ingestion (gcal/gmail) still doesn't write to `audit_log`
   at all — not a blocker for the shipped "what changed" view (it keys off each row's own
