@@ -32,6 +32,7 @@ export type JobStatus = 'queued' | 'running' | 'success' | 'rolled_back' | 'fail
 export interface Job {
   id: string;
   service: string;
+  kind: 'deploy' | 'restart';
   status: JobStatus;
   createdAt: string;
   startedAt?: string;
@@ -59,6 +60,7 @@ export function enqueue(
   service: string,
   commitMessage?: string,
   actionId?: number,
+  kind: 'deploy' | 'restart' = 'deploy',
 ): { job?: Job; error?: string } {
   if (!(service in SERVICE_HEALTH)) {
     return { error: `unknown service '${service}'. allowed: ${Object.keys(SERVICE_HEALTH).join(', ')}` };
@@ -66,6 +68,7 @@ export function enqueue(
   const job: Job = {
     id: randomUUID(),
     service,
+    kind,
     status: 'queued',
     createdAt: new Date().toISOString(),
     commitMessage,
@@ -77,7 +80,7 @@ export function enqueue(
   void audit('deploy.enqueued', {
     target: service,
     outcome: 'queued',
-    payload: { job_id: job.id, commit_message: commitMessage ?? null, action_id: actionId ?? null },
+    payload: { job_id: job.id, kind, commit_message: commitMessage ?? null, action_id: actionId ?? null },
   });
   void pump();
   return { job };
@@ -91,7 +94,11 @@ async function pump(): Promise<void> {
       const id = queue.shift()!;
       const job = jobs.get(id);
       if (!job) continue;
-      await runJob(job);
+      if (job.kind === 'restart') {
+        await runRestartJob(job);
+      } else {
+        await runJob(job);
+      }
     }
   } finally {
     working = false;
@@ -410,4 +417,63 @@ async function runJob(job: Job): Promise<void> {
     });
     await resolveAction(job, 'failed', `${job.service} (rollback FAILED, still unhealthy)`);
   }
+}
+
+// runRestartJob — Mari's first "hand": restart a live service in place, no
+// rebuild, no commit, no rollback. A pure `docker compose restart` + health
+// re-check. Separate from runJob deliberately (Bible §8): runJob's whole flow
+// assumes build->health->rollback-on-fail; a restart shares NONE of that shape,
+// and threading guards through runJob would risk the trusted commit_deploy path.
+// Reuses only the primitives: run, pollHealth, audit, resolveAction.
+//
+// Terminal semantics: a restart that comes back unhealthy has NO last-good to
+// roll back to — nothing changed on disk. Terminal = 'failed' + notify, a
+// human-intervention event, NOT auto-recover. Intended.
+//
+// Audit names REUSE deploy.succeeded/deploy.failed (not new restart.* names).
+// Consequence: lastGoodCommit reads the newest deploy.succeeded row for its
+// rollback baseline — so the success row MUST carry the current commit, or a
+// future real deploy's rollback baseline would be poisoned to null. A restart
+// doesn't change the commit, so writing current HEAD here is correct and safe.
+async function runRestartJob(job: Job): Promise<void> {
+  job.status = 'running';
+  job.startedAt = new Date().toISOString();
+  const healthUrl = SERVICE_HEALTH[job.service];
+
+  await audit('deploy.started', {
+    target: job.service,
+    outcome: 'running',
+    payload: { job_id: job.id, kind: 'restart', action_id: job.actionId ?? null },
+  });
+
+  line(job, `restart requested for '${job.service}' — no rebuild, no commit`);
+  const rc = await run(job, 'docker', ['compose', 'restart', job.service]);
+
+  const healthy = rc === 0 && (await pollHealth(job, healthUrl));
+
+  // Restarts don't change the commit; record current HEAD so this success row
+  // is a valid rollback baseline for future real deploys (see header note).
+  job.deployedCommit = (await currentCommit()) || undefined;
+  job.finishedAt = new Date().toISOString();
+
+  if (healthy) {
+    job.status = 'success';
+    line(job, 'restart healthy — success');
+    await audit('deploy.succeeded', {
+      target: job.service,
+      outcome: 'success',
+      payload: { job_id: job.id, kind: 'restart', commit: job.deployedCommit },
+    });
+    await resolveAction(job, 'succeeded', `${job.service} (restarted)`);
+    return;
+  }
+
+  job.status = 'failed';
+  line(job, `restart unhealthy (restart rc=${rc}) — MANUAL INTERVENTION NEEDED, no rollback for a restart`);
+  await audit('deploy.failed', {
+    target: job.service,
+    outcome: 'error',
+    payload: { job_id: job.id, kind: 'restart', restart_rc: rc },
+  });
+  await resolveAction(job, 'failed', `${job.service} (restart unhealthy)`);
 }

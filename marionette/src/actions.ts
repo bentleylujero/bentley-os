@@ -131,14 +131,20 @@ export async function executeAction(action: ActionRow): Promise<void> {
 
     const service = (action.intent?.service as string) || 'api';
 
+    // service-restart -> deploy's restart path (no rebuild, no commit).
+    // commit_deploy (and any other kind) -> the normal build/commit path.
+    const isRestart = action.kind === 'service-restart';
+    const deployBody: Record<string, unknown> = { service, action_id: action.id };
+    if (isRestart) {
+      deployBody.kind = 'restart';
+    } else {
+      deployBody.commit_message = action.intent?.commit_message ?? undefined;
+    }
+
     const res = await fetch('http://deploy:4000/deploy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        service,
-        commit_message: action.intent?.commit_message ?? undefined,
-        action_id: action.id,
-      }),
+      body: JSON.stringify(deployBody),
     });
 
     // Deploy returns 202 ACCEPT with a job_id — NOT completion. Parse the raw

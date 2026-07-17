@@ -208,6 +208,20 @@ app.post('/actions', async (c) => {
     return c.json({ error: 'missing "kind" string in body' }, 400);
   }
   const intent = (body?.intent && typeof body.intent === 'object') ? body.intent : {};
+
+  // service-restart is target-constrained at PROPOSE time (not only at deploy):
+  // the service must be one deploy can health-check + restart. This mirrors
+  // deploy's SERVICE_HEALTH allow-list (api/contractor/marionette) — never
+  // postgres/qdrant/cloudflared. Reject early so a bad target never becomes a
+  // proposed row awaiting a tap.
+  if (kind === 'service-restart') {
+    const RESTARTABLE = ['api', 'contractor', 'marionette'];
+    const svc = (intent as any)?.service;
+    if (typeof svc !== 'string' || !RESTARTABLE.includes(svc)) {
+      return c.json({ error: `service-restart requires intent.service in {${RESTARTABLE.join(', ')}}` }, 400);
+    }
+  }
+
   const row = await createAction({ kind, intent });
   return c.json({ action: row }, 201);
 });
