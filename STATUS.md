@@ -16,10 +16,10 @@ the moment the cron ticks; commands never are.
 
 ```
 # Slow-moving — changes only when WE ship. Value + check.
-head:         d0be71d   check: git rev-parse --short HEAD
-git_sync:     in sync   check: git status -sb | head -1
-migrations:   7         check: ls supabase/migrations/ | wc -l
-services_up:  12        check: docker compose ps --status running | tail -n +2 | wc -l
+head:         check: git rev-parse --short HEAD
+git_sync:     check: git status -sb | head -1
+migrations:   check: ls supabase/migrations/ | wc -l
+services_up:  check: docker compose ps --status running | tail -n +2 | wc -l
 
 # Cron-driven — NO value stored, read live via bin/session-start.
 emails:       check: SELECT count(*) FROM emails
