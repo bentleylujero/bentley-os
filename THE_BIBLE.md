@@ -817,11 +817,12 @@ still required. The auto-execute-low-risk tier (M5 proper) is a later step ON TO
     not inherit the shell's `$PATH`.
   - Confirmed working end-to-end: hold key → speak → release → real transcribed text pasted
     at cursor.
-- **GPU acceleration — not yet explored.** Box has an AMD Radeon RX 5700 XT (confirmed via
-  `lspci`), currently running whisper on CPU only. `whisper.cpp` supports a Vulkan backend
-  (broader compatibility) or ROCm/HIP (better perf, heavier setup — kernel driver + device
-  passthrough + different cmake target) for AMD acceleration. Scoped as a future task, not
-  started.
+  - **GPU acceleration — DONE (Vulkan).** Box's AMD RX 5700 XT (Navi 10, gfx1010, `amdgpu`)
+  now runs whisper via `whisper.cpp`'s Vulkan/RADV backend, not CPU. ROCm was ruled out
+  (RDNA1/gfx1010 dropped by ROCm); Vulkan is the supported path. Confirmed on-device:
+  `ggml_vulkan: 0 = AMD Radeon RX 5700 XT (RADV NAVI10)`, `using Vulkan0 backend`, full model
+  weights on-card. Shipped `72dae3e`. Model bumped base → small.en with the GPU headroom.
+  Further headroom exists (8GB VRAM) for medium if wanted.
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
@@ -1397,10 +1398,10 @@ system.
 - **Whisper deploy path** — `whisper` isn't in `deploy`'s `SERVICE_HEALTH` map, so it has no
   audited deploy/rollback path and must be rebuilt via raw `docker compose up -d --build`.
   Decide whether it's worth adding, given it's a low-churn service.
-- **Whisper GPU acceleration** — box has an AMD RX 5700 XT, currently unused; whisper runs
-  CPU-only. Vulkan or ROCm/HIP backend would speed up larger models significantly. Not
-  started — scoped as a future task if `base`'s CPU latency becomes annoying in daily
-  use.
+- **Whisper GPU acceleration — RESOLVED** (`72dae3e`). RX 5700 XT now runs whisper via the
+  Vulkan/RADV backend (whisper.cpp v1.7.6 pinned — master broke Vulkan on bookworm). ROCm
+  ruled out (gfx1010 unsupported). `/dev/dri` passthrough + video/render `group_add` in
+  compose. Model moved base → small.en with the freed headroom. Verified on-device.
 - **Log aggregation** specifics — not decided.
 - **`marionette/src/schema.ts`** has one leftover comment mentioning "opencode"
   conceptually — cosmetic, not fixed.
