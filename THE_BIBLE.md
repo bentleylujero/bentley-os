@@ -777,7 +777,8 @@ still required. The auto-execute-low-risk tier (M5 proper) is a later step ON TO
   deliberately** — master/v1.8.0+ broke the Vulkan build on bookworm (`vk::LayerSettingEXT`,
   issue #3455); do not bump without re-testing. GPU passthrough: `docker-compose.yml` whisper
   block adds `devices:` (`/dev/dri/renderD128`, `/dev/dri/card1`) + `group_add: ["44","991"]`
-  (host video/render GIDs).- **API contract (confirmed via direct testing, not assumed):** `POST /inference`,
+  (host video/render GIDs).
+- **API contract (confirmed via direct testing, not assumed):** `POST /inference`,
   multipart form, field `file` (audio, wav tested at 16kHz mono), optional
   `response_format=json` → `{"text": " transcribed words\n"}`. No auth of its own — auth is
   entirely Cloudflare Access in front of it.
@@ -817,7 +818,7 @@ still required. The auto-execute-low-risk tier (M5 proper) is a later step ON TO
     not inherit the shell's `$PATH`.
   - Confirmed working end-to-end: hold key → speak → release → real transcribed text pasted
     at cursor.
-  - **GPU acceleration — DONE (Vulkan).** Box's AMD RX 5700 XT (Navi 10, gfx1010, `amdgpu`)
+- **GPU acceleration — DONE (Vulkan).** Box's AMD RX 5700 XT (Navi 10, gfx1010, `amdgpu`)
   now runs whisper via `whisper.cpp`'s Vulkan/RADV backend, not CPU. ROCm was ruled out
   (RDNA1/gfx1010 dropped by ROCm); Vulkan is the supported path. Confirmed on-device:
   `ggml_vulkan: 0 = AMD Radeon RX 5700 XT (RADV NAVI10)`, `using Vulkan0 backend`, full model
