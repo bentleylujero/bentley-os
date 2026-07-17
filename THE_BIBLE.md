@@ -182,7 +182,7 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log`. **Dispatches on `job.kind` (`'deploy'` | `'restart'`): `runJob` for build/commit/deploy+rollback, `runRestartJob` for `service-restart` (Mari's first hand — `docker compose restart <svc>` → health-poll → resolve, no build/commit/rollback; see §4)** | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
 | **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, **now consumed by `/think`**: system-status questions trigger an in-process `auditSummary(60)` read, injected into the reasoning prompt so Mari narrates real activity instead of claiming blindness** | Ingestion (api's job), deploy (deploy's job) |
-| **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `base` model | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
+| **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `small.en` model (GPU-accelerated via Vulkan) | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
 | **cloudflared** | — | Public tunnel, gated on `api` health | — |
 | **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
 
@@ -240,7 +240,7 @@ Running on the box at `~/bentley-os` (Ubuntu, LAN IP `172.16.30.4`). Absolute pa
 qdrant (6333/6334 — reachable, `emails` collection (point count: see STATUS header), actively used by the embed pipeline), cloudflared, dozzle (8080),
 portainer (9000/8000/9443), uptime-kuma (healthy, 3001), deploy (healthy, 4000 /
 127.0.0.1), contractor (healthy, 4100, backend only), marionette (healthy, 4200, backend
-only), whisper (healthy, 4300, backend only, `base` model).
+only), whisper (healthy, 4300, backend only, `small.en` model, Vulkan GPU).
 
 **No local `embedder` service exists, by design — embeddings are an external API call.**
 The embeddings-provider decision is **RESOLVED = OpenAI `text-embedding-3-small`** (1536-dim,
@@ -1069,7 +1069,7 @@ actually proven — including from a live external interface.**
   to marionette outside of direct API calls. Single-user allow-listed, webhook-secret
   gated, Cloudflare-Access-bypassed on its specific path only.
 - Wolverine (fixer) — not built.
-- Local Whisper — ✅ done (self-hosted `whisper.cpp`, `base` model, Cloudflare
+- Local Whisper — ✅ done (self-hosted `whisper.cpp`, `small.en` model, Vulkan GPU, Cloudflare
   Access-gated, Hammerspoon push-to-talk client on laptop). Local embeddings — not built.
 
 **Milestone 1 — Data in (Gmail + Calendar): ✅ Done.**
