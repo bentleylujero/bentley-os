@@ -1463,9 +1463,11 @@ system.
   the new creds (full lifecycle — proves the ledger writes, not just reads, post-rotation),
   ledger intact. Timestamped backup was taken at `$HOME/.env.rotation-backup-<ts>` (chmod
   600, outside the tree) and retired after this commit landed.
-- **DeepSeek API key fragment** — a masked fragment printed into a chat, not usable alone.
-  Postgres rotation is now done (above); the DeepSeek fragment rotation is still pending, low
-  priority. Rotate in the DeepSeek dashboard → swap in `.env` → redeploy `marionette` only.
+- **DeepSeek API key rotation — RESOLVED (2026-07-18).** Rotated in the DeepSeek dashboard,
+  swapped in `.env` (only `marionette` consumes it), redeployed marionette via `POST /deploy`
+  (confirmed `deploy.succeeded`), and verified Mari reasons end-to-end via a Telegram
+  round-trip. Both prior key values are revoked dashboard-side. `.env` holds the live key
+  (gitignored, never committed). Temp backups wiped post-rotation.
 - **Shared audit module** — deploy + marionette + contractor each duplicate `audit_log`
   write logic; unify eventually. Ingestion (gcal/gmail) still doesn't write to `audit_log`
   at all — not a blocker for the shipped "what changed" view (it keys off each row's own
