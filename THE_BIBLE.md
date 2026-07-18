@@ -862,16 +862,19 @@ still required. The auto-execute-low-risk tier (M5 proper) is a later step ON TO
   1. `Me - Self-Hosted Apps` (renamed, ID `63930902-c6ba-4551-bd30-388383443ac0`) — email
      gate (`bentley.lujero@gmail.com`) for browser access, shared with `ssh` and
      `Bentley OS API`.
-  2. **`Whisper Service Token`** (Action: **Service Auth**, Include: Service Token
+ 2. **`Whisper Service Token`** (Action: **Service Auth**, Include: Service Token
      `whisper-laptop`) — added separately, specifically for the Hammerspoon client. **A
      generated service token is NOT automatically valid against an app** — it must be
      explicitly included in a Service Auth policy on that specific app, or every request
      gets bounced to the login redirect with `service_token_status:false` in the JWT meta,
      even though the token itself is valid. Confirmed the hard way: token worked fine at
      generation time, still got rejected until this policy existed.
-- **Service token:** `whisper-laptop`, non-expiring, generated for the Hammerspoon
-  push-to-talk client. **Exposed in plaintext in chat multiple times across sessions —
-  rotation still not done** (see §8).
+- **Service token:** `whisper-laptop-2`, non-expiring, generated for the Hammerspoon
+  push-to-talk client. **Rotated 2026-07-18** — the old `whisper-laptop` token (exposed in
+  plaintext across multiple sessions) was replaced by `whisper-laptop-2` and revoked; the
+  whisper app's `Whisper Service Token` policy (Action: Service Auth) now includes the new
+  token. `~/.hammerspoon/whisper_secrets.lua` updated with the new Client ID/Secret. Verified
+  push-to-talk end-to-end on the new token.
 - **Hammerspoon client (laptop-side, NOT in this repo — lives at `~/.hammerspoon/` on
   Bentley's MacBook):**
   - `~/.hammerspoon/whisper_secrets.lua` — holds the Cloudflare Client ID/Secret, `require`d
@@ -1418,6 +1421,14 @@ system.
   also restarts postgres (a brief full-DB blip; harmless — named volume persists, ledger
   intact). Use `--no-deps` to recreate only the named services and avoid the blip. Complements
   the trust-vs-scram / `.env.bak` lesson above — same rotation context, different failure mode.
+- **macOS default audio input can be silently hijacked by a virtual audio device.** A
+  Microsoft Teams "Teams Audio Device" made itself the default input; `sox -d` then recorded
+  pure silence (`Maximum amplitude: 0.000000`) and whisper hallucinated "Thank you." on the
+  empty clip — looking exactly like an auth/token failure when it wasn't. Tells: the default
+  input's `Current SampleRate` (24000) didn't match the real MacBook mic (48000), and sox's
+  `[ | ]` meter stayed flat while speaking. Fix: force the real device in System Settings →
+  Sound → Input (not "default"). When push-to-talk returns "thank you", suspect a silent mic,
+  not the token.
 ---
 
 ## 8. Open questions (decided-when-we-get-there, not blocking)
@@ -1507,12 +1518,11 @@ system.
   mail self-triages and self-embeds; backlog also drains 50+50/tick until caught up. (Note:
   any hardcoded email-count figures in older revisions of this doc are stale —
   check live counts before relying on them.)
-- **`whisper-laptop` Cloudflare service token exposed in plaintext in chat multiple times
-  across sessions** (initial setup, then again during the Service Auth policy debugging).
-  Not rotated yet — same pattern as the Postgres/DeepSeek leaks, now the most-repeated
-  instance of this issue. Rotate in the Cloudflare dashboard and update
-  `~/.hammerspoon/whisper_secrets.lua` on the laptop when done. Consider moving the laptop
-  script's credentials to macOS Keychain instead of a plaintext Lua file while at it.
+- **`whisper-laptop` Cloudflare service token — ROTATED (2026-07-18).** Replaced by
+  `whisper-laptop-2` (new Service Auth policy include on the whisper app) and the old token
+  revoked; new token proven working end-to-end. `~/.hammerspoon/whisper_secrets.lua` updated
+  with the new Client ID/Secret. **Still worth doing:** move the laptop script's credentials
+  to macOS Keychain instead of a plaintext Lua file.
 - **Whisper deploy path** — `whisper` isn't in `deploy`'s `SERVICE_HEALTH` map, so it has no
   audited deploy/rollback path and must be rebuilt via raw `docker compose up -d --build`.
   Decide whether it's worth adding, given it's a low-churn service.
