@@ -14,6 +14,7 @@ import { enrichBatch } from './enrich-task.ts';
 import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts';
 import { isDataQuestion, formatRetrievalForPrompt } from './data-gate.ts';
 import { retrieveContext } from './retrieve.ts';
+import { readIngestState, formatIngestForPrompt } from './ingest-sight.ts';
 
 // contractor's /execute can run long (real OpenCode build tasks, multi-step
 // tool use) — raise past undici's default 5-minute headers/body timeout so
@@ -134,6 +135,22 @@ app.post('/think', async (c) => {
     const messages = [
       { role: 'system' as const, content: SYSTEM_PROMPT },
     ];
+    // AMBIENT sight (unconditional): one short INGESTION line on EVERY /think
+    // reporting when each source last synced. This is the tier that would have
+    // caught the 3-day silent ingestion death — sync_state held the truth and
+    // nothing read it. Not keyword-gated (unlike the two blocks below); injected
+    // whether data is fresh OR stale so Mari can also affirm data IS current.
+    // A degraded freshness read must never take down reasoning — same try/catch/
+    // fall-through as the audit-sight read.
+    try {
+      const rows = await readIngestState();
+      const ingestLine = formatIngestForPrompt(rows, new Date());
+      if (ingestLine) {
+        messages.push({ role: 'system' as const, content: ingestLine });
+      }
+    } catch (ingestErr) {
+      console.error('[think] ingest-sight fetch failed:', ingestErr);
+    }
     if (isSystemStatusQuestion(request)) {
       try {
         const summary = await auditSummary(60);
