@@ -13,7 +13,7 @@
 //
 // No new state, no DB/Qdrant access here — that's retrieve.ts's job. This gate
 // only decides IF to call it and shapes what it returns for the prompt.
-import type { RetrievedEmail } from './retrieve.ts';
+import type { Retrieved } from './retrieve.ts';
 
 const DATA_PATTERNS: string[] = [
   'email about',
@@ -46,22 +46,33 @@ export function isDataQuestion(request: string): boolean {
   return DATA_PATTERNS.some((p) => q.includes(p));
 }
 
-export function formatRetrievalForPrompt(hits: RetrievedEmail[]): string {
+export function formatRetrievalForPrompt(hits: Retrieved[]): string {
   const lines: string[] = [];
   lines.push(
-    `RETRIEVED EMAIL CONTEXT (top ${hits.length} match${hits.length === 1 ? '' : 'es'} for this request):`,
+    `RETRIEVED CONTEXT (top ${hits.length} match${hits.length === 1 ? '' : 'es'} for this request):`,
   );
 
   if (hits.length === 0) {
-    lines.push('  (no relevant emails found)');
+    lines.push('  (no relevant emails or documents found)');
     return lines.join('\n');
   }
 
+  // Citation BRANCH on kind — retrieval returns the discriminated union, the
+  // rendering decision lives here. Email citations are unchanged; chunks cite
+  // their document title + chunk index.
   for (const h of hits) {
-    lines.push(
-      `  - [score ${h.score.toFixed(3)}] Subject: "${h.subject ?? '(no subject)'}" (received ${h.received_at ?? 'unknown'})`,
-    );
-    lines.push(`    ${truncate((h.body ?? '').trim(), 1200)}`);
+    if (h.kind === 'email') {
+      lines.push(
+        `  - [score ${h.score.toFixed(3)}] Subject: "${h.subject ?? '(no subject)'}" (received ${h.received_at ?? 'unknown'})`,
+      );
+      lines.push(`    ${truncate((h.body ?? '').trim(), 1200)}`);
+    } else {
+      const title = h.title && h.title.trim() ? h.title : '(untitled document)';
+      lines.push(
+        `  - [score ${h.score.toFixed(3)}] Document: "${title}" (chunk ${h.chunk_index})`,
+      );
+      lines.push(`    ${truncate((h.text ?? '').trim(), 1200)}`);
+    }
   }
 
   return lines.join('\n');
