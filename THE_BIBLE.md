@@ -1075,6 +1075,14 @@ trigger for the same `/think` → `delegate` path.
   `running` flag.
 - OAuth secrets (`client_secret.json`, `token.json`) bind-mounted read-only into the live
   `api` container at `/secrets/` (exact absolute host path, per §7 bind-mount lesson).
+- **OAuth token lifecycle (learned the hard way, 2026-07-20).** The Google client is an
+  `installed` (Desktop) client, `redirect_uris: ['http://localhost']`, scopes
+  `calendar.readonly` + `contacts.readonly` + `gmail.readonly`. **Nothing writes refreshed
+  tokens back** — the mount is read-only and refresh happens in-memory per process, so
+  `token.json`'s `expiry_date` is frozen at mint time and is **NOT a health signal**. The
+  only true ingestion-health signal is `sync_state.updated_at` (see §8's silent-failure
+  item). **There is no auth/mint script in the repo** — `token.json` was minted out-of-band;
+  the re-mint recipe lives in §8.
 - Confirmed live: first tick after deploy ran clean, both syncs incremental
   (`fetched: 0, upserted: 0` — correct, since the isolation test had just consumed the
   delta). The M2 dashboard reads the rows this cron lands.
@@ -1413,6 +1421,18 @@ system.
   path) actually proves a password matches; a loopback `select 1` is a false positive. (2)
   `.env.bak` sitting in the working tree is a reinfection hazard (holds the stale secret) —
   deleted.
+- **A single-FILE bind mount is pinned to an inode — replace it in place or the container
+  silently serves the old content.** `token.json` and `client_secret.json` are bind-mounted
+  as individual files, not a directory. `mv new old` or `rm old && cp new old` creates a NEW
+  inode; the running container keeps the old one mapped and serves stale content with zero
+  error anywhere. Correct form is in-place truncation: `cat new > old`. **Verify by reading
+  the value back from INSIDE the container**, never from the host — the host read is not the
+  same file the container sees. (Directory mounts don't have this problem; file mounts do.)
+- **An ESM script resolves `node_modules` from its OWN directory, not the cwd.** A helper
+  script `docker cp`'d to `/tmp` and run with `-w /usr/src/app` still throws
+  `ERR_MODULE_NOT_FOUND` for app dependencies — `-w` sets cwd, which ESM ignores for
+  resolution, and `NODE_PATH` doesn't apply to ESM either. Put one-off scripts INSIDE the app
+  tree (`/usr/src/app/x.mjs`), run, then delete.
 - **`docker compose up -d --force-recreate <svc>` also recreates postgres on an
   initialized-volume cluster.** Postgres's env interpolates `${POSTGRES_PASSWORD}`, so
   rotating that value changes postgres's config hash — and `--force-recreate` on any service
@@ -1530,6 +1550,45 @@ system.
   Vulkan/RADV backend (whisper.cpp v1.7.6 pinned — master broke Vulkan on bookworm). ROCm
   ruled out (gfx1010 unsupported). `/dev/dri` passthrough + video/render `group_add` in
   compose. Model moved base → small.en with the freed headroom. Verified on-device.
+- **Google OAuth refresh-token death — RESOLVED (2026-07-20).** Ingestion was fully down
+  from 2026-07-17 06:30 UTC to 2026-07-20 14:25 UTC (~3d 8h) — every 5-min tick failed with
+  `invalid_grant` / "Token has been expired or revoked."
+  - **Root cause:** the Google Cloud OAuth consent screen was in **Testing** publishing
+    status. Google expires refresh tokens for Testing apps after **7 days**, unconditionally
+    — nothing to do with the code. **Fix: Publish app** (User type stays External; "Make
+    internal" is unavailable on a personal gmail.com account). The app remains **unverified**
+    by choice — the consent screen shows "Google hasn't verified this app", proceed via
+    **Advanced → Go to <app> (unsafe)**. The 100-user cap is irrelevant at n=1.
+  - **The diagnostic tell:** a Testing-issued `token.json` carries a
+    `refresh_token_expires_in` key; a published-app token does NOT. Its absence is the
+    confirmation the fuse is gone. Check keys, never values.
+  - **Re-mint recipe** (no auth script exists in the repo): write a short mjs using
+    `google.auth.OAuth2(client_id, client_secret, 'http://localhost')` +
+    `generateAuthUrl({access_type:'offline', prompt:'consent', scope:[...]})`. **The script
+    must live inside the app tree** (`/usr/src/app/`), not `/tmp` — see the ESM resolution
+    lesson in §7. **No local listener is needed:** open the consent URL in a laptop browser,
+    approve, and the redirect to `http://localhost/?code=...` will fail to connect — lift the
+    `code` value out of the URL bar and pass it back to the script. Auth codes are
+    single-use and short-lived. Copy the new token back with `cat new > token.json`
+    (in-place — see the inode lesson in §7), verify the expiry from INSIDE the container,
+    `docker compose restart api`, then delete the `.bak` (plaintext refresh token in the
+    tree is exactly the `.env.bak` hazard).
+  - **Verified recovered:** `sync_state.age` < 2 min, 79 emails caught up in one tick,
+    0 unclassified. The outage is legible in the data — 7/18 and 7/19 have zero rows.
+- **Ingestion failure is SILENT — the real defect this exposed. OPEN.** For three days the
+  dashboard rendered normally, `/health` stayed green, and the classify/embed/enrich drains
+  all reported healthy (processing an empty queue). Nothing anywhere surfaced that no data
+  had entered the system. Ingestion still doesn't write to `audit_log` (see the shared-audit
+  item above), so the ledger showed nothing either. **`sync_state.updated_at` held the truth
+  the entire time and nothing read it.** Fix is small and §9-clean: a staleness read on the
+  CRT dashboard — `sync_state` already owns the fact, so it's a pure read in `api`, no new
+  state, no migration. Suggested threshold ~15 min (three missed ticks) to avoid false
+  alarms on a slow tick. **This should rank above new features** — every layer above
+  ingestion silently degrades to confident answers over stale data when it breaks.
+- **Gmail pagination untested.** `apps/api/src/ingestion/gmail.ts` sets `maxResults: 100`
+  (list) and `500` (batch). The 3-day catch-up landed 79 in one tick, under the page size, so
+  the pagination path has still never been exercised. If a future large catch-up appears
+  capped at exactly 100, that's the first suspect. Not chased.
 - **Log aggregation** specifics — not decided.
 - **`marionette/src/schema.ts`** has one leftover comment mentioning "opencode"
   conceptually — cosmetic, not fixed.
