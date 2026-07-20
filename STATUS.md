@@ -81,7 +81,24 @@ Dashboard at `spaghettios.bentleyos.me` (Clair).
 
 ## Next action
 
-**Most recent ship: document ingestion (`1eef3dc` + `d8342f7`).** The first
+**Most recent ship: the ambient tier — ingestion staleness in `/think`** (`465d8d9`).
+Mari now always knows how fresh her data is. `marionette/src/ingest-sight.ts` reads
+`sync_state` on EVERY `/think` — no keyword gate, that is what "ambient" means — and
+injects one line: `INGESTION: gmail 3m ago, gcal 4m ago`, flagging any source past
+15 min as `(STALE)`. Injected fresh OR stale, so she can affirm data is current, not
+only fail to warn. `prompt.ts` tells her to say so plainly rather than answer over
+stale data — and its false "your ontology is empty" opener was corrected in the same
+commit. **This closes the silent-ingestion hole** that let ingestion die for 3d 8h
+with `/health` green. Split into a DB read + a PURE formatter (`now` passed in), which
+is what made the stale path testable without writing to production `sync_state`.
+Isolation-tested four ways, deployed job `daf7719e` (`deploy.succeeded`), file verified
+inside the running container. See Bible §4 ambient-sight subsection + the new §7 lessons.
+
+**Before that: documents made retrievable** (`a25074d`). `retrieve.ts` had hardcoded
+`QDRANT_COLLECTION = 'emails'`, so the `documents` collection was write-only — indexed
+for weeks, never read. Now both collections are searched in parallel and merged by score.
+
+**Before that: document ingestion (`1eef3dc` + `d8342f7`).** The first
 long-form RAG source. api `POST /documents` (multipart, `extractText()` md/txt
 seam — DOCX/PDF → clean 415, the deferred follow-on) writes a `documents` row;
 a dashboard dropzone at the bottom of the Right Now card uploads with no reload;
@@ -122,8 +139,17 @@ reviewed. Worth a deliberate review later.
   hands; the hands stay approval-gated until it lands. Not started.
 - **Document ingestion follow-on: DOCX/PDF extraction** — the `extractText()`
   seam in `documents.ts` is ready (other mimes → clean 415 today); wiring a real
-  extractor is the next slice. Grounded Q&A over documents (`retrieve.ts` reading
-  the `documents` Qdrant collection) is the other natural next step.
+  extractor is the next slice. (Grounded Q&A over documents — `retrieve.ts` searching
+  the `documents` collection — SHIPPED at `a25074d`.)
+- **Question-router** — replace the hand-written keyword gate in `data-gate.ts`
+  (and `system-sight.ts`) with ONE classify-the-question pass routing to the right
+  pre-fetch. The (A) tool-call loop vs (B) pre-fetch injection fork has now surfaced
+  three times — audit-sight, MCP, and here. Worth settling permanently.
+- **Conversation memory** — migration `0009`, `messages` table keyed on an OPTIONAL
+  `conversation_id` (absent = stateless, byte-identical to today). Window capped by
+  CHARS not turns. Store user text + Mari's `message`, never `reasoning`. Last,
+  because it is the only item needing a migration and the only one that can regress
+  existing behavior.
 - Tasks feature follow-ons: Slice B (self-email → task), Slice C (insight/help
   layer).
 
@@ -134,15 +160,17 @@ reviewed. Worth a deliberate review later.
 - **CRT/MONITOR spec review** — shipped without isolation-test; `/metrics/*`
   exposes host telemetry, gated only by Access "Me". Don't widen that boundary
   without a gate. Line-review against intent when convenient.
-- **Credential rotation** — 4 secrets pasted plaintext, none rotated:
-  `whisper-laptop` service token (most-repeated), Postgres password, DeepSeek
-  key fragment, Postgres role. One batch-rotation session closes all.
+- **Credential rotation — DONE.** Postgres password, DeepSeek API key, and the
+  whisper Cloudflare service token (now `whisper-laptop-2`) were all rotated in
+  prior sessions; old values revoked. Remaining nit: move the Hammerspoon client
+  credentials out of plaintext `whisper_secrets.lua` into macOS Keychain.
 - **Parked branch `slice1-image-rollback` (`0cf613e`)** — unmerged, unverified,
   do NOT build on it. Verifying needs a deliberate forced-failure deploy.
-- **Copilot cloud agent is active** — periodically regenerates docs to stale
-  snapshots (signature: terse capitalized commit msgs — "Revise"/"Update").
-  Mitigation is the two-file split itself: live counts live nowhere it writes.
-  Standing rule: `git fetch origin` + diff before every push.
+- **Copilot cloud agent — DISABLED 2026-07-20.** No longer a standing debt. It had
+  periodically regenerated docs to stale snapshots (signature: terse capitalized
+  commit msgs — "Revise"/"Update"); the two-file split remains good practice
+  regardless. `git fetch origin` before a push is now normal hygiene, not a
+  bot-defense rule.
 
 ---
 

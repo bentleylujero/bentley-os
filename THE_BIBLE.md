@@ -21,7 +21,8 @@ narrative. When this conflicts with anything older, this wins.*
 > **At session start:** run `bin/session-start` on the box and paste its header block.
 > That, not this file and not memory, is ground truth for current counts/HEAD.
 
-*Last structural verification: 2026-07-17, against HEAD `d8342f7`. Milestone state: M0–M4
+*Last structural verification: 2026-07-20, against HEAD `465d8d9` (prior: 2026-07-17 at
+`d8342f7`). Milestone state: M0–M4
 complete (M4 clean, no open gaps — gate slice, Task A, Task B all shipped; both self-deploy
 and root-owned-git-object gaps resolved). M3 extended with the document-ingestion pipeline
 (marionette `1eef3dc` + api `d8342f7`, live) — DOCX/PDF extraction the deferred follow-on.
@@ -178,7 +179,7 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | Service | Port | Owns | Does NOT own |
 |---|---|---|---|
 | **postgres** | 5432 (LAN only) | All persisted state — ontology, sync tokens, audit log | Vector search (qdrant) |
-| **qdrant** | 6333 (LAN only) | Vector storage for embeddings — **two 1536-dim cosine collections: `emails` (one point per embedded email, written by `marionette/src/embed.ts`, keyed on email id) and `documents` (one point per Chonkie chunk, written by `marionette/src/embed-doc.ts`, keyed on chunk id; counts: see STATUS header)** (derived indexes over `emails.body` / `document_chunks.text`) | Reasoning (marionette's job); the source-of-truth body/chunk text (that stays in Postgres) |
+| **qdrant** | 6333 (LAN only) | Vector storage for embeddings — **two 1536-dim cosine collections: `emails` (one point per embedded email, written by `marionette/src/embed.ts`, keyed on email id) and `documents` (one point per Chonkie chunk, written by `marionette/src/embed-doc.ts`, keyed on chunk id; SEARCHED by `retrieve.ts` alongside `emails` since `a25074d` — no longer write-only; counts: see STATUS header)** (derived indexes over `emails.body` / `document_chunks.text`) | Reasoning (marionette's job); the source-of-truth body/chunk text (that stays in Postgres) |
 | **redis** | 6379 (LAN only) | Caching / ephemeral state | Unused by any service yet |
 | **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min; **after each sync the cron also POSTs marionette `/classify` + `/embed` (limit 50 each) to auto-drain new mail — a thin forward, no reasoning in api**), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons**, **host/container metrics (`metrics.ts` — `GET /metrics/host` reads host CPU/mem/disk vitals; `GET /metrics/app` streams per-container CPU/mem via the Docker socket) feeding THE MONITOR dashboard modal** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log`. **Dispatches on `job.kind` (`'deploy'` | `'restart'`): `runJob` for build/commit/deploy+rollback, `runRestartJob` for `service-restart` (Mari's first hand — `docker compose restart <svc>` → health-poll → resolve, no build/commit/rollback; see §4)** | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
@@ -228,7 +229,7 @@ asked about X on date Y" as a queryable fact would not be.
 
 **Current utility services:** `redis` (cache), `qdrant` (vector index — now populated: the
 `emails` collection holds one 1536-dim vector per embedded email (derived index over
-`emails.body`), and the `documents` collection holds one vector per Chonkie chunk (derived index
+`emails.body`), and the `documents` collection holds one vector per Chonkie chunk (both collections are searched by `retrieve.ts`, `a25074d`) (derived index
 over `document_chunks.text`); the bodies/chunk text stay in Postgres, the one source of truth),
 `portainer` /
 `dozzle` / `uptime-kuma` (ops visibility), `deploy` (build/rollback — audits *to*
@@ -840,6 +841,45 @@ still required. The auto-execute-low-risk tier (M5 proper) is a later step ON TO
 - **Commits:** `27f18b3` (`feat(marionette): /think consumes audit-sight — narrates real
   system state`) on top of `9f3f054` (`feat(marionette): audit-sight read endpoint`).
 
+**Ambient sight — ingestion staleness in `/think` — done, live (`465d8d9`):**
+The first **ambient-tier** prompt input: always injected, unconditional, tiny, no keyword
+gate. Closes the silent-ingestion hole (§8) — ingestion died for 3d 8h while `/health`
+stayed green and every drain reported healthy over an empty queue.
+- **`marionette/src/ingest-sight.ts`** — deliberately split the way `audit-read.ts` (DB) and
+  `system-sight.ts` (pure) are: `readIngestState()` is the ONLY DB touch (one indexed SELECT
+  over `sync_state`, whose PK is `source` — 2 rows, in-process, no HTTP hop); 
+  `formatIngestForPrompt(rows, now)` is **PURE** — `now` is passed in, which is the only
+  reason the stale path is testable without mutating production `sync_state`.
+- **Output is one line, per source:** `INGESTION: gmail 3m ago, gcal 4m ago` /
+  `INGESTION: gmail 68m ago (STALE), gcal 4m ago`. Sources fail independently, so Mari can
+  name WHICH one is dead. `EXPECTED_SOURCES = ['gmail','gcal']` drives display order and
+  lets a missing row read as `never synced (STALE)`; unexpected extras are appended, never
+  silently dropped. `STALE_AFTER_MIN = 15` (three missed 5-min ticks).
+- **Injected whether fresh OR stale** — otherwise Mari could only fail to warn, never
+  affirm that data IS current. Pushed immediately after `SYSTEM_PROMPT`, BEFORE both gated
+  blocks. Read failure logs and falls through (injects nothing); never sinks `/think`.
+- **`prompt.ts` widened AND corrected.** The old `PRESENT LIMITS` opener ("you have NO
+  ingested data ... your ontology is empty") was false against 1000+ emails and directly
+  contradicted the new line; it now says the homelab HAS the data but Mari holds none of it
+  in mind, and can speak only to what a block retrieved into THIS request.
+- **Isolation-tested four ways before commit** (throwaway `docker run` on `bentley-os_backend`):
+  (a) `what is 2+2?` still answers `4`, unpolluted — line present is not line relevant;
+  (b) `"when did my email last sync?"` answered with real minutes AND cited the INGESTION
+  line in its reasoning — it matches NO keyword gate, which is what proves the injection is
+  unconditional; (c) seven synthetic-row cases through the pure formatter (both fresh, one
+  stale, both stale, missing row, sub-minute `<1m`, empty array -> null, and the exact 15m
+  boundary), zero writes to `sync_state`; (d) bad `DATABASE_URL` -> throws in 10ms, no hang.
+- **Deployed** via audited `POST /deploy {"service":"marionette"}` — job `daf7719e`,
+  confirmed by the `deploy.succeeded` row, no rollback; file verified present INSIDE the
+  running container afterward.
+- **Design note — the three tiers.** Prompt assembly is now: **ambient** (always, tiny, no
+  gate — this), **retrieved** (gated, expensive, large — audit-sight, email/document
+  retrieval), **history** (last N turns, when a conversation id exists — not built).
+  **Host vitals were deliberately EXCLUDED from ambient:** an HTTP hop to `api:3000` on
+  every `/think` would put a cross-service dependency on the reasoning path with a hang
+  risk when `api` is mid-restart. Host telemetry already surfaces on THE MONITOR.
+- **Commit:** `465d8d9`.
+
 **Whisper — self-hosted speech-to-text, done end-to-end:**
 - **Server:** `~/bentley-os/whisper/Dockerfile` builds `whisper.cpp` **v1.7.6** from source
   (`ggerganov/whisper.cpp`, Vulkan backend, `GGML_VULKAN=1`, shared libs installed via
@@ -903,10 +943,14 @@ still required. The auto-execute-low-risk tier (M5 proper) is a later step ON TO
 
 **Git:** `~/bentley-os` is a git repo, `main` branch, private. Remote:
 `git@github.com:bentleylujero/bentley-os.git`. GitHub username `bentleylujero`.
-Local in sync with `origin/main` at `d8342f7`, working tree clean (`.claude/` now gitignored
+Local in sync with `origin/main` at `465d8d9`, working tree clean (`.claude/` now gitignored
 via `9c7978a`). Confirm current HEAD/sync via `bin/session-start`,
 never trust a hash pasted in this doc.
-Recent commits (newest first): `d8342f7` (feat(slice1): api document upload — POST /documents +
+Recent commits (newest first): `465d8d9` (feat(marionette): ambient ingestion-staleness in
+`/think` — sync_state freshness, always injected) → `a25074d` (feat(marionette): retrieve
+documents alongside emails in grounded Q&A) → `88478e7` (docs: track CLAUDE.md) → `5b49c35`
+/ `36ee8ee` / `5ac9ef7` / `448fd8e` (docs: oauth root-cause, whisper token, key rotations) →
+`d8342f7` (feat(slice1): api document upload — POST /documents +
 dashboard dropzone + embed-doc cron drain) → `1eef3dc` (feat(m3): document embedding pipeline —
 Chonkie chunks -> OpenAI 3-small -> Qdrant documents collection, POST /embed-doc) → `8a0f224` /
 `5787bd2` / `a1b32f6` / `1de5d79` / `72dae3e` (whisper: Vulkan GPU build v1.7.6 + small.en model —
@@ -1035,9 +1079,17 @@ trigger for the same `/think` → `delegate` path.
   system-status questions, so Mari answers "what have you done today?" / "anything failing?"
   from the real `audit_log` (see the audit-sight subsection above). This is *self*-sight over
   the ledger, NOT general memory — see the limit below.
-- **Still cannot:** ground answers in email *content* yet — the embed pipeline populated
-  Qdrant (see STATUS header for vector count) but `retrieve.ts` + the `/think` data-question gate aren't built, so
-  Mari can't yet answer "what did the accountant's email say?" from real bodies (next slice).
+- **Can also:** ground answers in real email AND document content. `retrieve.ts` embeds the
+  question and searches BOTH Qdrant collections (`emails` + `documents`) in parallel at
+  `TOP_K`=10 each, merges by score desc, truncates to `TOP_K` total, caps chunks at 2 per
+  document, and reads the real text back from Postgres (`emails.body` / `document_chunks.text`)
+  — never from the Qdrant payload. Gated by `isDataQuestion` in `data-gate.ts`, which also
+  owns the formatter (branches on a `kind: 'email' | 'chunk'` discriminated union). A
+  documents-side failure is isolated (`.catch -> []`) so email still answers. Grounded Q&A
+  shipped `a0ced26`; documents added `a25074d`.
+- **Can also:** always see how fresh her ingested data is — the ambient tier (`465d8d9`),
+  injected on EVERY `/think` with no gate. See the ambient-sight subsection below.
+- **Still cannot:** recall anything across requests.
   No cross-message conversation memory (`/think` is stateless — each Telegram message is a
   fresh request; audit-sight sees the *ledger*, retrieval will see email *content*, but
   neither recalls what the owner said two messages ago — "the file I just wrote" still means
@@ -1449,11 +1501,31 @@ system.
   `[ | ]` meter stayed flat while speaking. Fix: force the real device in System Settings →
   Sound → Input (not "default"). When push-to-talk returns "thank you", suspect a silent mic,
   not the token.
+- **A write-side pipeline can ship "verified end-to-end" and still be unreachable.** The
+  document pipeline (`1eef3dc`/`d8342f7`) correctly verified its own downstream effects —
+  `documents.embedded_at` stamped, Qdrant `points_count` matching — and was still invisible
+  to Mari for weeks, because `retrieve.ts` (written first, for email) hardcoded
+  `QDRANT_COLLECTION = 'emails'`. The `documents` collection was write-only. **When adding a
+  source to a system that already has one, grep the READ path** — the write path's own test
+  passes regardless. Fixed in `a25074d`.
+- **A coding agent reporting "done" is not a commit.** An agent session wrote
+  `ingest-sight.ts` + edits to `index.ts`/`prompt.ts`, then stopped: nothing committed,
+  nothing deployed, and a `deploy.succeeded` row in `audit_log` from 13 minutes BEFORE the
+  files were written made it briefly look shipped. Three checks settled it in seconds —
+  `git status -sb` (uncommitted), `git log --oneline` (HEAD unmoved), and
+  `docker exec <c> ls /app/src/<newfile>` (NOT PRESENT IN CONTAINER). **Verify a hand-off
+  against the box, never against the session summary.** Corollary: compare file mtimes to
+  audit-row timestamps — a deploy that predates the code it supposedly shipped is the tell.
 ---
 
 ## 8. Open questions (decided-when-we-get-there, not blocking)
 
-- **Rogue auto-committing actor — RESOLVED.** `e06ed72`/`449a9b7` (and a third recurrence,
+- **Rogue auto-committing actor — RESOLVED, and the agent is now DISABLED (2026-07-20).**
+  The Copilot cloud agent was turned off after reverting `THE_BIBLE.md` to stale snapshots
+  three times. First post-disable push survived clean. **The `git fetch origin` + diff
+  before EVERY push rule is relaxed to normal hygiene** — fetch before pushing because it
+  is good practice, not because a bot is racing you. **Incident history:**
+  `e06ed72`/`449a9b7` (and a third recurrence,
   `650a7a8`, caught live in a later session) are GitHub's native **Copilot coding agent**
   (workflow `dynamic/copilot-swe-agent/copilot`, confirmed via `gh api
   .../actions/workflows`, `state: active`), producing genuinely GPG-signed/verified commits
@@ -1512,7 +1584,7 @@ system.
   and keep email bodies off OpenAI (privacy), but cost is a non-argument (~2¢ one-time, <$1/yr)
   and it carries the same unfinished ROCm/HIP setup parked for whisper. `embedText()` in
   `embed.ts` is a clean single-function swap seam if privacy ever wins.
-- **Chunking — RESOLVED = Chonkie `RecursiveChunker`** (`1eef3dc`). The first long-form
+- **Chunking — RESOLVED = Chonkie `RecursiveChunker`; documents are now RETRIEVABLE too (`a25074d`)**. Chunking landed in `1eef3dc`. The first long-form
   ingestion source (uploaded documents) landed, so chunking is no longer deferred. `@chonkiejs/core`'s
   `RecursiveChunker` at a 512-token target (safely under 3-small's 8191-token cap) chunks each
   document body in `marionette/src/embed-doc.ts`; one `document_chunks` row + one Qdrant `documents`
@@ -1575,7 +1647,12 @@ system.
     tree is exactly the `.env.bak` hazard).
   - **Verified recovered:** `sync_state.age` < 2 min, 79 emails caught up in one tick,
     0 unclassified. The outage is legible in the data — 7/18 and 7/19 have zero rows.
-- **Ingestion failure is SILENT — the real defect this exposed. OPEN.** For three days the
+- **Ingestion failure is SILENT — RESOLVED (`465d8d9`, 2026-07-20).** Closed by the ambient
+  tier: `marionette/src/ingest-sight.ts` reads `sync_state` on EVERY `/think` (no keyword
+  gate) and injects a one-line `INGESTION: gmail Nm ago, gcal Nm ago` block, flagging any
+  source past 15 min as `(STALE)`. `prompt.ts` instructs Mari to warn plainly rather than
+  answer over stale data. No new table, no migration — `sync_state` already owned the fact.
+  See the ambient-tier subsection in §4. **Original description of the defect:** For three days the
   dashboard rendered normally, `/health` stayed green, and the classify/embed/enrich drains
   all reported healthy (processing an empty queue). Nothing anywhere surfaced that no data
   had entered the system. Ingestion still doesn't write to `audit_log` (see the shared-audit
