@@ -18,7 +18,7 @@ the moment the cron ticks; commands never are.
 # Slow-moving — changes only when WE ship. Value + check.
 head:         check: git rev-parse --short HEAD
 git_sync:     check: git status -sb | head -1
-migrations:   check: ls supabase/migrations/ | wc -l
+migrations:   check: ls supabase/migrations/ | wc -l    # 9 as of e62ff01
 services_up:  check: docker compose ps --status running | tail -n +2 | wc -l
 
 # Cron-driven — NO value stored, read live via bin/session-start.
@@ -30,6 +30,7 @@ events:       check: SELECT count(*) FROM calendar_events
 tasks:        check: SELECT count(*) FROM tasks
 documents:    check: SELECT count(*) FROM documents
 doc_chunks:   check: SELECT count(*) FROM document_chunks
+messages:     check: SELECT count(*) FROM messages
 ```
 
 *Normal, not a fault: `embedded` trails `emails`. Newly-synced mail waits for
@@ -49,7 +50,7 @@ block + the relevant section below. That's the only time this file changes.*
 | **postgres** | 5432 | All persisted state (ontology, audit ledger) |
 | **qdrant** | 6333 | Vector index — `emails` collection, 1536-dim |
 | **redis** | 6379 | Cache (unused by app yet) |
-| **marionette** | 4200 | The AI brain — reasoning, classify, embed, task-enrich, document-embed (Chonkie chunks → Qdrant), action lifecycle |
+| **marionette** | 4200 | The AI brain — reasoning, classify, embed, task-enrich, document-embed (Chonkie chunks → Qdrant), action lifecycle, conversation memory |
 | **contractor** | 4100 | Coding/build layer — real OpenCode sessions |
 | **deploy** | 4000 | Build + restart + health-check + audited rollback (dispatches on `job.kind`: build/deploy + `service-restart`) |
 | **whisper** | 4300 | Self-hosted speech-to-text (`small.en` model, Vulkan GPU) |
@@ -81,7 +82,23 @@ Dashboard at `spaghettios.bentleyos.me` (Clair).
 
 ## Next action
 
-**Most recent ship: PDF extraction** (`1c90a43`). `extractText()` handles
+**Most recent ship: conversation memory** (`e62ff01`, migration `0009`). Mari now
+remembers across turns. `messages` table — one row per turn, with an OPTIONAL
+`conversation_id` (absent = stateless, byte-identical to before).
+`marionette/src/memory.ts` reads the last **12 turns / 6000 chars**, whichever cap
+hits first, and injects them as the **history tier** — the third tier the
+ambient-sight design note named and never built. **Marionette owns the write**
+(§9: history is an input to reasoning, so it lives with the reasoner); api stays a
+thin relay passing `conversation_id = String(chatId)` through, so any future
+interface gets memory free instead of reimplementing it. History read failure
+degrades to stateless; the memory write is best-effort and cannot fail a
+successful `/think`. Stores her `message` only, **never `reasoning`**.
+Isolation-tested three ways (stateless unregressed, seed, recall), deployed jobs
+`7f461124` (marionette) + `0576c16b` (api), both `deploy.succeeded`. Verified live
+from the Telegram app: codename seeded in one message, recalled in the next. See
+Bible §4 conversation-memory subsection + §5 + §8.
+
+**Before that: PDF extraction** (`1c90a43`). `extractText()` handles
 `application/pdf` via `unpdf` (bundled serverless pdf.js, pure ESM, no native deps —
 `pdf-parse` rejected for its import-time `test/data` read). Text layer only; the existing
 `MIN_CHARS` guard catches scanned/image-only as a clean 415. `/embed-doc` needed no change.
@@ -173,11 +190,6 @@ reviewed. Worth a deliberate review later.
   (`960116a` + `1c90a43`); a scanned PDF is a loud 415, not a silent empty row.
   Tesseract means a ~200MB+ binary in the api image — only worth it if scanned
   documents actually show up.
-- **Conversation memory** — migration `0009`, `messages` table keyed on an OPTIONAL
-  `conversation_id` (absent = stateless, byte-identical to today). Window capped by
-  CHARS not turns. Store user text + Mari's `message`, never `reasoning`. Last,
-  because it is the only item needing a migration and the only one that can regress
-  existing behavior.
 - Tasks feature follow-ons: Slice B (self-email → task), Slice C (insight/help
   layer).
 
