@@ -41,10 +41,16 @@ function extractFirstJsonObject(raw: string): string {
 }
 // Calls DeepSeek in JSON mode. Returns the raw string content (expected to be a
 // JSON object) plus metadata. Throws on network failure, non-2xx, or missing content.
-export async function callDeepSeek(messages: ChatMessage[]): Promise<DeepSeekResult> {
+// `modelOverride` lets a cheap, high-frequency call (the question-router) run on
+// deepseek-v4-flash while real decisions stay on MARIONETTE_MODEL. Omitted =
+// exactly the previous behavior; every existing caller is unaffected.
+export async function callDeepSeek(
+  messages: ChatMessage[],
+  modelOverride?: string,
+): Promise<DeepSeekResult> {
   const key = process.env.DEEPSEEK_API_KEY;
   if (!key) throw new Error('DEEPSEEK_API_KEY not set in environment');
-  const model = process.env.MARIONETTE_MODEL || DEFAULT_MODEL;
+  const model = modelOverride || process.env.MARIONETTE_MODEL || DEFAULT_MODEL;
   const res = await fetch(API_URL, {
     method: 'POST',
     headers: {

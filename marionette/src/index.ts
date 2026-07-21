@@ -15,6 +15,7 @@ import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts'
 import { isDataQuestion, formatRetrievalForPrompt } from './data-gate.ts';
 import { retrieveContext } from './retrieve.ts';
 import { readIngestState, formatIngestForPrompt } from './ingest-sight.ts';
+import { routeQuestion, type Route } from './question-router.ts';
 
 // contractor's /execute can run long (real OpenCode build tasks, multi-step
 // tool use) — raise past undici's default 5-minute headers/body timeout so
@@ -151,7 +152,25 @@ app.post('/think', async (c) => {
     } catch (ingestErr) {
       console.error('[think] ingest-sight fetch failed:', ingestErr);
     }
-    if (isSystemStatusQuestion(request)) {
+    // ROUTING: one cheap flash classify decides which pre-fetch blocks this
+    // request needs. Replaces the two hand-written keyword gates, which failed
+    // silently on any phrasing not in their list (a document question that
+    // never said "email" got no retrieval at all). If the router call fails we
+    // fall back to those same gates — degraded is exactly today's behavior,
+    // never worse. See THE_BIBLE.md §8.
+    let route: Route = { needs_data: false, needs_system: false, source: 'fallback' };
+    const routed = await routeQuestion(request);
+    if (routed) {
+      route = routed;
+    } else {
+      route = {
+        needs_data: isDataQuestion(request),
+        needs_system: isSystemStatusQuestion(request),
+        source: 'fallback',
+      };
+    }
+
+    if (route.needs_system) {
       try {
         const summary = await auditSummary(60);
         messages.push({ role: 'system' as const, content: formatAuditForPrompt(summary) });
@@ -159,7 +178,7 @@ app.post('/think', async (c) => {
         console.error('[think] audit-sight fetch failed:', sightErr);
       }
     }
-    if (isDataQuestion(request)) {
+    if (route.needs_data) {
       try {
         const hits = await retrieveContext(request);
         messages.push({ role: 'system' as const, content: formatRetrievalForPrompt(hits) });
@@ -185,6 +204,7 @@ app.post('/think', async (c) => {
         model: result.model,
         usage: result.usage,
         finish_reason: result.finishReason,
+        route,
       },
     });
   } catch (err: any) {

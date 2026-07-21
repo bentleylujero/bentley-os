@@ -39,6 +39,31 @@ const DATA_PATTERNS: string[] = [
   'invoice',
   'attachment',
   'newsletter about',
+  // Document vocabulary — added when DOCX extraction landed. Retrieval has
+  // searched the documents collection since a25074d, but every pattern above
+  // was email-only, so a question phrased in document language never fired the
+  // gate and the corpus was effectively invisible. See THE_BIBLE.md §8.
+  'document',
+  'documents',
+  'the doc',
+  'my doc',
+  'the file',
+  'in the file',
+  'uploaded',
+  'i uploaded',
+  'the brief',
+  'the memo',
+  'the spec',
+  'the report',
+  'the plan',
+  'the deck',
+  'the notes',
+  'according to',
+  'what does it say',
+  'says about',
+  '.docx',
+  '.pdf',
+  '.md',
 ];
 
 export function isDataQuestion(request: string): boolean {
