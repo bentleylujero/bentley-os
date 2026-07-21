@@ -185,7 +185,7 @@ one row, stop and decide before coding — don't let it leak into two services.*
 | **api** | 3000 | HTTP surface: `/health`, **dashboard (`/` — server-rendered "What changed" (deltas since last look) + "Today" (today's calendar events) + recent email, reads Postgres directly via the `pg` pool)**, ingestion (gcal/gmail → Postgres, scheduled via node-cron every 5 min; **after each sync the cron also POSTs marionette `/classify` + `/embed` (limit 50 each) to auto-drain new mail — a thin forward, no reasoning in api**), OpenCode proxy (`/opencode/*`), **Telegram webhook (`/telegram/webhook`) → handles both text messages (→ marionette `/think`) AND button taps (`callback_query` → marionette `/actions/:id/approve|deny`); plus internal relay `POST /telegram/surface/:id` that pushes a proposed action to the allow-listed chat with inline Approve/Deny buttons**, **host/container metrics (`metrics.ts` — `GET /metrics/host` reads host CPU/mem/disk vitals; `GET /metrics/app` streams per-container CPU/mem via the Docker socket) feeding THE MONITOR dashboard modal** | Build/deploy logic, AI reasoning, action lifecycle state (marionette owns that) |
 | **deploy** | 4000 (127.0.0.1) | Build + restart + health-check + auto-rollback for `api`, `contractor`, `marionette`; writes every action to `audit_log`. **Dispatches on `job.kind` (`'deploy'` | `'restart'`): `runJob` for build/commit/deploy+rollback, `runRestartJob` for `service-restart` (Mari's first hand — `docker compose restart <svc>` → health-poll → resolve, no build/commit/rollback; see §4)** | *What* code does — purely CI/CD operator. **Does not cover `whisper`** (see §4) |
 | **contractor** | 4100 (`backend` only) | The coding/build layer. `POST /execute` — real `@opencode-ai/sdk` session + prompt against the systemd OpenCode server, audited. Full sandbox-zone autonomy (see §9) | Orchestration, ingestion, deploy |
-| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, **now consumed by `/think`**: system-status questions trigger an in-process `auditSummary(60)` read, injected into the reasoning prompt so Mari narrates real activity instead of claiming blindness** | Ingestion (api's job), deploy (deploy's job) |
+| **marionette** | 4200 (`backend` only) | The orchestrator. `POST /think` — DeepSeek reasoning, structured decision (**response shape: `{decision: {decision, message, reasoning}}`, nested — not flat**), audited. Can `reply` or `delegate` to contractor — build-machine keystone, verified end-to-end incl. real multi-step tool-call tasks, driven live from Telegram. **Also owns conversation memory (`messages` table, read+written by `memory.ts` on every `/think` carrying a `conversation_id`) and the M4 action lifecycle: `actions` table state transitions via `POST /actions`, `GET /actions[?status=]`, `GET /actions/:id`, `POST /actions/:id/approve`, `POST /actions/:id/deny`. And `GET /audit/summary?window=<min>` — Mari's read-only "sight" over her own `audit_log`, **now consumed by `/think`**: system-status questions trigger an in-process `auditSummary(60)` read, injected into the reasoning prompt so Mari narrates real activity instead of claiming blindness** | Ingestion (api's job), deploy (deploy's job) |
 | **whisper** | 4300 (`backend` only, exposed publicly via `whisper.bentleyos.me`) | Self-hosted speech-to-text. `whisper.cpp`'s `whisper-server` binary, `POST /inference` (multipart, field `file`) → `{"text": "..."}`. Currently running the `small.en` model (GPU-accelerated via Vulkan) | AI reasoning (that's marionette's job) — whisper is pure transcription, no interpretation |
 | **cloudflared** | — | Public tunnel, gated on `api` health | — |
 | **portainer / dozzle / uptime-kuma** | 9000 / 8080 / 3001 | Ops visibility | Nothing app-level |
@@ -274,8 +274,10 @@ and the embedding-status column + partial index (from `0006_email_embeddings.sql
 M3 — `embedded_at` on `emails` + `idx_emails_unembedded`), the `tasks` object type (from
 `0007_tasks.sql`, M3 — see the tasks-panel subsection below), and the document-ingestion
 ontology (from `0008_documents.sql`, M3 — `documents` + `document_chunks` tables +
-`idx_documents_unembedded`, see the document-ingestion subsection below), all applied live.
-Migrations live at `supabase/migrations/` (eight files, `0001`–`0008`).
+`idx_documents_unembedded`, see the document-ingestion subsection below), and the
+conversation-memory table (from `0009_messages.sql`, `e62ff01` — `messages` +
+`idx_messages_conversation`, see the conversation-memory subsection below), all applied live.
+Migrations live at `supabase/migrations/` (nine files, `0001`–`0009`).
 - `emails` — the Clair classifier (`marionette/src/classify.ts`) **actively writes**
   `category`, `importance`, `reason`, `confidence`, `classified_at`. Don't recreate any of
   them. Live columns confirmed via `\d emails`: `id` (uuid), `source`, `source_id`,
@@ -912,6 +914,65 @@ stayed green and every drain reported healthy over an empty queue.
   risk when `api` is mid-restart. Host telemetry already surfaces on THE MONITOR.
 - **Commit:** `465d8d9`.
 
+**Conversation memory — the history tier — done, live (`e62ff01`):**
+The third and last prompt tier the ambient-sight design note named (§4 ambient subsection:
+ambient / retrieved / **history**). Closes the "no cross-message memory" hole (§8) — every
+Telegram message used to be a cold, stateless `/think`, so "the file I just wrote" meant
+nothing.
+- **Migration `0009_messages.sql`** (applied live): `messages` — one row per turn. Columns:
+  `id` (bigint identity), `conversation_id` (text, NOT NULL), `role` (text, CHECK
+  `in ('user','assistant')`), `content` (text), `created_at`. Index
+  `idx_messages_conversation (conversation_id, created_at desc)` — the read path exactly.
+  **Ontology-correct, not a shadow table:** a turn in a conversation is a durable fact about
+  the owner's world (§3a), stored once, and `audit_log` remains the append-only ledger — the
+  two do not overlap in role (audit rows record *that* a think happened; `messages` records
+  *what was said*).
+- **`conversation_id` is OPTIONAL and that is the safety property.** Absent = stateless,
+  byte-identical to pre-`0009` behavior. Every non-Telegram caller (direct curl, test
+  scripts, contractor) is unaffected without touching a line of their code.
+- **`marionette/src/memory.ts`** — deliberately split the way `ingest-sight.ts` is: DB
+  functions (`readHistory`, `writeTurn`) plus a PURE formatter
+  (`formatHistoryForPrompt`). Same `postgres(DATABASE_URL, {max:2, idle_timeout:20})` client
+  as `audit.ts`/`actions.ts`.
+  - **Window = 12 turns AND 6000 chars, whichever cap hits first.** Both, deliberately:
+    a pure char cap lets one pasted wall of text evict ten short exchanges; a pure turn cap
+    lets twelve long ones blow the context. Read newest-first via the index, accumulate until
+    a cap trips, then `.reverse()` to chronological.
+  - **Stores her `message` only — NEVER `reasoning`.** Reasoning is Mari's scratchpad; feeding
+    it back would compound noise turn over turn.
+- **`/think` wiring** (`marionette/src/index.ts`): reads an optional `conversation_id` off the
+  body (trimmed, empty string treated as absent). History is pushed **last**, after both gated
+  blocks and immediately before the user turn, so recency reads naturally to the model. Both
+  turns are written **after** a successful decision, so a failed `/think` doesn't poison the
+  history with an unanswered turn.
+  - **Both directions degrade gracefully.** A history *read* failure logs and falls through to
+    the stateless path (never sinks `/think`, same pattern as the ambient/audit-sight reads); a
+    memory *write* failure logs and is swallowed (a bookkeeping failure must never fail a
+    request that reasoned correctly).
+  - `conversation_id` is written into the `marionette.think` audit payload, so a request's
+    memory scope is visible in the ledger.
+- **api stays a thin relay — the §9 call that matters here.** `apps/api/src/routes/telegram.ts`
+  passes `conversation_id: String(chatId)` through and nothing else; it does not read, store,
+  or assemble history. **The alternative (api owning the write) was considered and rejected:**
+  every future interface — dashboard chat, voice — would reimplement memory (shadow state, §2),
+  and api holding conversation state is one step from api doing context assembly, which is
+  reasoning. History is an input to reasoning, so it lives with the reasoner. The Telegram
+  `chat.id` is used as the conversation key: stable, already in the webhook payload, no new
+  state invented to hold it.
+- **Isolation-tested three ways** before commit (throwaway `docker run` on `bentley-os_backend`
+  + `.env`, probed via in-container `node -e fetch`): (a) no `conversation_id` → `2+2` answered
+  `4`, stateless path unregressed; (b) seed turn accepted; (c) follow-up in the same
+  conversation correctly recalled the seeded fact; (d) exactly 4 rows in `messages`, alternating
+  user/assistant in order. **Caveat, same class as the dashboard `last_seen_at` note:** the
+  isolation container uses `.env`, so its test rows land in the LIVE `messages` table — use a
+  recognizable `conversation_id` prefix and clean up after.
+- **Deployed** marionette (job `7f461124`) then api (job `0576c16b`), both confirmed by
+  `deploy.succeeded` rows, no rollback. **Verified live from the actual Telegram app**, not just
+  a container probe: a codename asserted in one message was recalled correctly in the next, with
+  the four rows confirmed in Postgres under the real chat id.
+- **Commit:** `e62ff01` (`feat(0009): conversation memory — messages table + history tier in
+  /think, Telegram passes chat id`).
+
 **Whisper — self-hosted speech-to-text, done end-to-end:**
 - **Server:** `~/bentley-os/whisper/Dockerfile` builds `whisper.cpp` **v1.7.6** from source
   (`ggerganov/whisper.cpp`, Vulkan backend, `GGML_VULKAN=1`, shared libs installed via
@@ -978,7 +1039,9 @@ stayed green and every drain reported healthy over an empty queue.
 Local in sync with `origin/main` at `465d8d9`, working tree clean (`.claude/` now gitignored
 via `9c7978a`). Confirm current HEAD/sync via `bin/session-start`,
 never trust a hash pasted in this doc.
-Recent commits (newest first): `9700240` (feat(marionette): question-router replaces keyword
+Recent commits (newest first): `e62ff01` (feat(0009): conversation memory — messages table +
+history tier in /think, Telegram passes chat id) → `1c90a43` (feat(docs): PDF text extraction
+via unpdf) → `9700240` (feat(marionette): question-router replaces keyword
 gates — flash classify decides retrieval, keyword fallback on failure) → `960116a` (feat(docs):
 DOCX text extraction via mammoth + empty-text guard at the extractText seam) → `465d8d9`
 (feat(marionette): ambient ingestion-staleness in
@@ -1143,11 +1206,14 @@ trigger for the same `/think` → `delegate` path.
     missed, two system questions, math, a coding request, and a bare greeting), then end-to-end:
     the exact question that failed pre-router now returns the real Key Promise line cited by
     document title and chunk index, with `2+2` and `what have you done today?` both unregressed.
-- **Still cannot:** recall anything across requests.
-  No cross-message conversation memory (`/think` is stateless — each Telegram message is a
-  fresh request; audit-sight sees the *ledger*, retrieval will see email *content*, but
-  neither recalls what the owner said two messages ago — "the file I just wrote" still means
-  nothing), no delegation targets beyond contractor, no *autonomous* production-zone write
+- **Can also:** remember the conversation. `memory.ts` reads the last 12 turns / 6000 chars of
+  a `conversation_id` and injects them as the history tier immediately before the user turn,
+  then writes both turns after a successful decision (`e62ff01`). Telegram supplies the chat id,
+  so "the file I just wrote" now resolves. Absent a `conversation_id`, `/think` is stateless
+  exactly as before.
+- **Still cannot:** carry memory ACROSS conversations — history is scoped to one
+  `conversation_id`, so a second interface (or a different chat) starts cold; nothing summarizes
+  or promotes an old conversation into long-term recall. No delegation targets beyond contractor, no *autonomous* production-zone write
   actions — the M4 approval-gate layer IS built (propose→approve→deny→execute + Telegram
   buttons, see M4 subsection) and the first hand `service-restart` ships on it (`12b0211`),
   but contractor's own writes remain sandbox-only and nothing auto-commits/auto-deploys/
@@ -1212,6 +1278,11 @@ actions      (M4: mutable current-state store for proposed side-effecting ops aw
               approval; audit_log stays the ledger, target = actions.id)
 dashboard_state (M2 "what changed": singleton, one row id=1, holds last_seen_at — the one
               fact of when the owner last viewed the dashboard; not a shadow table)
+messages     (0009: conversation memory. One row per turn, keyed on an OPTIONAL
+              conversation_id (absent = stateless). role user|assistant, content =
+              the turn text — Mari's `message` only, never her `reasoning`. Read
+              back as the history tier of the /think prompt, capped 12 turns /
+              6000 chars. audit_log stays the ledger; this stores what was SAID)
 tasks        (M3 tasks panel / Slice A: owner-created responsibilities. Owner asserts
               priority (high|medium|low); marionette ADDS insight (reason + category)
               via the enrich cron, never overwrites priority. Migration 0007. Its own
@@ -1601,6 +1672,19 @@ system.
   widening a hand-written keyword list is a guess, and it will be wrong again — 3 of 4 natural
   phrasings still missed after a deliberate widening pass, which is what finally justified the
   question-router (`9700240`).
+- **An isolation container using `.env` writes to PRODUCTION tables, not a sandbox.** The
+  conversation-memory test ran in a throwaway container on `bentley-os_backend` with
+  `--env-file .env` — which is the whole point (it exercises the real DB), but it means every
+  test turn landed as a real row in the live `messages` table. Same class as the dashboard
+  `last_seen_at` note, generalized: **isolation isolates the CODE, never the DATA.** For any
+  slice that WRITES, use a recognizable key prefix (`isotest-<epoch>`) so the rows can be
+  identified and deleted afterward, and check the table before assuming a clean tree.
+- **Make the new capability OPTIONAL at the field level and the regression surface collapses to
+  zero.** `conversation_id` is optional on `/think`: absent means byte-identical prior behavior,
+  so direct API callers, test scripts, and contractor needed no changes and could not break.
+  The isolation test then only had to prove two things — that the old path still works untouched
+  and that the new path works — rather than re-verifying every existing caller. Cheaper to test,
+  and it makes rollback a matter of not sending a field.
 ---
 
 ## 8. Open questions (decided-when-we-get-there, not blocking)
@@ -1769,10 +1853,19 @@ system.
   identical whether it came from a direct API call, a test script, or a Telegram message.
   Not a problem yet at single-user scale, but worth a `source` or `channel` field in the
   audit payload before there's ever more than one command interface or user to disambiguate.
-- **No conversation memory across Telegram messages.** Each message is a fresh, stateless
-  `/think` call — marionette has no way to know "the file I just wrote" refers to something
-  from two messages ago. Fine for one-shot commands today; will need addressing (likely via
-  Qdrant, already deferred to Milestone 3) before Telegram can support multi-turn tasks.
+- **No conversation memory across Telegram messages — RESOLVED (`e62ff01`, migration
+  `0009`).** The history tier ships: `messages` table + `marionette/src/memory.ts`, last
+  12 turns / 6000 chars injected before the user turn on any `/think` carrying a
+  `conversation_id`; Telegram passes `String(chatId)`. **Not Qdrant** — the earlier guess
+  that this would need vector recall was wrong for the actual need; a recent-window read off
+  an indexed Postgres table is simpler, exact, and cheap. Marionette owns the write (§9 —
+  history is an input to reasoning); api relays the id only, so a future interface gets
+  memory without reimplementing it. Absent id = stateless, byte-identical to before. See the
+  conversation-memory subsection in §4.
+  - **Follow-on, NOT built:** memory is scoped to a single `conversation_id`. There is no
+    cross-conversation recall, no summarization of old turns, and no eviction/retention
+    policy — `messages` grows unbounded. None of these bite at single-user scale; revisit
+    when a second interface exists or the table gets large enough to notice.
 - **Telegram webhook has no rate limiting or replay protection beyond the secret-token
   header and user-ID allow-list.** Low risk at single-user scale with a Bypass-scoped path,
   but worth revisiting if this interface's trust boundary ever expands.
