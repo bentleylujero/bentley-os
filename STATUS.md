@@ -193,6 +193,8 @@ reviewed. Worth a deliberate review later.
 - Tasks feature follow-ons: Slice B (self-email → task), Slice C (insight/help
   layer).
 
+<!-- MARI:APPEND NEXT -->
+
 ---
 
 ## Standing debts (not blocking, worth closing)

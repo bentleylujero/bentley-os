@@ -1,6 +1,6 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
-import { enqueue, getJob, listJobs } from './runner.ts';
+import { enqueue, getJob, listJobs, type DocsBlock } from './runner.ts';
 import { pool } from './audit.ts';
 
 const app = new Hono();
@@ -15,7 +15,7 @@ app.get('/health', async (c) => {
 });
 
 app.post('/deploy', async (c) => {
-  let body: { service?: string; commit_message?: string; action_id?: number; kind?: 'deploy' | 'restart' };
+  let body: { service?: string; commit_message?: string; action_id?: number; kind?: 'deploy' | 'restart' | 'docs'; docs_blocks?: DocsBlock[] };
   try {
     body = await c.req.json();
   } catch {
@@ -23,8 +23,15 @@ app.post('/deploy', async (c) => {
   }
   if (!body.service) return c.json({ error: 'missing "service"' }, 400);
 
-  const kind = body.kind === 'restart' ? 'restart' : 'deploy';
-  const { job, error } = enqueue(body.service, body.commit_message, body.action_id, kind);
+  const kind =
+    body.kind === 'restart' ? 'restart' : body.kind === 'docs' ? 'docs' : 'deploy';
+  const { job, error } = enqueue(
+    body.service,
+    body.commit_message,
+    body.action_id,
+    kind,
+    body.docs_blocks,
+  );
   if (error) return c.json({ error }, 400);
   return c.json({ job_id: job!.id, status: job!.status, service: job!.service }, 202);
 });

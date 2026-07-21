@@ -17,6 +17,10 @@ const SERVICE_HEALTH: Record<string, string | null> = {
   api: 'http://api:3000/health',
   contractor: 'http://contractor:4100/health',
   marionette: 'http://marionette:4200/health',
+  // Pseudo-service: an `update_docs` job touches only markdown in the repo.
+  // Nothing is built, nothing is restarted, so there is no health endpoint to
+  // poll. It lives here solely to pass enqueue's allow-list gate unchanged.
+  docs: null,
 };
 
 const SERVICE_PATH: Record<string, string> = {
@@ -32,7 +36,7 @@ export type JobStatus = 'queued' | 'running' | 'success' | 'rolled_back' | 'fail
 export interface Job {
   id: string;
   service: string;
-  kind: 'deploy' | 'restart';
+  kind: 'deploy' | 'restart' | 'docs';
   status: JobStatus;
   createdAt: string;
   startedAt?: string;
@@ -41,8 +45,26 @@ export interface Job {
   deployedCommit?: string;
   commitMessage?: string;
   actionId?: number;
+  docsBlocks?: DocsBlock[];
   log: string[];
 }
+
+// A single append-only block Mari proposes. `section` names a sentinel that
+// must already exist in one of the doc files; `markdown` is inserted directly
+// ABOVE that sentinel. Mari never sees or chooses a line number.
+export interface DocsBlock {
+  section: string;
+  markdown: string;
+}
+
+// The only files an update_docs job may touch, and the only sentinels that
+// resolve. Anything outside this map is refused at apply time.
+const DOC_SENTINELS: Record<string, string> = {
+  '§4': 'THE_BIBLE.md',
+  '§7': 'THE_BIBLE.md',
+  '§8': 'THE_BIBLE.md',
+  NEXT: 'STATUS.md',
+};
 
 const jobs = new Map<string, Job>();
 const queue: string[] = [];
@@ -60,7 +82,8 @@ export function enqueue(
   service: string,
   commitMessage?: string,
   actionId?: number,
-  kind: 'deploy' | 'restart' = 'deploy',
+  kind: 'deploy' | 'restart' | 'docs' = 'deploy',
+  docsBlocks?: DocsBlock[],
 ): { job?: Job; error?: string } {
   if (!(service in SERVICE_HEALTH)) {
     return { error: `unknown service '${service}'. allowed: ${Object.keys(SERVICE_HEALTH).join(', ')}` };
@@ -73,6 +96,7 @@ export function enqueue(
     createdAt: new Date().toISOString(),
     commitMessage,
     actionId,
+    docsBlocks,
     log: [],
   };
   jobs.set(job.id, job);
@@ -96,6 +120,8 @@ async function pump(): Promise<void> {
       if (!job) continue;
       if (job.kind === 'restart') {
         await runRestartJob(job);
+      } else if (job.kind === 'docs') {
+        await runDocsJob(job);
       } else {
         await runJob(job);
       }
@@ -476,4 +502,148 @@ async function runRestartJob(job: Job): Promise<void> {
     payload: { job_id: job.id, kind: 'restart', restart_rc: rc },
   });
   await resolveAction(job, 'failed', `${job.service} (restart unhealthy)`);
+}
+
+// runDocsJob — hand #2 (`update_docs`). APPEND-ONLY by construction.
+//
+// Why append-only and not regenerate: wholesale LLM regeneration of these two
+// files silently deletes hard-won detail. That is not hypothetical here — the
+// Copilot cloud agent did exactly that, repeatedly, until it was disabled
+// 2026-07-20. Rebuilding that failure mode as a feature would be a mistake, so
+// Mari structurally CANNOT delete: she emits blocks, deploy inserts them above
+// a sentinel, and a line-conservation guard aborts the whole job if any
+// pre-existing line went missing.
+//
+// No build, no health poll, no rollback: markdown changes cannot affect a
+// running service, so there is nothing to poll and no last-good image to
+// return to. A failure here aborts BEFORE the commit, leaving the tree exactly
+// as it was found.
+async function runDocsJob(job: Job): Promise<void> {
+  job.status = 'running';
+  job.startedAt = new Date().toISOString();
+
+  await audit('deploy.started', {
+    target: 'docs',
+    outcome: 'running',
+    payload: { job_id: job.id, kind: 'docs', action_id: job.actionId ?? null },
+  });
+
+  const blocks = job.docsBlocks ?? [];
+  const fail = async (reason: string): Promise<void> => {
+    job.status = 'failed';
+    job.finishedAt = new Date().toISOString();
+    line(job, `docs job aborted: ${reason}`);
+    await audit('deploy.failed', {
+      target: 'docs',
+      outcome: 'error',
+      payload: { job_id: job.id, kind: 'docs', reason },
+    });
+    await resolveAction(job, 'failed', `docs (${reason})`);
+  };
+
+  if (blocks.length === 0) return fail('no blocks supplied');
+
+  // --- validate every block BEFORE touching any file ---
+  for (const b of blocks) {
+    if (!b || typeof b.section !== 'string' || typeof b.markdown !== 'string') {
+      return fail('malformed block (section/markdown must be strings)');
+    }
+    if (!(b.section in DOC_SENTINELS)) {
+      return fail(`unknown section '${b.section}'. allowed: ${Object.keys(DOC_SENTINELS).join(', ')}`);
+    }
+    if (!b.markdown.trim()) return fail(`empty markdown for section '${b.section}'`);
+    if (b.markdown.includes('MARI:APPEND')) {
+      return fail(`block for '${b.section}' contains a sentinel marker — refused`);
+    }
+  }
+
+  // --- group by file, snapshot originals ---
+  const fsp = await import('node:fs/promises');
+  const pathMod = await import('node:path');
+  const byFile = new Map<string, DocsBlock[]>();
+  for (const b of blocks) {
+    const file = DOC_SENTINELS[b.section]!;
+    byFile.set(file, [...(byFile.get(file) ?? []), b]);
+  }
+
+  const originals = new Map<string, string>();
+  for (const file of byFile.keys()) {
+    try {
+      originals.set(file, await fsp.readFile(pathMod.join(REPO_DIR, file), 'utf-8'));
+    } catch (e) {
+      return fail(`cannot read ${file}: ${String(e)}`);
+    }
+  }
+
+  // --- apply in memory ---
+  const updated = new Map<string, string>();
+  for (const [file, fileBlocks] of byFile) {
+    let text = originals.get(file)!;
+    for (const b of fileBlocks) {
+      const sentinel = `<!-- MARI:APPEND ${b.section} -->`;
+      if (!text.includes(sentinel)) return fail(`sentinel '${sentinel}' not found in ${file}`);
+      const stamp = new Date().toISOString().slice(0, 10);
+      const insert = `${b.markdown.trim()}\n\n<!-- appended by Mari ${stamp} (action ${job.actionId ?? 'n/a'}) -->\n\n`;
+      text = text.replace(sentinel, `${insert}${sentinel}`);
+      line(job, `queued ${b.markdown.length} chars for ${file} ${b.section}`);
+    }
+    updated.set(file, text);
+  }
+
+  // --- LINE-CONSERVATION GUARD: the whole point of this design ---
+  // Every line present before must still be present after, and the file must
+  // have grown. This is what makes deletion structurally impossible rather
+  // than merely discouraged.
+  for (const [file, before] of originals) {
+    const after = updated.get(file)!;
+    if (after.length <= before.length) {
+      return fail(`${file} did not grow (${before.length} -> ${after.length}) — refusing`);
+    }
+    const afterLines = new Set(after.split('\n'));
+    const missing = before.split('\n').filter((l) => l.trim() && !afterLines.has(l));
+    if (missing.length > 0) {
+      return fail(`${file} would LOSE ${missing.length} line(s), first: ${JSON.stringify(missing[0]!.slice(0, 80))}`);
+    }
+    line(job, `${file} guard passed: ${before.length} -> ${after.length} bytes, 0 lines lost`);
+  }
+
+  // --- fetch + divergence guard (same discipline as commitAndPush) ---
+  if ((await run(job, 'git', ['fetch', 'origin'])) !== 0) return fail('git fetch origin failed');
+  const local = await capture('git', ['rev-parse', 'HEAD']);
+  const remote = await capture('git', ['rev-parse', 'origin/main']);
+  if (local && remote && local !== remote) {
+    return fail(`local HEAD ${local.slice(0, 7)} diverged from origin/main ${remote.slice(0, 7)}`);
+  }
+
+  // --- write, then commit scoped to the doc files only ---
+  for (const [file, text] of updated) {
+    try {
+      await fsp.writeFile(pathMod.join(REPO_DIR, file), text, 'utf-8');
+      line(job, `wrote ${file}`);
+    } catch (e) {
+      return fail(`cannot write ${file}: ${String(e)}`);
+    }
+  }
+
+  const files = [...updated.keys()];
+  if ((await run(job, 'git', ['add', ...files])) !== 0) return fail('git add failed');
+
+  const msg = job.commitMessage || `docs(mari): append ${blocks.map((b) => b.section).join(', ')}`;
+  if ((await run(job, 'git', [...GIT_IDENTITY, 'commit', '-m', msg])) !== 0) {
+    return fail('git commit failed (nothing to commit?)');
+  }
+  if ((await run(job, 'git', ['push', 'origin', 'main'])) !== 0) {
+    return fail('git push failed — commit is LOCAL ONLY, manual push needed');
+  }
+
+  job.deployedCommit = (await currentCommit()) || undefined;
+  job.status = 'success';
+  job.finishedAt = new Date().toISOString();
+  line(job, `docs committed + pushed at ${job.deployedCommit?.slice(0, 7)}`);
+  await audit('deploy.succeeded', {
+    target: 'docs',
+    outcome: 'success',
+    payload: { job_id: job.id, kind: 'docs', commit: job.deployedCommit, sections: blocks.map((b) => b.section) },
+  });
+  await resolveAction(job, 'succeeded', `docs (${blocks.map((b) => b.section).join(', ')})`);
 }

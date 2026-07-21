@@ -129,13 +129,22 @@ export async function executeAction(action: ActionRow): Promise<void> {
     await sql`update actions set status = 'executing', updated_at = now() where id = ${action.id}`;
     await audit({ action: 'action.executing', target: String(action.id), outcome: 'success', payload: {} });
 
-    const service = (action.intent?.service as string) || 'api';
+    // update_docs targets no real service — it edits markdown in the repo.
+    // 'docs' is a pseudo-service that exists only to satisfy deploy's
+    // allow-list gate; nothing is built, restarted, or health-polled.
+    const isDocs = action.kind === 'update_docs';
+    const isRestart = action.kind === 'service-restart';
+    const service = isDocs ? 'docs' : (action.intent?.service as string) || 'api';
 
+    // update_docs   -> deploy's append-only docs path (no build, no restart).
     // service-restart -> deploy's restart path (no rebuild, no commit).
     // commit_deploy (and any other kind) -> the normal build/commit path.
-    const isRestart = action.kind === 'service-restart';
     const deployBody: Record<string, unknown> = { service, action_id: action.id };
-    if (isRestart) {
+    if (isDocs) {
+      deployBody.kind = 'docs';
+      deployBody.docs_blocks = action.intent?.blocks ?? [];
+      deployBody.commit_message = action.intent?.commit_message ?? undefined;
+    } else if (isRestart) {
       deployBody.kind = 'restart';
     } else {
       deployBody.commit_message = action.intent?.commit_message ?? undefined;

@@ -310,6 +310,29 @@ app.post('/actions', async (c) => {
     }
   }
 
+  // update_docs is shape-constrained at PROPOSE time. Deploy re-validates and
+  // enforces the line-conservation guard, but a malformed block should never
+  // become a proposed row awaiting a tap. Sections mirror deploy's
+  // DOC_SENTINELS — the only anchors that exist in the two doc files.
+  if (kind === 'update_docs') {
+    const SECTIONS = ['\u00a74', '\u00a77', '\u00a78', 'NEXT'];
+    const blocks = (intent as any)?.blocks;
+    if (!Array.isArray(blocks) || blocks.length === 0) {
+      return c.json({ error: 'update_docs requires a non-empty intent.blocks array' }, 400);
+    }
+    for (const b of blocks) {
+      if (!b || typeof b.section !== 'string' || !SECTIONS.includes(b.section)) {
+        return c.json({ error: `each block needs section in {${SECTIONS.join(', ')}}` }, 400);
+      }
+      if (typeof b.markdown !== 'string' || b.markdown.trim() === '') {
+        return c.json({ error: `block for ${b.section} needs non-empty markdown` }, 400);
+      }
+      if (b.markdown.includes('MARI:APPEND')) {
+        return c.json({ error: 'blocks may not contain a sentinel marker' }, 400);
+      }
+    }
+  }
+
   const row = await createAction({ kind, intent });
   return c.json({ action: row }, 201);
 });

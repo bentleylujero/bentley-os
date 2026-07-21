@@ -1263,6 +1263,8 @@ trigger for the same `/think` → `delegate` path.
 **verified live** (organizer_id populated on real rows, event_attendees confirmed via a
 real test event). Milestone 1 is complete; see §6.
 
+<!-- MARI:APPEND §4 -->
+
 ---
 
 ## 5. Data model
@@ -1685,6 +1687,8 @@ system.
   The isolation test then only had to prove two things — that the old path still works untouched
   and that the new path works — rather than re-verifying every existing caller. Cheaper to test,
   and it makes rollback a matter of not sending a field.
+<!-- MARI:APPEND §7 -->
+
 ---
 
 ## 8. Open questions (decided-when-we-get-there, not blocking)
@@ -1969,6 +1973,8 @@ system.
   in deploy with `enqueue` defaulting to `'deploy'`, so every existing enqueue path is
   unaffected; `pump()` dispatches `'restart'` to `runRestartJob` and `'deploy'` to `runJob`.
   Confirmed live via the `service-restart` end-to-end runs.
+
+<!-- MARI:APPEND §8 -->
 
 ---
 
