@@ -81,7 +81,28 @@ Dashboard at `spaghettios.bentleyos.me` (Clair).
 
 ## Next action
 
-**Most recent ship: the ambient tier — ingestion staleness in `/think`** (`465d8d9`).
+**Most recent ship: the question-router** (`9700240`). Mari now decides what to
+fetch with a model, not a keyword list. One `deepseek-v4-flash` classify per
+`/think` returns `{needs_data, needs_system}`, driving both pre-fetch blocks; the
+old keyword gates stay in the tree as the fallback when the router call fails, so
+degraded is exactly the prior behavior and never worse. `route` (incl.
+`source: router|fallback`) is written into the `marionette.think` audit payload, so
+a silently-degrading router is visible in the ledger. **What forced it:** a real
+document question ("what's the key promise in the chickens creative brief?") matched
+no keyword, so retrieval never ran and Mari claimed blindness while holding the
+answer in Qdrant — and a deliberate widening pass STILL missed 3 of 4 natural
+phrasings. Structural failure, not a bad list. Verified 8/8 on a phrasing panel,
+then end-to-end with `2+2` and `what have you done today?` unregressed. See Bible §4
+(marionette) + §7 + §8.
+
+**Before that: DOCX extraction** (`960116a`). `extractText()` handles DOCX via
+`mammoth`; a `MIN_CHARS = 20` guard rejects empty/image-only extraction as a clean
+415 for EVERY format — which also pre-solves scanned PDFs. Dropzone accepts and
+advertises `.docx`. Verified with a real work document on the live path: 2287 chars
+→ `documents` row → 5 Chonkie chunks → Qdrant, both downstream effects checked in
+Postgres rather than trusting the route's 201.
+
+**Before that: the ambient tier — ingestion staleness in `/think`** (`465d8d9`).
 Mari now always knows how fresh her data is. `marionette/src/ingest-sight.ts` reads
 `sync_state` on EVERY `/think` — no keyword gate, that is what "ambient" means — and
 injects one line: `INGESTION: gmail 3m ago, gcal 4m ago`, flagging any source past
@@ -137,14 +158,10 @@ reviewed. Worth a deliberate review later.
   — that's the whole point of hand #2.)
 - **M5 proper — auto-execute the low-risk action tier** — a step ON TOP of the
   hands; the hands stay approval-gated until it lands. Not started.
-- **Document ingestion follow-on: DOCX/PDF extraction** — the `extractText()`
-  seam in `documents.ts` is ready (other mimes → clean 415 today); wiring a real
-  extractor is the next slice. (Grounded Q&A over documents — `retrieve.ts` searching
-  the `documents` collection — SHIPPED at `a25074d`.)
-- **Question-router** — replace the hand-written keyword gate in `data-gate.ts`
-  (and `system-sight.ts`) with ONE classify-the-question pass routing to the right
-  pre-fetch. The (A) tool-call loop vs (B) pre-fetch injection fork has now surfaced
-  three times — audit-sight, MCP, and here. Worth settling permanently.
+- **Document ingestion follow-on: PDF extraction** — DOCX shipped (`960116a`);
+  PDF is the remaining case at the same `extractText()` seam. Decided: extract the
+  text layer, let the `MIN_CHARS` guard flag scanned/image-only PDFs as a clean 415.
+  OCR is a separate later slice.
 - **Conversation memory** — migration `0009`, `messages` table keyed on an OPTIONAL
   `conversation_id` (absent = stateless, byte-identical to today). Window capped by
   CHARS not turns. Store user text + Mari's `message`, never `reasoning`. Last,

@@ -21,11 +21,12 @@ narrative. When this conflicts with anything older, this wins.*
 > **At session start:** run `bin/session-start` on the box and paste its header block.
 > That, not this file and not memory, is ground truth for current counts/HEAD.
 
-*Last structural verification: 2026-07-20, against HEAD `465d8d9` (prior: 2026-07-17 at
-`d8342f7`). Milestone state: M0–M4
+*Last structural verification: 2026-07-21, against HEAD `9700240` (prior: 2026-07-20 at
+`465d8d9`). Milestone state: M0–M4
 complete (M4 clean, no open gaps — gate slice, Task A, Task B all shipped; both self-deploy
 and root-owned-git-object gaps resolved). M3 extended with the document-ingestion pipeline
-(marionette `1eef3dc` + api `d8342f7`, live) — DOCX/PDF extraction the deferred follow-on.
+(marionette `1eef3dc` + api `d8342f7`, live), then DOCX extraction (`960116a`) and the
+question-router replacing both keyword gates (`9700240`) — PDF extraction the deferred follow-on.
 M5's first hand `service-restart` shipped (`12b0211`); auto-execute tier not started. See §4/§6
 for detail and §8 for the resolved-gap history.*
 
@@ -570,9 +571,28 @@ chunks = many vectors.** Ships in two halves: marionette embeds (`1eef3dc`), api
 - **Commits:** `1eef3dc` (`feat(m3): document embedding pipeline — Chonkie chunks -> OpenAI 3-small
   -> Qdrant documents collection, POST /embed-doc`) → `d8342f7` (`feat(slice1): api document upload
   — POST /documents + dashboard dropzone + embed-doc cron drain`).
-- **Still open (deferred follow-on):** DOCX/PDF (and other-mime) text extraction — the
-  `extractText()` seam is ready (throws `UnsupportedType` → 415 today); wiring a real extractor is
-  the next slice. See §8.
+- **DOCX extraction — SHIPPED (`960116a`).** `extractText()` now handles
+  `application/vnd.openxmlformats-officedocument.wordprocessingml.document` via **`mammoth`**
+  (`extractRawText({ buffer })`, buffer from `await file.arrayBuffer()`). Mammoth ships its own
+  types — no `@types/` dep. Headings, paragraphs, and structure survive as readable plain text
+  (verified against a real work brief, not just a synthetic fixture).
+- **`MIN_CHARS = 20` empty-text guard, added in the same commit, applies to EVERY format.** A file
+  that parses fine but yields no real text is silent garbage — an empty `documents` row that
+  embeds to nothing. Below the floor now throws `UnsupportedType` → a clean **415** naming the
+  reason ("may be empty or image-only"). This also pre-solves scanned PDFs: a PDF with no text
+  layer will be rejected loudly at upload rather than entering the ontology empty. Verified both
+  paths fire with distinct messages (`tiny.md` → 415 empty-text; `nope.pdf` → 415 unsupported).
+- **Dropzone** (`dashboard.ts`) accepts AND advertises `.docx` — both the `accept` filter and the
+  visible label were updated (the label lagged the filter by one commit; a filter that allows a
+  type the label denies is a lie to the user).
+- **Verified end-to-end on the live public path:** a real `.docx` dropped at
+  `spaghettios.bentleyos.me` → 2287 chars extracted → `documents` row → cron tick → 5 Chonkie
+  chunks → Qdrant, `embedded_at` stamped. Both downstream effects checked directly in Postgres,
+  not the route's own 201.
+- **Still open (deferred follow-on):** PDF text extraction — same `extractText()` seam, one more
+  case. Decided this session: extract the text layer, and let the existing `MIN_CHARS` guard flag
+  scanned/image-only PDFs as a 415 rather than writing an empty row. OCR is a separate, later
+  slice (new binary in the api image, slow, imperfect). See §8.
 
 **Milestone 3 — tasks panel (Slice A) — done, live (Clair responsibilities dashboard):**
 This is the old "morning brief" roadmap item, redefined with the owner into a "breathing"
@@ -946,7 +966,10 @@ stayed green and every drain reported healthy over an empty queue.
 Local in sync with `origin/main` at `465d8d9`, working tree clean (`.claude/` now gitignored
 via `9c7978a`). Confirm current HEAD/sync via `bin/session-start`,
 never trust a hash pasted in this doc.
-Recent commits (newest first): `465d8d9` (feat(marionette): ambient ingestion-staleness in
+Recent commits (newest first): `9700240` (feat(marionette): question-router replaces keyword
+gates — flash classify decides retrieval, keyword fallback on failure) → `960116a` (feat(docs):
+DOCX text extraction via mammoth + empty-text guard at the extractText seam) → `465d8d9`
+(feat(marionette): ambient ingestion-staleness in
 `/think` — sync_state freshness, always injected) → `a25074d` (feat(marionette): retrieve
 documents alongside emails in grounded Q&A) → `88478e7` (docs: track CLAUDE.md) → `5b49c35`
 / `36ee8ee` / `5ac9ef7` / `448fd8e` (docs: oauth root-cause, whisper token, key rotations) →
@@ -1089,6 +1112,25 @@ trigger for the same `/think` → `delegate` path.
   shipped `a0ced26`; documents added `a25074d`.
 - **Can also:** always see how fresh her ingested data is — the ambient tier (`465d8d9`),
   injected on EVERY `/think` with no gate. See the ambient-sight subsection below.
+- **Routing is no longer keyword-based (`9700240`).** `marionette/src/question-router.ts` runs ONE
+  cheap classify pass per `/think` on **`deepseek-v4-flash`** (`MARIONETTE_ROUTER_MODEL` env,
+  default flash) returning `{needs_data, needs_system}`, which drives both pre-fetch blocks.
+  `callDeepSeek` gained an optional second param `modelOverride` — omitted = exactly the previous
+  behavior, so every existing caller is unaffected. The router NEVER sees retrieved content and
+  writes nothing; it is a routing decision, not a reasoning one.
+  - **The keyword gates (`isDataQuestion`, `isSystemStatusQuestion`) REMAIN IN THE TREE as the
+    fallback.** `routeQuestion` returns `null` on any failure (network, timeout, unparseable JSON,
+    a JSON object carrying neither key) and `/think` degrades to the old gates. Degraded is
+    exactly today's prior behavior — never worse than before the router existed.
+  - **`route` is written into the `marionette.think` audit payload**, including
+    `source: 'router' | 'fallback'`, so a silently-degrading router is visible in the ledger
+    instead of quietly reverting to blunt matching.
+  - **Booleans are coerced** (`coerceBool`) — a model returning `"true"`, `1`, or `null` must never
+    become a truthy object.
+  - **Verified 8/8** on a phrasing panel in isolation (three document questions the keyword gate
+    missed, two system questions, math, a coding request, and a bare greeting), then end-to-end:
+    the exact question that failed pre-router now returns the real Key Promise line cited by
+    document title and chunk index, with `2+2` and `what have you done today?` both unregressed.
 - **Still cannot:** recall anything across requests.
   No cross-message conversation memory (`/think` is stateless — each Telegram message is a
   fresh request; audit-sight sees the *ledger*, retrieval will see email *content*, but
@@ -1289,7 +1331,8 @@ auto-drain + grounded Q&A + tasks panel all shipped.** In **marionette**, not ap
   `extractText()` md/txt seam, DOCX/PDF → 415) + dashboard dropzone + `/embed-doc` cron drain.
   Deployed via audited `POST /deploy` (`deploy.succeeded`), verified end-to-end with both
   downstream effects (`embedded_at` timestamp + Qdrant point count) checked directly. See §4.
-  **DOCX/PDF extraction is the deferred follow-on — the `extractText()` seam is ready (§8).**
+  **DOCX extraction SHIPPED (`960116a`) via mammoth, with a `MIN_CHARS` empty-text guard covering
+  every format; PDF is the remaining follow-on at the same seam (§8).**
 - **Done when:** email is auto-classified + auto-embedded on ingest AND grounded Q&A is live
   AND the tasks/responsibilities panel is live. **All conditions met — M3 is CLOSED** (the
   document-ingestion pipeline extends M3's read-only AI layer to long-form sources).
@@ -1516,6 +1559,26 @@ system.
   `docker exec <c> ls /app/src/<newfile>` (NOT PRESENT IN CONTAINER). **Verify a hand-off
   against the box, never against the session summary.** Corollary: compare file mtimes to
   audit-row timestamps — a deploy that predates the code it supposedly shipped is the tell.
+- **A 201 from an upload route proves the ROUTE ran, not that extraction produced text.** The DOCX
+  slice returned `201 Created` on the first try; that said nothing about whether mammoth pulled
+  real words or an empty string. The row itself is the proof: `char_count` plus
+  `left(body, 600)` in psql. **And a synthetic fixture can't tell you whether REAL documents
+  survive** — three generated clean paragraphs passed while revealing nothing about tables,
+  headings, headers/footers, or bullets. The first real file of your own is the actual test; run
+  it before trusting the extractor on a corpus.
+- **A retrieval feature can ship "verified" with its TRIGGER untested — check the whole path.**
+  `a25074d` made the Qdrant `documents` collection searchable and taught the formatter to render
+  chunks, and was correct on both counts. But `data-gate.ts`'s `DATA_PATTERNS` stayed 100%
+  email-vocabulary and `prompt.ts` still described an email-only capability — so a question
+  phrased in document language ("what's the key promise in the chickens creative brief?") matched
+  no pattern, retrieval never ran, and Mari claimed blindness while holding the answer in Qdrant.
+  `prompt.ts` had also drifted to naming a block (`RETRIEVED EMAIL CONTEXT`) that the formatter
+  never actually emits (`RETRIEVED CONTEXT`) — Mari was told to look for a heading that didn't
+  exist. **The path is trigger → fetch → format → prompt, and each half tests green in
+  isolation.** Same class as the write-only-collection lesson above, one layer up. Corollary:
+  widening a hand-written keyword list is a guess, and it will be wrong again — 3 of 4 natural
+  phrasings still missed after a deliberate widening pass, which is what finally justified the
+  question-router (`9700240`).
 ---
 
 ## 8. Open questions (decided-when-we-get-there, not blocking)
@@ -1592,14 +1655,18 @@ system.
   (Chonkie/llm-chunk) noted earlier, Chonkie was chosen. Email stays one-vector, no chunker; the
   document pipeline is where chunking lives. Web pages remain a future source that will reuse the
   same chunker.
-- **DOCX/PDF (and other-mime) text extraction — deferred follow-on to the document slice.** The
-  `extractText()` function in `apps/api/src/routes/documents.ts` is the ready seam: today it reads
-  `text/markdown`/`text/x-markdown`/`text/plain` as real text and throws `UnsupportedType` → a
-  clean **415** for anything else (deliberately NOT a 500 — a clean rejection, not a crash). Wiring
-  a real DOCX/PDF extractor (still §9-clean — api extracts raw text only, no interpretation) is the
-  next document-ingestion slice; the marionette embed side (`/embed-doc`) needs no change since it
-  operates on `documents.body` regardless of how the text was extracted. Keep any extractor TS
-  where possible (§2).
+- **DOCX extraction — RESOLVED (`960116a`).** `extractText()` handles DOCX via `mammoth`; a
+  `MIN_CHARS = 20` guard now rejects empty/image-only extraction as a clean 415 for every format.
+  Verified end-to-end with a real work document on the live path. See §4.
+- **PDF text extraction — STILL OPEN, the next document slice.** Same `extractText()` seam in
+  `apps/api/src/routes/documents.ts`, one more case. **Decided this session:** extract the text
+  layer only (a digital-native PDF stores real glyphs; `unpdf`/`pdf-parse` pull them cleanly), and
+  let the existing `MIN_CHARS` guard reject scanned/image-only PDFs as a 415 naming the reason —
+  loud rejection at upload rather than an empty row that embeds to nothing. **OCR is deliberately
+  a separate later slice** (Tesseract means a new ~200MB+ binary in the api image, noticeably slow,
+  imperfect output); the seam accommodates it without rework. Still §9-clean — api extracts raw
+  text only, no interpretation — and `/embed-doc` needs no change, since it operates on
+  `documents.body` regardless of how the text got there. Keep the extractor TS (§2).
 - **Drains not automated (M3) — RESOLVED** (`a9e7bc1`, this session). The 5-min ingestion
   cron now auto-runs BOTH classification and embedding on new mail: after each gcal+gmail
   sync, `apps/api/src/ingestion/scheduler.ts` POSTs marionette `/classify` (limit 50) then
@@ -1774,6 +1841,16 @@ system.
   (counts/HEAD/service table) and deploy just commits it (no §9 concern, but can't touch
   the narrative — which is basically what `bin/session-start` already does for STATUS's
   header). Decide in its own session before hand #2 starts.
+- **Question-router — RESOLVED (`9700240`).** The (A) tool-call loop vs (B) pre-fetch injection
+  fork, which had surfaced three times (audit-sight, MCP, grounded Q&A), is **settled permanently
+  as (B)** — but the *gate* in front of (B) is now a model, not a keyword list. One
+  `deepseek-v4-flash` classify per `/think` returns `{needs_data, needs_system}`; both hand-written
+  gates are demoted to fallback. This is NOT a tool-call loop: the router runs BEFORE reasoning,
+  never sees retrieved content, and Mari still does not choose for herself when to look — a clean
+  future upgrade if she ever should, and nothing here forecloses it. Cost is one extra flash call
+  per `/think` (sub-second, cents/month). **What justified it:** the keyword gate missed a
+  document question outright, and a deliberate widening pass STILL missed 3 of 4 natural
+  phrasings — the failure was structural, not a bad list. See §4 (marionette) and the §7 lesson.
 - **`job.kind` dispatch default — RESOLVED (shipped, `12b0211`).** `job.kind` was introduced
   in deploy with `enqueue` defaulting to `'deploy'`, so every existing enqueue path is
   unaffected; `pump()` dispatches `'restart'` to `runRestartJob` and `'deploy'` to `runJob`.
