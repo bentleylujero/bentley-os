@@ -87,7 +87,10 @@ async function handleMessage(message: TgMessage | undefined) {
   const { data, error } = await fetch(`${MARIONETTE}/think`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ request: text }),
+    // conversation_id = the Telegram chat id: a stable, already-present
+    // identifier. api stays a thin relay — it passes the id through, it does
+    // not read or assemble history (that is marionette's, per THE_BIBLE §9).
+    body: JSON.stringify({ request: text, conversation_id: String(chatId) }),
   }).then(async (res) => {
     if (!res.ok) return { data: null, error: await res.text() };
     return { data: await res.json(), error: null };

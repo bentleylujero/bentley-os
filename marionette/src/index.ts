@@ -16,6 +16,7 @@ import { isDataQuestion, formatRetrievalForPrompt } from './data-gate.ts';
 import { retrieveContext } from './retrieve.ts';
 import { readIngestState, formatIngestForPrompt } from './ingest-sight.ts';
 import { routeQuestion, type Route } from './question-router.ts';
+import { readHistory, writeTurn, formatHistoryForPrompt } from './memory.ts';
 
 // contractor's /execute can run long (real OpenCode build tasks, multi-step
 // tool use) — raise past undici's default 5-minute headers/body timeout so
@@ -127,6 +128,12 @@ app.post('/think', async (c) => {
   if (typeof request !== 'string' || request.trim() === '') {
     return c.json({ error: 'missing "request" string in body' }, 400);
   }
+  // Conversation memory is OPTIONAL. Absent conversation_id = stateless,
+  // byte-identical to pre-0009 behavior.
+  const conversationId =
+    typeof body?.conversation_id === 'string' && body.conversation_id.trim() !== ''
+      ? body.conversation_id.trim()
+      : null;
   let decision;
   try {
     // Mari's sight: if this reads as a system-activity question, fetch her own
@@ -186,6 +193,19 @@ app.post('/think', async (c) => {
         console.error('[think] retrieval fetch failed:', retrieveErr);
       }
     }
+    // HISTORY tier: prior turns of THIS conversation, char+turn capped.
+    // Pushed last (closest to the user turn) so recency reads naturally.
+    // A history read failure degrades to stateless — never sinks /think.
+    if (conversationId) {
+      try {
+        const turns = await readHistory(conversationId);
+        for (const m of formatHistoryForPrompt(turns)) {
+          messages.push({ role: m.role as any, content: m.content });
+        }
+      } catch (histErr) {
+        console.error('[think] history read failed:', histErr);
+      }
+    }
     messages.push({ role: 'user' as const, content: request });
     const result = await callDeepSeek(messages);
     let parsed: unknown;
@@ -205,8 +225,19 @@ app.post('/think', async (c) => {
         usage: result.usage,
         finish_reason: result.finishReason,
         route,
+        conversation_id: conversationId,
       },
     });
+    // Persist the exchange. Her `message` only — never `reasoning` (scratchpad).
+    // Best-effort: a memory write must not fail a successful /think.
+    if (conversationId) {
+      try {
+        await writeTurn(conversationId, 'user', request);
+        await writeTurn(conversationId, 'assistant', decision.message || '');
+      } catch (memErr) {
+        console.error('[think] memory write failed:', memErr);
+      }
+    }
   } catch (err: any) {
     const message = err?.message || String(err);
     // Failures are first-class audit events — an orchestrator whose failures are
