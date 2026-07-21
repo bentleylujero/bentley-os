@@ -1687,6 +1687,10 @@ system.
   The isolation test then only had to prove two things — that the old path still works untouched
   and that the new path works — rather than re-verifying every existing caller. Cheaper to test,
   and it makes rollback a matter of not sending a field.
+- **ISOLATION TEST** — delete this row.
+
+<!-- appended by Mari 2026-07-21 (action 14) -->
+
 <!-- MARI:APPEND §7 -->
 
 ---
