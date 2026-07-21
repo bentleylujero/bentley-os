@@ -81,7 +81,18 @@ Dashboard at `spaghettios.bentleyos.me` (Clair).
 
 ## Next action
 
-**Most recent ship: the question-router** (`9700240`). Mari now decides what to
+**Most recent ship: PDF extraction** (`1c90a43`). `extractText()` handles
+`application/pdf` via `unpdf` (bundled serverless pdf.js, pure ESM, no native deps —
+`pdf-parse` rejected for its import-time `test/data` read). Text layer only; the existing
+`MIN_CHARS` guard catches scanned/image-only as a clean 415. `/embed-doc` needed no change.
+Dropzone accepts and advertises `.pdf`. Verified end-to-end: real 5-page PDF -> 39642 chars
+(body read back in psql, not glyph soup), text-layerless PDF -> 415, then a real work PDF on
+the live public path -> 2 chunks -> both Qdrant points retrieved BY ID -> answered from
+Telegram by title. **The format seam is closed for md/txt/docx/pdf; OCR is a separate later
+slice.** Gotcha logged in Bible §7: Qdrant's `points_count` lags segment optimization and read
+unchanged the whole time — fetch the point by id, never trust the count.
+
+**Before that: the question-router** (`9700240`). Mari now decides what to
 fetch with a model, not a keyword list. One `deepseek-v4-flash` classify per
 `/think` returns `{needs_data, needs_system}`, driving both pre-fetch blocks; the
 old keyword gates stay in the tree as the fallback when the router call fails, so
@@ -158,10 +169,10 @@ reviewed. Worth a deliberate review later.
   — that's the whole point of hand #2.)
 - **M5 proper — auto-execute the low-risk action tier** — a step ON TOP of the
   hands; the hands stay approval-gated until it lands. Not started.
-- **Document ingestion follow-on: PDF extraction** — DOCX shipped (`960116a`);
-  PDF is the remaining case at the same `extractText()` seam. Decided: extract the
-  text layer, let the `MIN_CHARS` guard flag scanned/image-only PDFs as a clean 415.
-  OCR is a separate later slice.
+- **OCR for scanned PDFs** — deferred, not started. md/txt/docx/pdf all ship
+  (`960116a` + `1c90a43`); a scanned PDF is a loud 415, not a silent empty row.
+  Tesseract means a ~200MB+ binary in the api image — only worth it if scanned
+  documents actually show up.
 - **Conversation memory** — migration `0009`, `messages` table keyed on an OPTIONAL
   `conversation_id` (absent = stateless, byte-identical to today). Window capped by
   CHARS not turns. Store user text + Mari's `message`, never `reasoning`. Last,

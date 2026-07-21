@@ -589,10 +589,22 @@ chunks = many vectors.** Ships in two halves: marionette embeds (`1eef3dc`), api
   `spaghettios.bentleyos.me` → 2287 chars extracted → `documents` row → cron tick → 5 Chonkie
   chunks → Qdrant, `embedded_at` stamped. Both downstream effects checked directly in Postgres,
   not the route's own 201.
-- **Still open (deferred follow-on):** PDF text extraction — same `extractText()` seam, one more
-  case. Decided this session: extract the text layer, and let the existing `MIN_CHARS` guard flag
-  scanned/image-only PDFs as a 415 rather than writing an empty row. OCR is a separate, later
-  slice (new binary in the api image, slow, imperfect). See §8.
+- **PDF extraction — SHIPPED (`1c90a43`).** `extractText()` handles `application/pdf` via
+  **`unpdf`** (`getDocumentProxy(bytes)` -> `extractText(pdf, { mergePages: true })`). Pure ESM,
+  bundles a serverless pdf.js build, no native deps and no `test/data` filesystem quirk
+  (`pdf-parse` was rejected for that). Ships its own types. **Text layer only** — a
+  scanned/image-only PDF yields ~nothing and falls through the existing `MIN_CHARS` guard as a
+  clean 415 naming the reason. **OCR remains a deliberately separate later slice**; the seam
+  accommodates it without rework. `/embed-doc` needed NO change (it operates on `documents.body`
+  regardless of how the text got there). Dropzone accepts AND advertises `.pdf`.
+- **Verified end-to-end.** Isolation-tested both paths in a throwaway container on
+  `bentley-os_backend`: a real 5-page arXiv PDF -> 201, 39642 chars, body confirmed readable in
+  psql (`left(body,400)` — headers/authors/unicode intact, not glyph soup); a synthetic
+  text-layerless PDF -> 415 empty/image-only. Deployed job `0fe3324a` (`deploy.succeeded`, no
+  rollback). Live public path: a real work PDF dropped at `spaghettios.bentleyos.me` -> 577 chars
+  -> `documents` row -> cron tick -> 2 Chonkie chunks -> both Qdrant points retrieved BY ID, then
+  a real Telegram question routed `needs_data` and answered from it by title. **The document
+  ingestion format seam is now closed for the common cases (md/txt/docx/pdf).**
 
 **Milestone 3 — tasks panel (Slice A) — done, live (Clair responsibilities dashboard):**
 This is the old "morning brief" roadmap item, redefined with the owner into a "breathing"
@@ -1331,8 +1343,9 @@ auto-drain + grounded Q&A + tasks panel all shipped.** In **marionette**, not ap
   `extractText()` md/txt seam, DOCX/PDF → 415) + dashboard dropzone + `/embed-doc` cron drain.
   Deployed via audited `POST /deploy` (`deploy.succeeded`), verified end-to-end with both
   downstream effects (`embedded_at` timestamp + Qdrant point count) checked directly. See §4.
-  **DOCX extraction SHIPPED (`960116a`) via mammoth, with a `MIN_CHARS` empty-text guard covering
-  every format; PDF is the remaining follow-on at the same seam (§8).**
+  **DOCX extraction SHIPPED (`960116a`) via mammoth and PDF extraction SHIPPED (`1c90a43`) via
+  unpdf, both behind the same `MIN_CHARS` empty-text guard — the format seam is closed for the
+  common cases. OCR for scanned PDFs remains a deliberate later slice (§8).**
 - **Done when:** email is auto-classified + auto-embedded on ingest AND grounded Q&A is live
   AND the tasks/responsibilities panel is live. **All conditions met — M3 is CLOSED** (the
   document-ingestion pipeline extends M3's read-only AI layer to long-form sources).
@@ -1566,6 +1579,15 @@ system.
   survive** — three generated clean paragraphs passed while revealing nothing about tables,
   headings, headers/footers, or bullets. The first real file of your own is the actual test; run
   it before trusting the extractor on a corpus.
+- **Qdrant's `points_count` is not authoritative for a just-written point — retrieve by ID.**
+  After the live PDF embedded (2 `document_chunks` rows, `marionette.embed_doc` audited success,
+  `documents.embedded_at` stamped), `points_count` still read 20 — unchanged — which looked
+  exactly like a silently-failed upsert. Both points were in fact present, returned immediately by
+  `POST /collections/documents/points` with their ids. The collection showed
+  `indexed_vectors_count: 0` across 8 segments: the counter lags until optimization runs. **The
+  authoritative check for "did this specific write land" is fetching the point by id**, never a
+  collection-level count. (Earlier slices got away with counting because they checked long after
+  the write, or checked a delta big enough to cross a segment flush.)
 - **A retrieval feature can ship "verified" with its TRIGGER untested — check the whole path.**
   `a25074d` made the Qdrant `documents` collection searchable and taught the formatter to render
   chunks, and was correct on both counts. But `data-gate.ts`'s `DATA_PATTERNS` stayed 100%
@@ -1658,15 +1680,14 @@ system.
 - **DOCX extraction — RESOLVED (`960116a`).** `extractText()` handles DOCX via `mammoth`; a
   `MIN_CHARS = 20` guard now rejects empty/image-only extraction as a clean 415 for every format.
   Verified end-to-end with a real work document on the live path. See §4.
-- **PDF text extraction — STILL OPEN, the next document slice.** Same `extractText()` seam in
-  `apps/api/src/routes/documents.ts`, one more case. **Decided this session:** extract the text
-  layer only (a digital-native PDF stores real glyphs; `unpdf`/`pdf-parse` pull them cleanly), and
-  let the existing `MIN_CHARS` guard reject scanned/image-only PDFs as a 415 naming the reason —
-  loud rejection at upload rather than an empty row that embeds to nothing. **OCR is deliberately
-  a separate later slice** (Tesseract means a new ~200MB+ binary in the api image, noticeably slow,
-  imperfect output); the seam accommodates it without rework. Still §9-clean — api extracts raw
-  text only, no interpretation — and `/embed-doc` needs no change, since it operates on
-  `documents.body` regardless of how the text got there. Keep the extractor TS (§2).
+- **PDF text extraction — RESOLVED (`1c90a43`).** `unpdf` chosen over `pdf-parse` (pure ESM,
+  bundled serverless pdf.js, own types, no native deps, no import-time `test/data` read). Text
+  layer only; `MIN_CHARS` rejects scanned/image-only as a clean 415. `/embed-doc` unchanged,
+  §9-clean, extractor stays TS (§2). Verified end-to-end through retrieval. See §4.
+- **OCR for scanned PDFs — STILL OPEN, deliberately deferred.** Tesseract means a new ~200MB+
+  binary in the api image, noticeably slow, imperfect output. The `extractText()` seam
+  accommodates it without rework, and the `MIN_CHARS` 415 makes the gap loud rather than silent.
+  No design started; only worth doing if scanned documents actually show up.
 - **Drains not automated (M3) — RESOLVED** (`a9e7bc1`, this session). The 5-min ingestion
   cron now auto-runs BOTH classification and embedding on new mail: after each gcal+gmail
   sync, `apps/api/src/ingestion/scheduler.ts` POSTs marionette `/classify` (limit 50) then
