@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import mammoth from 'mammoth';
+import { extractText as pdfExtractText, getDocumentProxy } from 'unpdf';
 import { pool } from '../db/pool.js';
 
 export const documentsRoute = new Hono();
@@ -38,6 +39,17 @@ async function extractText(file: File): Promise<string> {
       const buffer = Buffer.from(await file.arrayBuffer());
       const result = await mammoth.extractRawText({ buffer });
       text = result.value;
+      break;
+    }
+
+    case 'application/pdf': {
+      // Text layer only. A scanned/image-only PDF yields ~nothing and falls
+      // through to the MIN_CHARS guard below as a clean 415. OCR is a separate,
+      // later slice — this seam accommodates it without rework.
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const pdf = await getDocumentProxy(bytes);
+      const { text: pdfText } = await pdfExtractText(pdf, { mergePages: true });
+      text = pdfText;
       break;
     }
 

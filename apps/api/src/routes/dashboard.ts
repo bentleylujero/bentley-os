@@ -552,9 +552,9 @@ dashboardRoute.get('/', async (c) => {
           <button class="pbtn" data-p="low" onclick="addTask('low')">Low</button>
         </div>
         <div class="docdrop" id="docdrop" onclick="document.getElementById('docfile').click()">
-          Drop a doc here or <b>click to upload</b> (.md / .txt / .docx)
+          Drop a doc here or <b>click to upload</b> (.md / .txt / .docx / .pdf)
         </div>
-        <input id="docfile" type="file" accept=".md,.txt,.docx,text/markdown,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="display:none">
+        <input id="docfile" type="file" accept=".md,.txt,.docx,.pdf,text/markdown,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="display:none">
         <div id="doclist"></div>
       </section>
 
