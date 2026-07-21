@@ -554,7 +554,7 @@ dashboardRoute.get('/', async (c) => {
         <div class="docdrop" id="docdrop" onclick="document.getElementById('docfile').click()">
           Drop a doc here or <b>click to upload</b> (.md / .txt)
         </div>
-        <input id="docfile" type="file" accept=".md,.txt,text/markdown,text/plain" style="display:none">
+        <input id="docfile" type="file" accept=".md,.txt,.docx,text/markdown,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document" style="display:none">
         <div id="doclist"></div>
       </section>
 

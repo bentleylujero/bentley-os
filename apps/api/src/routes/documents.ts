@@ -1,28 +1,56 @@
 import { Hono } from 'hono';
+import mammoth from 'mammoth';
 import { pool } from '../db/pool.js';
 
 export const documentsRoute = new Hono();
 
-// Thrown by extractText for a MIME we deliberately don't handle yet. The handler
-// maps this to a 415 (not a 500) — a clean rejection seam for DOCX/PDF later.
+// Thrown by extractText for a MIME we deliberately don't handle yet, OR for a
+// file whose text layer came back effectively empty. The handler maps this to a
+// 415 (not a 500) — a clean rejection, not a crash.
 class UnsupportedType extends Error {
-  constructor(public mime: string) {
-    super(`unsupported file type: ${mime}`);
+  constructor(message: string) {
+    super(message);
   }
 }
 
-// extractText — the single content seam. Today: plaintext/markdown only, read as
-// text. DOCX/PDF land here later; until then anything else is rejected cleanly.
-// api does NO interpretation of the text (§9) — it just pulls the raw string.
+// A file that parses fine but yields no real text is silent garbage: an empty
+// documents row that embeds to nothing. Reject loudly at upload instead. Covers
+// image-only DOCX today and scanned PDFs when that case lands.
+const MIN_CHARS = 20;
+
+const DOCX_MIME =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+// extractText — the single content seam. api does NO interpretation of the text
+// (§9) — it just pulls the raw string. PDF lands here next.
 async function extractText(file: File): Promise<string> {
-  switch (file.type) {
+  const mime = file.type || 'application/octet-stream';
+  let text: string;
+
+  switch (mime) {
     case 'text/markdown':
     case 'text/x-markdown':
     case 'text/plain':
-      return await file.text();
+      text = await file.text();
+      break;
+
+    case DOCX_MIME: {
+      const buffer = Buffer.from(await file.arrayBuffer());
+      const result = await mammoth.extractRawText({ buffer });
+      text = result.value;
+      break;
+    }
+
     default:
-      throw new UnsupportedType(file.type || 'application/octet-stream');
+      throw new UnsupportedType(`unsupported file type: ${mime}`);
   }
+
+  if (text.trim().length < MIN_CHARS) {
+    throw new UnsupportedType(
+      `no usable text extracted from ${mime} — file may be empty or image-only`,
+    );
+  }
+  return text;
 }
 
 // POST /documents — multipart upload. api extracts text + writes the row only;
@@ -43,7 +71,8 @@ documentsRoute.post('/documents', async (c) => {
     text = await extractText(file);
   } catch (err) {
     if (err instanceof UnsupportedType) return c.json({ error: err.message }, 415);
-    return c.json({ error: 'file required' }, 400);
+    console.error('POST /documents extract failed:', err);
+    return c.json({ error: 'could not read file' }, 400);
   }
 
   const title = file.name || 'untitled';
