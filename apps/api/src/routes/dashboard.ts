@@ -325,7 +325,7 @@ dashboardRoute.get('/', async (c) => {
     : actions.map(actionRow).join('');
   const pendingCount = actions.filter((a) => a.status === 'proposed').length;
   const actionsBadge =
-    pendingCount > 0 ? ` <span class="badge">${pendingCount}</span>` : '';
+    pendingCount > 0 ? ` <span class="count">${pendingCount}</span>` : '';
   const changedBadge =
     !dbError && lastSeen && changedCount > 0
       ? ` <span class="count">${changedCount}</span>`
@@ -453,6 +453,12 @@ dashboardRoute.get('/', async (c) => {
   .sub{color:var(--green-faint);font-weight:normal;}
   .unread{color:var(--green);text-shadow:0 0 5px var(--green);}
   .tag{display:inline-block;font-size:.62rem;text-transform:uppercase;letter-spacing:.06em;color:var(--green-dim);border:1px solid var(--purple-border);border-radius:4px;padding:0 5px;margin-right:4px;}
+  .act-proposed{color:var(--green);border-color:var(--green-ghost);}
+  .act-approved{color:var(--green);border-color:var(--green-ghost);}
+  .act-executing{color:var(--green);border-color:var(--green);}
+  .act-succeeded{color:var(--green-dim);border-color:var(--purple-border);}
+  .act-failed{color:#ff6b6b;border-color:#ff6b6b;}
+  .act-denied{color:var(--green-dim);border-color:var(--purple-border);opacity:.6;}
   .count{display:inline-block;background:transparent;color:var(--green);font-size:.66rem;border:1px solid var(--green-ghost);border-radius:9px;padding:0 7px;margin-left:6px;vertical-align:middle;text-shadow:0 0 5px rgba(124,252,0,.4);}
   /* score chips — brightness/border only, no hue shift */
   .score{min-width:34px;text-align:center;font-size:.78rem;font-weight:bold;border-radius:6px;padding:2px 0;height:fit-content;font-variant-numeric:tabular-nums;}
