@@ -1295,6 +1295,25 @@ prose stay human — a deliberate trade.
 
 <!-- appended by Mari 2026-07-21 (action 15) -->
 
+- **PPTX text extraction — SHIPPED (`bddb6b9`).** `extractText()` handles
+  `application/vnd.openxmlformats-officedocument.presentationml.presentation` via **`fflate`**
+  (in-memory unzip) + **`@xmldom/xmldom`**, in `apps/api/src/extract/pptx.ts`. A .pptx is a zip of
+  XML: slide text lives in `ppt/slides/slideN.xml` inside `<a:t>` runs, speaker notes in
+  `ppt/notesSlides/notesSlideN.xml`, same shape. Emits slides in numeric order with `## Slide N`
+  provenance headers (so Chonkie chunks carry citable slide origin) and speaker notes labeled
+  `Notes:`. Runs within a paragraph are joined without a separator (preserves words split across
+  formatting boundaries); paragraphs become newlines. Existing `MIN_CHARS` guard applies unchanged.
+  Dropzone accepts AND advertises `.pptx` (both filter and label).
+- **Verified end-to-end.** Isolation-tested in a throwaway container on `bentley-os_backend`:
+  synthetic 3-slide deck -> 201, body confirmed in psql with slide order intact, notes labeled, and
+  the note-less slide correctly emitting no empty `Notes:`. Deployed job `cae0d2e0`
+  (`deploy.succeeded`, no rollback). Live public path: real deck "June Tip Sneak Peek.pptx" dropped
+  at `spaghettios.bentleyos.me` -> 1110 chars -> `documents` row -> cron tick -> 3
+  `document_chunks` -> **all 3 Qdrant points retrieved BY ID** (not a collection-level count).
+  **The document ingestion format seam is now closed for md/txt/docx/pptx/pdf.**
+
+<!-- appended by Mari 2026-07-21 (action 16) -->
+
 <!-- MARI:APPEND §4 -->
 
 ---
@@ -1741,6 +1760,17 @@ system.
 
 <!-- appended by Mari 2026-07-21 (action 15) -->
 
+- **`audit_log` columns are `at` and `payload`** — NOT `created_at`/`detail`. Also `target` and
+  `outcome`. `\d audit_log` is the one command; don't guess.
+- **`docker compose exec postgres psql` without `-h postgres` hits the local socket** and fails
+  with peer authentication for user `bentley`. Always pass `-h postgres` (scram, real verification)
+  — same trap as the `-h 127.0.0.1` trust-auth false positive already logged.
+- **marionette is NOT reachable from the host.** It publishes no port (backend network only, :4200).
+  `curl 127.0.0.1:4200` gives connection refused. Reach it from a container on
+  `bentley-os_backend`, unlike deploy which IS on the host at :4000.
+
+<!-- appended by Mari 2026-07-21 (action 16) -->
+
 <!-- MARI:APPEND §7 -->
 
 ---
@@ -2041,6 +2071,22 @@ system.
   is really the same question as M5 auto-execute.
 
 <!-- appended by Mari 2026-07-21 (action 15) -->
+
+- **`officeParser` evaluated for pptx/xlsx and REJECTED (2026-07-21).** Handles docx/pptx/xlsx/pdf in
+  one dependency, but installs at **128M**: a duplicate `pdfjs-dist` (35.8M, exact-pinned) alongside
+  the `unpdf` already in use, plus hard deps on `tesseract.js`, `file-type`, and `@xmldom/xmldom`.
+  xlsx was scoped out and pdf/docx stay on unpdf/mammoth (both verified live), so officeParser's
+  value was breadth already scoped away. **`fflate` + `@xmldom/xmldom` chosen instead at ~2M.** OCR
+  remains a deliberate later slice; do not relitigate without a new reason.
+- **Mari can reason to "propose" and still emit `decision: "reply"` (OPEN BUG, 2026-07-21).**
+  `/think` payload showed `reasoning` explicitly concluding an action should be proposed, while
+  `decision` came back `reply` — the proposal was narrated into `message` and NO `actions` row was
+  created. The reply LOOKS like success. Confirmed via `audit_log`: `marionette.think` success with
+  no following `action.proposed`. Root cause undiagnosed (router had already set
+  `needs_system: true`; prompt was imperative). **Until fixed, verify every `update_docs` against
+  the `actions` table — never trust Mari's reply text.**
+
+<!-- appended by Mari 2026-07-21 (action 16) -->
 
 <!-- MARI:APPEND §8 -->
 
