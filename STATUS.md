@@ -193,6 +193,19 @@ reviewed. Worth a deliberate review later.
 - Tasks feature follow-ons: Slice B (self-email → task), Slice C (insight/help
   layer).
 
+**Most recent ship: hand #2 `update_docs`** (`dd4d594`) — Mari can now append to
+`THE_BIBLE.md` and `STATUS.md` through the M4 action lifecycle. Append-only by
+construction: blocks are inserted above the append sentinels and a
+line-conservation guard in deploy aborts the job if any pre-existing line would
+be lost. Resolves the long-open generation-source fork by rejecting both of its
+original options. Verified live via action 14 (commit `ad25082`). Still
+approval-gated — an Approve tap is required.
+
+**The M5 hands are now two:** `service-restart` and `update_docs`. M5 proper
+(auto-execute low-risk tier) remains NOT started — it sits ON TOP of the hands.
+
+<!-- appended by Mari 2026-07-21 (action 15) -->
+
 <!-- MARI:APPEND NEXT -->
 
 ---

@@ -1263,6 +1263,38 @@ trigger for the same `/think` → `delegate` path.
 **verified live** (organizer_id populated on real rows, event_attendees confirmed via a
 real test event). Milestone 1 is complete; see §6.
 
+**Milestone 5 — second hand `update_docs` — SHIPPED, verified live (`dd4d594`).**
+Mari's second homelab hand, and the resolution of the long-open generation-source fork (§8).
+The fork as written — (A) marionette regenerates prose vs (B) a deterministic box script — was
+rejected on both horns. (A) reproduces the exact failure the Copilot cloud agent already caused
+(wholesale regen silently deleting hard-won detail); (B) can't touch the narrative, so it
+duplicates `bin/session-start` and isn't worth a hand. **Decided: append-only.** Mari never
+rewrites existing prose — she emits `{section, markdown}` blocks, deploy inserts them above a
+sentinel, and a line-conservation guard aborts the entire job if any pre-existing line would be
+lost. Deletion is structurally impossible, not merely discouraged. Corrections to wrong existing
+prose stay human — a deliberate trade.
+- **Anchors:** HTML-comment append sentinels (`MARI` + `:APPEND` + section) in `THE_BIBLE.md` (§4/§7/§8) and `STATUS.md`
+  (NEXT). Mari names a section, never a line number.
+- **`deploy/src/runner.ts`** — new `runDocsJob(job)` + `DocsBlock` + `DOC_SENTINELS`. Validates
+  every block before touching a file, applies in memory, runs the guard (file must grow AND every
+  non-blank pre-existing line must still be present), then fetch/divergence-guard → write →
+  scoped `git add THE_BIBLE.md STATUS.md` → commit → push. **No build, no health poll, no
+  rollback** — markdown can't affect a running service, and any failure aborts BEFORE the commit.
+- **`docs` pseudo-service** added to `SERVICE_HEALTH` with a `null` health URL (the type already
+  allowed it), solely to pass `enqueue`'s existing gate — zero logic changes. Deliberately NOT in
+  `SERVICE_PATH`; docs jobs scope their own add.
+- **`Job.kind`** widened to `'deploy' | 'restart' | 'docs'`; `pump()` dispatches on it. `enqueue`
+  gained an optional `docsBlocks` param — existing callers unaffected.
+- **`marionette/src/index.ts`** validates block shape at PROPOSE time (non-empty array, known
+  section, non-empty markdown, no sentinel injection). **`actions.ts`** forks `executeAction` on
+  `kind==='update_docs'`.
+- **Audit names reused** (`deploy.*`, target `docs`) — same convention as `service-restart`.
+- **Verified live end-to-end** via action 14: propose → approve → guard passed → commit `ad25082`
+  pushed → `deploy.succeeded` → action terminal `succeeded` → ✅ Telegram push received.
+  Approval-gated like every M4 action; second hand PROVEN, not autonomy turned on.
+
+<!-- appended by Mari 2026-07-21 (action 15) -->
+
 <!-- MARI:APPEND §4 -->
 
 ---
@@ -1687,6 +1719,28 @@ system.
   The isolation test then only had to prove two things — that the old path still works untouched
   and that the new path works — rather than re-verifying every existing caller. Cheaper to test,
   and it makes rollback a matter of not sending a field.
+- **`audit_log`'s timestamp column is `at`, not `created_at`.** `actions` uses
+  `created_at`/`updated_at`; `audit_log` uses `at` (indexed `idx_audit_at`). Querying the ledger
+  with `created_at` throws `column does not exist`.
+- **A throwaway `docker run` does NOT inherit compose bind mounts.** An isolation container for
+  `deploy` started without `-v /home/spaghettios/bentley-os:/home/spaghettios/bentley-os` sees no
+  repo at all — `ENOENT` on the first read. Copy the `volumes:` block from `docker-compose.yml`
+  into the isolation run, or the test proves less than it appears to.
+- **`deploy` cannot deploy itself** — absent from `SERVICE_HEALTH` by design (nothing can target
+  it, which is what makes it immune to being torn down by a job it runs, per `0af75f0`). Changes
+  to `deploy` need a manual `docker compose up -d --build --no-deps deploy`. Corollary: until that
+  recreate happens the OLD container is still serving, so a freshly-committed allow-list change
+  won't appear — verify against the running container, not the source file.
+- **Append-only beats regenerate for machine-written docs.** The valuable content here is
+  accumulated detail no amount of box state can reconstruct. Any mechanism that lets a model
+  rewrite existing lines will eventually delete some, silently. Constrain the mechanism
+  (insert-above-sentinel + line-conservation guard) rather than trusting the prompt.
+- **Large JSON payloads must be written by script, never heredoc-pasted.** The browser terminal's
+  bracketed-paste mangled a multi-KB `update_docs` body mid-string. Build the payload with a
+  Python heredoc writing to a file, then `curl -d @file`.
+
+<!-- appended by Mari 2026-07-21 (action 15) -->
+
 <!-- MARI:APPEND §7 -->
 
 ---
@@ -1973,6 +2027,20 @@ system.
   in deploy with `enqueue` defaulting to `'deploy'`, so every existing enqueue path is
   unaffected; `pump()` dispatches `'restart'` to `runRestartJob` and `'deploy'` to `runJob`.
   Confirmed live via the `service-restart` end-to-end runs.
+
+- **`update_docs` generation source — RESOLVED (`dd4d594`).** Neither horn of the original A/B
+  fork was taken; see the §4 hand-#2 subsection. Append-only with a line-conservation guard in
+  deploy. The remaining limitation is deliberate: **Mari can add to the docs but cannot correct
+  them.** Wrong or stale prose still needs a human edit. If that becomes the dominant failure
+  mode, the next move is a *supersede* pattern (append a correction block referencing the stale
+  one) — NOT unlocking in-place rewrite.
+- **Doc drift is measurable and was worse than assumed.** As of this session the Bible had no
+  mention of `marionette/src/memory.ts`, `data-gate.ts`, `question-router.ts`, or
+  `ingest-sight.ts` — four files shipped and live. Hand #2 exists to shorten that gap; whether
+  Mari should self-propose an `update_docs` on a schedule (vs. only when asked) is still open, and
+  is really the same question as M5 auto-execute.
+
+<!-- appended by Mari 2026-07-21 (action 15) -->
 
 <!-- MARI:APPEND §8 -->
 
