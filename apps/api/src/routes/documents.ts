@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import mammoth from 'mammoth';
 import { extractText as pdfExtractText, getDocumentProxy } from 'unpdf';
+import { extractPptxText } from '../extract/pptx.js';
 import { pool } from '../db/pool.js';
 
 export const documentsRoute = new Hono();
@@ -21,6 +22,8 @@ const MIN_CHARS = 20;
 
 const DOCX_MIME =
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const PPTX_MIME =
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation';
 
 // extractText — the single content seam. api does NO interpretation of the text
 // (§9) — it just pulls the raw string. PDF lands here next.
@@ -42,6 +45,13 @@ async function extractText(file: File): Promise<string> {
       break;
     }
 
+    case PPTX_MIME: {
+      // Slide text + speaker notes, in slide order, with '## Slide N' headers
+      // so chunks carry provenance. Pure zip+XML — no OCR, no model call (§9).
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      text = extractPptxText(bytes);
+      break;
+    }
     case 'application/pdf': {
       // Text layer only. A scanned/image-only PDF yields ~nothing and falls
       // through to the MIN_CHARS guard below as a clean 415. OCR is a separate,
