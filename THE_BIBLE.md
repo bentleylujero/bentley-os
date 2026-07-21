@@ -460,6 +460,7 @@ Migrations live at `supabase/migrations/` (nine files, `0001`–`0009`).
   live and verified end-to-end against production — see the grounded Q&A subsection below).
   (4) **Snippet zero-width-padding polish** (cosmetic, carried from M2) now also applies to
   triage subjects.
+  
 
 **Milestone 3 — email embedding pipeline — done, live (full backlog embedded):**
 - **Migration `0006_email_embeddings.sql`** (`a46d8ce`, applied live): adds `embedded_at
@@ -677,6 +678,15 @@ marionette can't reach the host), exactly the api-side read endpoint §8 anticip
   berths, cargo-fill = load, CRT hover tooltip — evolved from an earlier "THE PORT" orbiting
   ring that was replaced), **CPU Digital Twin** (per-core die grid), and **core-four vitals
   gauges**. The dashboard polls `/metrics/host` + `/metrics/app` client-side.
+
+  - **Actions card — SHIPPED (`8810517`, `ed66e9d`).** Dashboard's M4 placeholder replaced with
+  a live render of the `actions` table (`id, kind, status, intent, result, created_at`,
+  `LIMIT 8`, server-rendered in the main grid alongside its sibling cards). Row shows
+  timestamp, status tag, kind, `intent->>'service'`, and `result->>'reason'` when present.
+  Header badge counts `status='proposed'` using the existing `.count` class — same fact as
+  `metrics.ts:210`, not a second source. `.act-*` status colors added to the CRT palette
+  (`act-failed` is the only non-phosphor color: `#ff6b6b`). No new table, no new endpoint,
+  no marionette change. Verified: 9 rows live at `deploy.succeeded` 17:13.
 - **Real data, not mocked:** an earlier iteration (`2a2328f`) shipped the host-hardware
   sections with fake data; `c0988b1` replaced it with real vitals off `/metrics/host` and
   dropped the placeholders. Confirmed in the render (`h.cpu_pct` etc. read from the endpoint).
@@ -2089,6 +2099,8 @@ system.
 <!-- appended by Mari 2026-07-21 (action 16) -->
 
 <!-- MARI:APPEND §8 -->
+
+UI mechanics: scroll to the right section, click at end of the last bullet, paste. Commit message at bottom: docs(bible): §4 Actions card shipped, §8 action-status/deploy-outcome divergence → Commit directly to main.
 
 ---
 
