@@ -65,6 +65,7 @@ dashboardRoute.get('/', async (c) => {
   let pastEvents: any[] = [];
   let newEmails: any[] = [];
   let newEvents: any[] = [];
+  let actions: any[] = [];
   let lastSeen: Date | null = null;
   let dbError = '';
 
@@ -151,7 +152,14 @@ dashboardRoute.get('/', async (c) => {
         )
       : Promise.resolve({ rows: [] as any[] });
 
-    const [tasksR, attnR, periphR, upcomingR, pastR, newEmailsR, newEventsR] =
+    // Mari's action lifecycle — current state lives on the row; audit_log is the ledger.
+    const actionsQ = pool.query(
+      `SELECT id, kind, status, intent, result, created_at
+         FROM actions
+        ORDER BY created_at DESC
+        LIMIT 8`
+    );
+    const [tasksR, attnR, periphR, upcomingR, pastR, newEmailsR, newEventsR, actionsR] =
       await Promise.all([
         tasksQ,
         attnQ,
@@ -160,6 +168,7 @@ dashboardRoute.get('/', async (c) => {
         pastQ,
         newEmailsQ,
         newEventsQ,
+        actionsQ,
       ]);
     tasks = tasksR.rows;
     attnEmails = attnR.rows;
@@ -168,6 +177,7 @@ dashboardRoute.get('/', async (c) => {
     pastEvents = pastR.rows;
     newEmails = newEmailsR.rows;
     newEvents = newEventsR.rows;
+    actions = actionsR.rows;
   } catch (err: any) {
     dbError = err?.message ?? 'query failed';
   }
@@ -296,6 +306,26 @@ dashboardRoute.get('/', async (c) => {
         ),
       ].join('');
 
+  // --- Actions (M4 lifecycle) ---------------------------------------------
+  function actionRow(a: any): string {
+    const st = String(a.status || 'proposed');
+    const svc = a.intent && a.intent.service ? String(a.intent.service) : '';
+    const reason = a.result && a.result.reason ? String(a.result.reason) : '';
+    return `<div class="row">
+        <span class="time">${esc(fmtStamp(a.created_at))}</span>
+        <span class="body"><span class="tag act-${esc(st)}">${esc(st)}</span> <b>${esc(a.kind)}</b>${
+      svc ? `<span class="sub"> · ${esc(svc)}</span>` : ''
+    }${reason ? `<span class="sub"> — ${escT(reason)}</span>` : ''}</span>
+      </div>`;
+  }
+  const actionsHtml = dbError
+    ? ''
+    : actions.length === 0
+    ? `<p class="empty-ph">No actions yet. Standing by ▓</p>`
+    : actions.map(actionRow).join('');
+  const pendingCount = actions.filter((a) => a.status === 'proposed').length;
+  const actionsBadge =
+    pendingCount > 0 ? ` <span class="badge">${pendingCount}</span>` : '';
   const changedBadge =
     !dbError && lastSeen && changedCount > 0
       ? ` <span class="count">${changedCount}</span>`
@@ -588,10 +618,10 @@ dashboardRoute.get('/', async (c) => {
         ${pastHtml}
       </section>
 
-      <!-- ACTIONS placeholder (M4 lifecycle wiring is a later pass) -->
+      <!-- ACTIONS -->
       <section class="card">
-        <div class="ch">▸ Actions</div>
-        <div class="empty-ph">Action lifecycle — approval queue lands here.<br>Standing by ▓</div>
+        <div class="ch">▸ Actions${actionsBadge}</div>
+        ${actionsHtml}
       </section>
     </div>
   </main>
