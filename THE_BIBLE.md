@@ -2108,25 +2108,29 @@ system.
   truth, the prose is not — verify every proposal against the `actions` table, never against
   Mari's reply text.**
 
-- **Action terminal status is written from the 202, not the ledger — OPEN (2026-07-22).**
-  `actions.status` reaches `succeeded` on the strength of deploy's HTTP `202 Accepted`, not on a
-  `deploy.succeeded` audit row. Evidence: rows 10–16 have `result` holding only
-  `{"accepted": 202, "status": "running"}` — the accept envelope. Only rows 4/5/6 carry a real
-  `outcome.state: succeeded` plus a commit SHA. **And the terminal transition is never audited:**
-  `action.proposed` / `approved` / `executing` / `deploy_accepted` / `denied` all emit audit rows;
-  there is NO `action.succeeded`. For action 14 the ledger runs 2679→2688 and simply stops after
-  `deploy.succeeded`, while the table says `succeeded` with `updated_at` matching that audit row
-  to the microsecond — the write happened, it just left no trace in the one ledger.
-  **Consequence:** a deploy that 202s and then fails leaves a row reading `succeeded` next to a
-  `deploy.failed` in `audit_log`. Audit id 2678 is exactly that failure (`docs`, reason
-  `no blocks supplied`) and escaped only because its `action_id` was null. Actions 7 and 9 already
-  carry hand-written `"note": "manually resolved"` in `result` — this class was patched twice by
-  hand before it was named.
-  **Same failure class as the propose gap (`056fb97`): state written from an assumed signal rather
-  than the authoritative one.** Fix direction (not yet built): the action row's terminal status
-  must be set by the deploy outcome watcher keyed on `action_id`, and must emit
-  `action.succeeded` / `action.failed` so the ledger is complete. Until then, never trust
-  `actions.status` alone — join it against `deploy.succeeded`/`deploy.failed` on `job_id`.
+- **Action `result` is stale after resolution — OPEN (2026-07-22).**
+  `resolveAction` (`deploy/src/runner.ts` L203) updates `status` and `updated_at` but never
+  touches `result`. A resolved row still shows the accept envelope
+  (`{"accepted": 202, "job_id": ..., "deploy": {"status": "running"}}`), so the row's own
+  evidence field contradicts its status. Cosmetic-but-misleading; it is the only real defect
+  in this area. Fix: have `resolveAction` write the real outcome (state + commit/job) into
+  `result` alongside the status flip.
+- **DISPROVEN (2026-07-22): "terminal status is inferred from the 202."** Investigated from
+  source; recorded here so nobody re-derives it. `marionette/src/actions.ts` `executeAction`
+  explicitly does NOT write terminal state after a 202 — it flips to `executing`, POSTs
+  `http://deploy:4000/deploy` with `action_id`, records `action.deploy_accepted`, and returns.
+  Its only terminal writes are pre-accept (deploy refuses / unreachable / no `job_id`).
+  `deploy`'s `resolveAction` writes the true terminal state, called at 10 terminal branches
+  covering succeeded, failed, unhealthy and rollback, guarded by
+  `UPDATE actions SET status=$1 WHERE id=$2 AND status='executing'` (idempotent). Rows whose
+  `updated_at` matches `deploy.succeeded` to the microsecond are that guard working, not an
+  inference. **One writer per state: deploy owns the terminal transition once it 202s;
+  marionette owns only pre-accept failures.**
+- **No `action.succeeded` audit row exists BY DESIGN.** `audit_log` is the ledger (§4);
+  `actions` is derived current-state. The terminal event is already in the ledger as
+  `deploy.succeeded` / `deploy.failed` carrying `action_id` in `payload`. A second
+  `action.succeeded` row would duplicate a fact (§2 forbids). Correlation is payload-only —
+  query `payload->>'action_id'`, not a column join.
 
 <!-- appended by Mari 2026-07-21 (action 16) -->
 
