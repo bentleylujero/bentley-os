@@ -46,6 +46,53 @@ export interface ActionRow {
   updated_at: string;
 }
 
+// Validates a proposed action's kind+intent BEFORE any row is written.
+// Single source of truth: called by POST /actions AND by /think's propose
+// branch, so a malformed intent can never become a proposed row awaiting a tap
+// no matter which door it came in. Returns null when valid, else an error
+// string suitable for a 400.
+export function validateActionIntent(
+  kind: string,
+  intent: Record<string, unknown>,
+): string | null {
+  // service-restart is target-constrained at PROPOSE time (not only at deploy):
+  // the service must be one deploy can health-check + restart. Mirrors deploy's
+  // SERVICE_HEALTH allow-list -- never postgres/qdrant/cloudflared.
+  if (kind === 'service-restart') {
+    const RESTARTABLE = ['api', 'contractor', 'marionette'];
+    const svc = (intent as any)?.service;
+    if (typeof svc !== 'string' || !RESTARTABLE.includes(svc)) {
+      return `service-restart requires intent.service in {${RESTARTABLE.join(', ')}}`;
+    }
+    return null;
+  }
+
+  // update_docs is shape-constrained at PROPOSE time. Deploy re-validates and
+  // enforces the line-conservation guard. Sections mirror deploy's
+  // DOC_SENTINELS -- the only anchors that exist in the two doc files.
+  if (kind === 'update_docs') {
+    const SECTIONS = ['\u00a74', '\u00a77', '\u00a78', 'NEXT'];
+    const blocks = (intent as any)?.blocks;
+    if (!Array.isArray(blocks) || blocks.length === 0) {
+      return 'update_docs requires a non-empty intent.blocks array';
+    }
+    for (const b of blocks) {
+      if (!b || typeof b.section !== 'string' || !SECTIONS.includes(b.section)) {
+        return `each block needs section in {${SECTIONS.join(', ')}}`;
+      }
+      if (typeof b.markdown !== 'string' || b.markdown.trim() === '') {
+        return `block for ${b.section} needs non-empty markdown`;
+      }
+      if (b.markdown.includes('MARI:APPEND')) {
+        return 'blocks may not contain a sentinel marker';
+      }
+    }
+    return null;
+  }
+
+  return null;
+}
+
 // Create a proposed action. Returns the new row.
 export async function createAction(input: {
   kind: string;

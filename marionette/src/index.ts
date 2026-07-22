@@ -5,7 +5,7 @@ import { callDeepSeek } from './deepseek.ts';
 import { normalizeDecision } from './schema.ts';
 import { audit } from './audit.ts';
 import { SYSTEM_PROMPT } from './prompt.ts';
-import { createAction, listActions, getAction, approveAction, denyAction } from './actions.ts';
+import { createAction, listActions, getAction, approveAction, denyAction, validateActionIntent } from './actions.ts';
 import { auditSummary } from './audit-read.ts';
 import { classifyBatch } from './classify.ts';
 import { embedBatch } from './embed.ts';
@@ -249,6 +249,39 @@ app.post('/think', async (c) => {
     });
     return c.json({ error: 'think failed', detail: message }, 502);
   }
+  // PROPOSE branch: Mari reasoned that a side-effecting action is warranted.
+  // This is /think's ONLY door into the action lifecycle. Before this existed,
+  // a model that concluded "propose" had no legal decision value to say so --
+  // normalizeDecision coerced it to 'reply' and the proposal was narrated into
+  // message with NO actions row ever written (THE_BIBLE.md §8: the reply LOOKED
+  // like success). The row is the truth; the prose is not.
+  //
+  // Still approval-gated: createAction writes status 'proposed'. Nothing here
+  // executes anything -- autonomy is earned, and M5 is the tier above this.
+  if (decision.decision === 'propose') {
+    const kind = decision.action_kind as string;
+    const intent = (decision.action_intent || {}) as Record<string, unknown>;
+    const invalid = validateActionIntent(kind, intent);
+    if (invalid) {
+      // A model-authored intent that fails validation degrades to a reply and
+      // is audited as such. We never 502 a request that reasoned correctly, and
+      // we never write a malformed row.
+      await audit({
+        action: 'marionette.propose',
+        outcome: 'error',
+        payload: { request, kind, intent, error: invalid },
+      });
+      return c.json({
+        decision: { decision: 'reply', message: decision.message, reasoning: decision.reasoning },
+        propose_error: invalid,
+      });
+    }
+    // createAction audits 'action.proposed' with target = the row id. That row
+    // is the verification anchor -- never trust the reply text.
+    const action = await createAction({ kind, intent });
+    return c.json({ decision, action });
+  }
+
   if (decision.decision !== 'delegate') {
     return c.json({ decision });
   }
@@ -297,41 +330,10 @@ app.post('/actions', async (c) => {
   }
   const intent = (body?.intent && typeof body.intent === 'object') ? body.intent : {};
 
-  // service-restart is target-constrained at PROPOSE time (not only at deploy):
-  // the service must be one deploy can health-check + restart. This mirrors
-  // deploy's SERVICE_HEALTH allow-list (api/contractor/marionette) — never
-  // postgres/qdrant/cloudflared. Reject early so a bad target never becomes a
-  // proposed row awaiting a tap.
-  if (kind === 'service-restart') {
-    const RESTARTABLE = ['api', 'contractor', 'marionette'];
-    const svc = (intent as any)?.service;
-    if (typeof svc !== 'string' || !RESTARTABLE.includes(svc)) {
-      return c.json({ error: `service-restart requires intent.service in {${RESTARTABLE.join(', ')}}` }, 400);
-    }
-  }
-
-  // update_docs is shape-constrained at PROPOSE time. Deploy re-validates and
-  // enforces the line-conservation guard, but a malformed block should never
-  // become a proposed row awaiting a tap. Sections mirror deploy's
-  // DOC_SENTINELS — the only anchors that exist in the two doc files.
-  if (kind === 'update_docs') {
-    const SECTIONS = ['\u00a74', '\u00a77', '\u00a78', 'NEXT'];
-    const blocks = (intent as any)?.blocks;
-    if (!Array.isArray(blocks) || blocks.length === 0) {
-      return c.json({ error: 'update_docs requires a non-empty intent.blocks array' }, 400);
-    }
-    for (const b of blocks) {
-      if (!b || typeof b.section !== 'string' || !SECTIONS.includes(b.section)) {
-        return c.json({ error: `each block needs section in {${SECTIONS.join(', ')}}` }, 400);
-      }
-      if (typeof b.markdown !== 'string' || b.markdown.trim() === '') {
-        return c.json({ error: `block for ${b.section} needs non-empty markdown` }, 400);
-      }
-      if (b.markdown.includes('MARI:APPEND')) {
-        return c.json({ error: 'blocks may not contain a sentinel marker' }, 400);
-      }
-    }
-  }
+  // Validation lives in actions.ts so this door and /think's propose branch
+  // enforce the identical rule. See validateActionIntent.
+  const invalid = validateActionIntent(kind, intent);
+  if (invalid) return c.json({ error: invalid }, 400);
 
   const row = await createAction({ kind, intent });
   return c.json({ action: row }, 201);
