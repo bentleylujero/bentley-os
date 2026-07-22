@@ -2108,13 +2108,14 @@ system.
   truth, the prose is not — verify every proposal against the `actions` table, never against
   Mari's reply text.**
 
-- **Action `result` is stale after resolution — OPEN (2026-07-22).**
-  `resolveAction` (`deploy/src/runner.ts` L203) updates `status` and `updated_at` but never
-  touches `result`. A resolved row still shows the accept envelope
-  (`{"accepted": 202, "job_id": ..., "deploy": {"status": "running"}}`), so the row's own
-  evidence field contradicts its status. Cosmetic-but-misleading; it is the only real defect
-  in this area. Fix: have `resolveAction` write the real outcome (state + commit/job) into
-  `result` alongside the status flip.
+- **Action `result` is stale after resolution — FIXED `117b8da` (2026-07-22).**
+  WAS: `resolveAction` (`deploy/src/runner.ts` L203) updated `status` and `updated_at` but never
+  `result`, so a resolved row kept the accept envelope
+  (`{"accepted": 202, "job_id": ..., "deploy": {"status": "running"}}`) and its own evidence
+  field contradicted its status. That contradiction is what produced the misdiagnosis reverted
+  in `2fa46f8`. Fixed: `resolveAction` now writes `{state, detail, job_id, kind, service,
+  job_status, from_commit, deployed_commit, finished_at}` into `result` in the same guarded
+  UPDATE. Verified on action 19 (contractor restart, job f1c2bbb7, deployed_commit 117b8da).
 - **DISPROVEN (2026-07-22): "terminal status is inferred from the 202."** Investigated from
   source; recorded here so nobody re-derives it. `marionette/src/actions.ts` `executeAction`
   explicitly does NOT write terminal state after a 202 — it flips to `executing`, POSTs
@@ -2129,8 +2130,23 @@ system.
 - **No `action.succeeded` audit row exists BY DESIGN.** `audit_log` is the ledger (§4);
   `actions` is derived current-state. The terminal event is already in the ledger as
   `deploy.succeeded` / `deploy.failed` carrying `action_id` in `payload`. A second
-  `action.succeeded` row would duplicate a fact (§2 forbids). Correlation is payload-only —
-  query `payload->>'action_id'`, not a column join.
+  `action.succeeded` row would duplicate a fact (§2 forbids).
+  **Correlation caveat (measured 2026-07-22, action 19):** `action_id` appears in the payload of
+  `deploy.enqueued` and `deploy.started` ONLY. `deploy.succeeded` / `deploy.failed` carry a NULL
+  `action_id`. So `payload->>'action_id'` does not reach the terminal event — correlate via the
+  enqueued row's `job_id`, or read `actions.result->>'job_id'` (populated since `117b8da`).
+
+- **Propose does not push to Telegram — OPEN (2026-07-22).** `action.proposed` writes the row and
+  the prompt tells the owner to tap in Telegram, but nothing sends the prompt. `notifyTelegram`
+  lives in `deploy/src/runner.ts` and fires only on TERMINAL state; `marionette` has no
+  propose-time notifier. Action 19 sat `proposed` silently; approval was reachable only via
+  `POST /actions/:id/approve` on the backend network. **M5 precondition:** the approval gate is
+  the whole guardrail, and it is currently unreachable by the intended path.
+
+- **`deploy` cannot deploy itself — BY DESIGN (2026-07-22).** Its allow-list is
+  `api, contractor, marionette, docs`. Changes to `deploy/` ship via
+  `docker compose up -d --build --no-deps deploy` on the host. `--no-deps` is required (§ config-hash
+  lesson) or postgres bounces.
 
 <!-- appended by Mari 2026-07-21 (action 16) -->
 
