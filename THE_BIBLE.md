@@ -2108,6 +2108,26 @@ system.
   truth, the prose is not — verify every proposal against the `actions` table, never against
   Mari's reply text.**
 
+- **Action terminal status is written from the 202, not the ledger — OPEN (2026-07-22).**
+  `actions.status` reaches `succeeded` on the strength of deploy's HTTP `202 Accepted`, not on a
+  `deploy.succeeded` audit row. Evidence: rows 10–16 have `result` holding only
+  `{"accepted": 202, "status": "running"}` — the accept envelope. Only rows 4/5/6 carry a real
+  `outcome.state: succeeded` plus a commit SHA. **And the terminal transition is never audited:**
+  `action.proposed` / `approved` / `executing` / `deploy_accepted` / `denied` all emit audit rows;
+  there is NO `action.succeeded`. For action 14 the ledger runs 2679→2688 and simply stops after
+  `deploy.succeeded`, while the table says `succeeded` with `updated_at` matching that audit row
+  to the microsecond — the write happened, it just left no trace in the one ledger.
+  **Consequence:** a deploy that 202s and then fails leaves a row reading `succeeded` next to a
+  `deploy.failed` in `audit_log`. Audit id 2678 is exactly that failure (`docs`, reason
+  `no blocks supplied`) and escaped only because its `action_id` was null. Actions 7 and 9 already
+  carry hand-written `"note": "manually resolved"` in `result` — this class was patched twice by
+  hand before it was named.
+  **Same failure class as the propose gap (`056fb97`): state written from an assumed signal rather
+  than the authoritative one.** Fix direction (not yet built): the action row's terminal status
+  must be set by the deploy outcome watcher keyed on `action_id`, and must emit
+  `action.succeeded` / `action.failed` so the ledger is complete. Until then, never trust
+  `actions.status` alone — join it against `deploy.succeeded`/`deploy.failed` on `job_id`.
+
 <!-- appended by Mari 2026-07-21 (action 16) -->
 
 <!-- MARI:APPEND §8 -->
