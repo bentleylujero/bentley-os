@@ -207,10 +207,24 @@ async function resolveAction(
 ): Promise<void> {
   if (!job.actionId) return;
   try {
+    // result must be overwritten too: without this the row keeps deploy's
+    // 202 accept envelope ({"accepted":202,"deploy":{"status":"running"}}),
+    // so a resolved row's own evidence field contradicts its status (§8).
+    const outcome = {
+      state: terminal,
+      detail,
+      job_id: job.id,
+      kind: job.kind,
+      service: job.service,
+      job_status: job.status,
+      from_commit: job.fromCommit ?? null,
+      deployed_commit: job.deployedCommit ?? null,
+      finished_at: job.finishedAt ?? new Date().toISOString(),
+    };
     const res = await pool.query(
-      `UPDATE actions SET status = $1, updated_at = now()
+      `UPDATE actions SET status = $1, result = $3::jsonb, updated_at = now()
        WHERE id = $2 AND status = 'executing' RETURNING id`,
-      [terminal, job.actionId],
+      [terminal, job.actionId, JSON.stringify(outcome)],
     );
     if (res.rowCount === 0) {
       line(job, `action ${job.actionId} not in 'executing' — no terminal write (already resolved?)`);
