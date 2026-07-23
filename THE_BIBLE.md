@@ -825,9 +825,17 @@ still required. The auto-execute-low-risk tier (M5 proper) is a later step ON TO
 - **Audit names reused** (`deploy.succeeded` / `deploy.failed`, NOT new `restart.*`) —
   deliberate; the `kind:restart` marker in the payload distinguishes restart rows from
   build-deploy rows on the same action names.
-- **Invocation is human-triggered:** Mari proposes → `/telegram/surface/:id` → Approve tap →
-  execute. The condition under which Mari self-proposes a restart is still deferred (row shape
-  already supports it via `proposed_by`).
+- **Invocation is human-triggered:** Mari proposes → Telegram push → Approve tap → execute.
+  **Since `6f7474b` the push is automatic:** `createAction` fires api's
+  `POST /telegram/surface/:id` relay itself after the row commits, so a proposal reaches the
+  owner by the intended path with no manual surface call. Fire-and-forget after the write, not
+  in the txn — the row is the ledger fact, the push is a side effect; a Telegram failure must
+  never unwind a valid proposal. Retry 8x5s with a 4s per-attempt abort (mirrors deploy's
+  `notifyTelegram`; when the deployed service IS api the relay is mid-restart when we fire).
+  HTTP 409 is terminal, not retried. api remains the sole outbound Telegram client (§9.1) —
+  marionette never talks to Telegram directly. Verified end-to-end 2026-07-23 (job `681b3fb3`,
+  audit_log 2854-2856). The condition under which Mari self-proposes a restart is still
+  deferred (row shape already supports it via `proposed_by`).
 - **Commit:** `12b0211` (`service-restart` — Mari's first hand).
 
 **Marionette audit-sight — read endpoint AND `/think` integration both done, live:**
@@ -2149,6 +2157,29 @@ system.
   lesson) or postgres bounces.
 
 <!-- appended by Mari 2026-07-21 (action 16) -->
+
+### CLOSED 2026-07-23 (6f7474b) - propose-time Telegram notify
+
+**Was:** `action.proposed` wrote the row and `prompt.ts` L33 told the owner to "tap in
+Telegram", but nothing sent the prompt. Approval was reachable only via
+`POST http://marionette:4200/actions/:id/approve` from the backend network. Action 19 sat
+silent. This blocked M5 -- auto-execute tiering sits on top of an approval gate that has to
+actually be reachable.
+
+**Fix:** `createAction` in `marionette/src/actions.ts` now calls api's ALREADY-EXISTING
+`POST /telegram/surface/:id` relay after the row commits. No new api code was needed --
+`surface` already reads the action from marionette and pushes it with an Approve/Deny inline
+keyboard. api remains the only outbound Telegram client (§9.1); a second Telegram client in
+marionette would have been a parallel mechanism.
+
+**Shape, deliberately:** fire-and-forget AFTER the write, not inside the txn. The row is the
+ledger fact; the push is a side effect. A Telegram failure must never unwind a valid proposal.
+Retry is 8 attempts x 5s with a 4s per-attempt abort, mirroring `deploy/src/runner.ts`
+`notifyTelegram` -- when the deployed service IS api, the relay is mid-restart at exactly the
+moment we fire. HTTP 409 (row no longer `proposed`) is TERMINAL, not transient: stop retrying.
+
+**Verified end-to-end 2026-07-23:** proposed action pushed to Telegram with buttons, approved
+by tap, contractor restarted, result reported. Deploy job `681b3fb3`, audit_log 2854-2856.
 
 <!-- MARI:APPEND §8 -->
 
