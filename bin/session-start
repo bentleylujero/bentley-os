@@ -11,7 +11,7 @@ SYNC=$(git status -sb | head -1)
 MIGRATIONS=$(ls supabase/migrations/ | wc -l | tr -d ' ')
 SERVICES=$(docker compose ps --status running | tail -n +2 | wc -l | tr -d ' ')
 
-read -r EMAILS CLASSIFIED EMBEDDED ACTIONS EVENTS TASKS <<<"$(
+read -r EMAILS CLASSIFIED EMBEDDED ACTIONS EVENTS TASKS STALE_PROPOSED AUTO_APPROVED <<<"$(
   docker exec bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -tA -F' ' -c "
     SELECT
       (SELECT count(*) FROM emails),
@@ -19,7 +19,9 @@ read -r EMAILS CLASSIFIED EMBEDDED ACTIONS EVENTS TASKS <<<"$(
       (SELECT count(*) FROM emails WHERE embedded_at IS NOT NULL),
       (SELECT count(*) FROM actions),
       (SELECT count(*) FROM calendar_events),
-      (SELECT count(*) FROM tasks);"
+      (SELECT count(*) FROM tasks),
+      (SELECT count(*) FROM actions WHERE status = 'proposed' AND created_at < now() - interval '15 minutes'),
+      (SELECT count(*) FROM audit_log WHERE action = 'action.approved' AND payload->>'by' = 'marionette');"
 )"
 
 cat <<REPORT
@@ -35,5 +37,7 @@ embedded:     $EMBEDDED   (gap from emails is normal — cron drains on next tic
 actions:      $ACTIONS
 events:       $EVENTS
 tasks:        $TASKS
+stale_props:  $STALE_PROPOSED   (proposed >15min — nonzero = M5 crash window or an untapped button)
+auto_approved:$AUTO_APPROVED   (lifetime count, by='marionette')
 === paste this block at the start of a Claude session ===
 REPORT
