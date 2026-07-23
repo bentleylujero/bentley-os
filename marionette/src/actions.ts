@@ -93,6 +93,47 @@ export function validateActionIntent(
   return null;
 }
 
+const API_SURFACE_URL = 'http://api:3000/telegram/surface';
+
+// Push a freshly-proposed action to Telegram. Fire-and-forget: the row is the
+// ledger fact, the push is a side effect -- a Telegram failure must never
+// unwind a valid proposal. Retry mirrors deploy/src/runner.ts notifyTelegram:
+// if the deployed service IS api, the relay is mid-restart when we fire.
+// api is the only outbound Telegram client (BIBLE S9); marionette never talks
+// to Telegram directly.
+async function surfaceToTelegram(id: number): Promise<void> {
+  const ATTEMPTS = 8;
+  const SPACING_MS = 5_000;
+  const PER_ATTEMPT_TIMEOUT_MS = 4_000;
+
+  for (let i = 1; i <= ATTEMPTS; i++) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), PER_ATTEMPT_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${API_SURFACE_URL}/${id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      if (res.ok) return;
+      // 409 = no longer 'proposed' (handled before the push landed).
+      // Terminal, not transient -- stop retrying.
+      if (res.status === 409) {
+        console.error(`[marionette] surface ${id}: already handled (409) -- not retrying`);
+        return;
+      }
+      console.error(`[marionette] surface attempt ${i}/${ATTEMPTS} non-ok: HTTP ${res.status}`);
+    } catch (e: any) {
+      clearTimeout(t);
+      console.error(`[marionette] surface attempt ${i}/${ATTEMPTS} failed:`, e?.message ?? e);
+    }
+    if (i < ATTEMPTS) await new Promise((r) => setTimeout(r, SPACING_MS));
+  }
+  console.error(`[marionette] surface GAVE UP for action ${id} -- row stands, push lost`);
+}
+
 // Create a proposed action. Returns the new row.
 export async function createAction(input: {
   kind: string;
@@ -109,6 +150,7 @@ export async function createAction(input: {
     outcome: 'success',
     payload: { kind: row.kind, intent: row.intent },
   });
+  void surfaceToTelegram(Number(row.id));
   return row;
 }
 
