@@ -29,7 +29,8 @@ and root-owned-git-object gaps resolved). M3 extended with the document-ingestio
 question-router replacing both keyword gates (`9700240`) — PDF extraction the deferred follow-on.
 M5's first hand `service-restart` shipped (`12b0211`) and second hand `update_docs` shipped
 (`dd4d594`); `/think` reached the action lifecycle via the `propose` decision kind (`056fb97`);
-auto-execute tier not started. See §4/§6
+the M5 auto-execute low-risk tier shipped (`76afe8d`, counters `4f5076b`) — allow-list is
+`[('service-restart','contractor')]`, kill switch `AUTO_EXECUTE_ENABLED` LIVE (`true`). See §4/§6
 for detail and §8 for the resolved-gap history.*
 
 ---
@@ -1523,8 +1524,33 @@ done (`52c3f72`) — no longer blocked.**
   deterministic box script) in favor of append-only insertion above `<!-- MARI:APPEND §N -->`
   sentinels, plus a line-conservation guard in `deploy` asserting no pre-existing non-blank
   line is lost. Still approval-gated. See §8.
-- ⬜ **M5 proper — auto-execute the low-risk action tier** — a step ON TOP of the hands, NOT
-  started. The hands stay approval-gated until this lands.
+- ✅ **M5 proper — auto-execute the low-risk action tier** (`76afe8d`) — a step ON TOP of the
+  hands. Static allow-list `AUTO_EXECUTE` in `marionette/src/actions.ts`, exact `(kind, target)`
+  match, no globs. Contents: `[('service-restart','contractor')]` — one pair. Risk is a property
+  of the CODE PATH, not a row: **no risk column, no risk table, no scoring.** Adding a pair is a
+  commit + isolation-test + deploy + audit row — that IS the earned-autonomy ratchet (§2).
+  - **The gate is PASSED, never bypassed.** Auto-tier writes `proposed` then immediately
+    `approved` with `by='marionette'` in the `action.approved` audit payload. Identical
+    lifecycle, identical state machine, one extra UPDATE. WHO approved is a ledger fact, so it
+    lives in `audit_log` payload — never as a column on `actions` (§2: store each fact once).
+  - **Kill switch `AUTO_EXECUTE_ENABLED`** (env, `'true'` to enable), read ONCE at module load.
+    Flipping it needs `docker compose up -d --no-deps marionette` — the revert path is an ops
+    action, not a git operation. Shipped OFF, verified inert (action 21 took the full human path
+    unchanged), then flipped. **Currently `true`.**
+  - **No Approve/Deny push for auto-tier** — `surfaceToTelegram` is skipped; a button on an
+    already-approved action is a dead control (409 on tap). `deploy` owns the terminal ✅/❌
+    notify via `POST /telegram/notify` for both tiers, so no api change was needed.
+  - **Verified:** action 21 human path (`{"by":"human"}`), action 22 auto path
+    (`{"by":"marionette"}` → executing → deploy_accepted → succeeded, ✅ only in Telegram).
+  - **Accepted non-atomic window:** marionette can die between the `proposed` INSERT and the
+    `approved` UPDATE, orphaning a `proposed` row. Fails CLOSED into the human gate; no push
+    went out. Not worth a transaction — the two are distinct facts at distinct times. Mitigated
+    by observability: `bin/session-start` reports `stale_props` (proposed >15min) and
+    `auto_approved` (lifetime `by='marionette'` count).
+- ⬜ **M5.1 — auto-execute rate limiting** — DEFERRED, deliberately. Failure mode is real (a
+  restart that fails could loop), but the right shape isn't known yet: per-`(kind,target)`
+  window vs. circuit breaker on repeated `deploy.failed` vs. marionette-side reasoning. Design
+  against OBSERVED behavior, not imagined. Kill switch is the only backstop until then.
 
 **Milestone 6 — Self-extension.** Tool registry + isolated test + approval + git automation +
 rollback, **reusing `deploy`'s** job/audit machinery — not a parallel build-and-rollback
@@ -2180,6 +2206,19 @@ moment we fire. HTTP 409 (row no longer `proposed`) is TERMINAL, not transient: 
 
 **Verified end-to-end 2026-07-23:** proposed action pushed to Telegram with buttons, approved
 by tap, contractor restarted, result reported. Deploy job `681b3fb3`, audit_log 2854-2856.
+
+- **`AUTO_EXECUTE_ENABLED` is global in `.env`** — `docker compose config` shows it resolving
+  into three services, not just marionette. Inert today (only marionette reads it), but it is a
+  loaded name to leave lying around: a future service reading it inherits `true` for free.
+  Cheap fix is scoping it under marionette's `environment:` block in `docker-compose.yml`.
+  Not done — deliberately not shipping an untested compose change on top of a verified session.
+- **Recreating `marionette` drops the browser terminal session** at `ssh.bentleyos.me`.
+  Observed this session (`docker compose up -d --no-deps marionette`, 10.6s). Cause not
+  investigated. Cosmetic, but it masqueraded as a contractor restart and cost a debugging
+  detour — the propose that "vanished" had simply never fired.
+- **`bin/session-start` uses `psql -h 127.0.0.1`** (trust auth), the documented false-positive
+  pattern. Read-only counting so it is harmless here, but it is inconsistent with the
+  `-h postgres` rule used everywhere else.
 
 <!-- MARI:APPEND §8 -->
 
