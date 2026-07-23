@@ -93,6 +93,29 @@ export function validateActionIntent(
   return null;
 }
 
+// ── M5: auto-execute low-risk tier ──────────────────────────────────────────
+// Risk is a property of the CODE PATH, not of a row — no risk column, no
+// scoring, no shadow ontology. Adding a pair here is a commit + isolation-test
+// + deploy + audit row. That IS the earned-autonomy ratchet (BIBLE §2).
+// Exact match only: no globs, no wildcards, no prefix matching.
+const AUTO_EXECUTE: ReadonlyArray<readonly [kind: string, target: string]> = [
+  ['service-restart', 'contractor'],
+];
+
+// Kill switch. Read ONCE at module load, not per-call — flipping it requires a
+// container recreate, which is the point: the revert path is an ops action, not
+// a git operation. Ships OFF; turned on as a separate deliberate act.
+const AUTO_EXECUTE_ENABLED = process.env.AUTO_EXECUTE_ENABLED === 'true';
+
+// When disabled the allow-list is not consulted at all — behavior is bit-for-bit
+// identical to pre-M5. Target is intent.service for every kind currently listed.
+function isAutoExecutable(kind: string, intent: Record<string, unknown>): boolean {
+  if (!AUTO_EXECUTE_ENABLED) return false;
+  const target = (intent as any)?.service;
+  if (typeof target !== 'string') return false;
+  return AUTO_EXECUTE.some(([k, t]) => k === kind && t === target);
+}
+
 const API_SURFACE_URL = 'http://api:3000/telegram/surface';
 
 // Push a freshly-proposed action to Telegram. Fire-and-forget: the row is the
@@ -150,6 +173,16 @@ export async function createAction(input: {
     outcome: 'success',
     payload: { kind: row.kind, intent: row.intent },
   });
+  // Auto-tier: the gate is PASSED, never bypassed. The 'proposed' row above is
+  // already committed; we now record an approval decision against it with
+  // by='marionette'. Identical lifecycle, identical state machine, one extra
+  // UPDATE. No Approve/Deny push — a button on an already-approved action is a
+  // dead control (409 on tap). deploy owns the terminal ✅/❌ notify either way.
+  if (isAutoExecutable(row.kind, row.intent)) {
+    void approveAction(Number(row.id), 'marionette');
+    return row;
+  }
+
   void surfaceToTelegram(Number(row.id));
   return row;
 }
@@ -186,7 +219,7 @@ export async function denyAction(id: number): Promise<{ ok: boolean; reason?: st
 // Approve: proposed -> approved, atomically. If that transition wins (one row
 // updated), kick execute WITHOUT awaiting. Returns a fast ack. The guard is the
 // WHERE clause — only one caller can flip a given proposed row to approved.
-export async function approveAction(id: number): Promise<{ ok: boolean; reason?: string }> {
+export async function approveAction(id: number, by: string = 'human'): Promise<{ ok: boolean; reason?: string }> {
   const rows = await sql<ActionRow[]>`
     update actions set status = 'approved', updated_at = now()
     where id = ${id} and status = 'proposed'
@@ -195,7 +228,9 @@ export async function approveAction(id: number): Promise<{ ok: boolean; reason?:
   if (rows.length === 0) {
     return { ok: false, reason: 'action not found or not in proposed state' };
   }
-  await audit({ action: 'action.approved', target: String(id), outcome: 'success', payload: {} });
+  // WHO approved is a ledger fact, not current state — it lives in audit_log
+  // payload, never as a column on actions (BIBLE §2: store each fact once).
+  await audit({ action: 'action.approved', target: String(id), outcome: 'success', payload: { by } });
 
   // Fire-and-report: do NOT await. The detached promise flips the row to
   // 'executing' and hands off to deploy, which owns the terminal transition.
