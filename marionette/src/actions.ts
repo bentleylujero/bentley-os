@@ -107,13 +107,107 @@ const AUTO_EXECUTE: ReadonlyArray<readonly [kind: string, target: string]> = [
 // a git operation. Ships OFF; turned on as a separate deliberate act.
 const AUTO_EXECUTE_ENABLED = process.env.AUTO_EXECUTE_ENABLED === 'true';
 
+// ── M5.1: auto-execute rate limiting ────────────────────────────────────────
+// The allow-list says WHICH pairs may self-approve. This says WHEN they may
+// not. Nothing here is new state: the counters are derived from audit_log at
+// decision time, because an in-memory counter is self-defeating — a
+// service-restart on marionette would clear its own breaker.
+//
+// Two independent trips, either one is sufficient:
+//   BREAKER — the last N terminal outcomes for this pair are ALL failures.
+//             Responds to the actual signal (things are broken).
+//   WINDOW  — more than M auto-executes for this pair in the last hour.
+//             Catches the loop the breaker is blind to: a restart that keeps
+//             SUCCEEDING while never fixing the underlying problem.
+//
+// A trip does not remove the capability, it removes the AUTONOMY: we fall back
+// to the pre-existing human-gated path (propose + Telegram buttons). Fails
+// closed into the gate that already exists — no new path, no silent hole.
+//
+// Reset is implicit, not a mechanism: a human-approved execution that succeeds
+// becomes the most recent terminal outcome and breaks the consecutive-failure
+// run. The Approve tap IS the manual reset.
+const BREAKER_CONSECUTIVE_FAILURES = 2;
+const WINDOW_MAX = 5;
+const WINDOW_MS = 3_600_000;
+
+// Terminal classification, derived from the real ledger (verified 2026-07-23):
+// an unhealthy deploy that ROLLED BACK is still a failure from the proposer's
+// view — "I asked for a restart and the service ended up not healthy" — even
+// though deploy successfully recovered the old container.
+const TERM_SUCCESS = ['deploy.succeeded'];
+const TERM_FAILURE = ['deploy.failed', 'deploy.rolled_back', 'deploy.rollback.failed'];
+
+// Returns a reason string when the pair is rate-limited, else null.
+// Any query error returns a reason (fail closed): if we cannot read the ledger
+// we cannot prove the pair is safe, so we hand the decision to the human.
+async function rateLimitReason(kind: string, target: string): Promise<string | null> {
+  try {
+    // One terminal outcome per action (the LAST audit row for its job_id —
+    // rollback.started shares a job_id with its terminal row and must not win).
+    const rows = await sql<{ id: number; created_at: string; term: string }[]>`
+      with terminal as (
+        select distinct on (a.id)
+               a.id, a.created_at, al.action as term
+        from actions a
+        join audit_log al
+          on al.payload->>'job_id' = a.result->>'job_id'
+        where a.kind = ${kind}
+          and coalesce(a.intent->>'service', '') = ${target}
+          and al.action in ${sql([...TERM_SUCCESS, ...TERM_FAILURE])}
+        order by a.id, al.at desc
+      )
+      select id, created_at, term from terminal order by id desc limit ${BREAKER_CONSECUTIVE_FAILURES}
+    `;
+
+    // BREAKER: need a full run of failures. Fewer rows than the threshold means
+    // insufficient history to trip — a brand-new pair is not presumed broken.
+    if (
+      rows.length >= BREAKER_CONSECUTIVE_FAILURES &&
+      rows.every((r) => TERM_FAILURE.includes(r.term))
+    ) {
+      return `breaker: last ${BREAKER_CONSECUTIVE_FAILURES} deploys for ${kind}/${target} failed`;
+    }
+
+    // WINDOW: count auto-approved actions for this pair in the last hour.
+    // Counts APPROVALS, not outcomes — an in-flight loop must be caught while
+    // it is still in flight, before any terminal row exists.
+    const since = new Date(Date.now() - WINDOW_MS).toISOString();
+    const [{ n }] = await sql<{ n: string }[]>`
+      select count(*) as n
+      from actions a
+      join audit_log al
+        on al.target = a.id::text
+       and al.action = 'action.approved'
+       and al.payload->>'by' = 'marionette'
+      where a.kind = ${kind}
+        and coalesce(a.intent->>'service', '') = ${target}
+        and al.at > ${since}
+    `;
+    if (Number(n) >= WINDOW_MAX) {
+      return `window: ${n} auto-executes for ${kind}/${target} in the last hour (max ${WINDOW_MAX})`;
+    }
+
+    return null;
+  } catch (e: any) {
+    return `rate-limit check failed: ${e?.message ?? e}`;
+  }
+}
+
 // When disabled the allow-list is not consulted at all — behavior is bit-for-bit
 // identical to pre-M5. Target is intent.service for every kind currently listed.
-function isAutoExecutable(kind: string, intent: Record<string, unknown>): boolean {
-  if (!AUTO_EXECUTE_ENABLED) return false;
+async function isAutoExecutable(
+  kind: string,
+  intent: Record<string, unknown>,
+): Promise<{ ok: boolean; reason?: string }> {
+  if (!AUTO_EXECUTE_ENABLED) return { ok: false };
   const target = (intent as any)?.service;
-  if (typeof target !== 'string') return false;
-  return AUTO_EXECUTE.some(([k, t]) => k === kind && t === target);
+  if (typeof target !== 'string') return { ok: false };
+  if (!AUTO_EXECUTE.some(([k, t]) => k === kind && t === target)) return { ok: false };
+
+  const limited = await rateLimitReason(kind, target);
+  if (limited) return { ok: false, reason: limited };
+  return { ok: true };
 }
 
 const API_SURFACE_URL = 'http://api:3000/telegram/surface';
@@ -178,9 +272,20 @@ export async function createAction(input: {
   // by='marionette'. Identical lifecycle, identical state machine, one extra
   // UPDATE. No Approve/Deny push — a button on an already-approved action is a
   // dead control (409 on tap). deploy owns the terminal ✅/❌ notify either way.
-  if (isAutoExecutable(row.kind, row.intent)) {
+  const auto = await isAutoExecutable(row.kind, row.intent);
+  if (auto.ok) {
     void approveAction(Number(row.id), 'marionette');
     return row;
+  }
+  // A rate-limit trip is a ledger fact, not a log line. The row then continues
+  // down the ORIGINAL human-gated path below — unchanged, not a new branch.
+  if (auto.reason) {
+    await audit({
+      action: 'action.autoexec_blocked',
+      target: String(row.id),
+      outcome: 'blocked',
+      payload: { kind: row.kind, intent: row.intent, reason: auto.reason },
+    });
   }
 
   void surfaceToTelegram(Number(row.id));
