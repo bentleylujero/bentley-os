@@ -161,6 +161,8 @@ services:
       test: ["CMD", "node", "-e", "fetch('http://localhost:4200/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 15s
   cloudflared:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     image: cloudflare/cloudflared:2025.5.0
     restart: unless-stopped
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
