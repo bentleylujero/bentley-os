@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+IP=$(ip -4 -brief addr show scope global | awk 'NR==1{sub(/\/.*/,"",$3); print $3}')
+HEAD=$(git rev-parse --short HEAD)
+DIRTY=$(git status --porcelain | grep -q . && echo dirty || echo clean)
+MIG=$(ls supabase/migrations | tail -1)
+UP=$(docker compose ps --services --status running | wc -l)
+ALL=$(docker compose ps --services | wc -l)
+DOWN=$(comm -13 <(docker compose ps --services --status running | sort) \
+                <(docker compose ps --services | sort) | paste -sd, -)
+
+python3 - "$IP" "$HEAD" "$DIRTY" "$MIG" "$UP" "$ALL" "$DOWN" << 'PY'
+import sys, datetime
+ip, head, dirty, mig, up, all_, down = sys.argv[1:8]
+now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d %H:%M')
+block = f"""<!-- GENERATED {now} UTC — run bin/status, do not hand-edit -->
+- Box: `spaghettios@{ip}` · `~/bentley-os`
+- HEAD: `{head}` ({dirty})
+- Latest migration: `{mig}`
+- Services: {up}/{all_} up{f" — DOWN: {down}" if down else ""}
+<!-- END GENERATED -->"""
+p = 'STATUS.md'
+s = open(p).read()
+a = s.index('<!-- GENERATED')
+b = s.index('<!-- END GENERATED -->') + len('<!-- END GENERATED -->')
+open(p, 'w').write(s[:a] + block + s[b:])
+print(block)
+PY
