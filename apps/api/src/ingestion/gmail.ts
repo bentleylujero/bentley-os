@@ -106,6 +106,11 @@ function extractBody(payload: any): string | null {
   return null;
 }
 
+const RECIPIENT_LINK_TYPES: Record<string, string> = {
+  to: 'email_has_to_recipient',
+  cc: 'email_has_cc_recipient',
+};
+
 async function upsertPerson(client: any, addr: Addr): Promise<string> {
   const res = await client.query(
     `INSERT INTO people (email, display_name)
@@ -160,21 +165,21 @@ async function upsertMessage(msg: Record<string, any>): Promise<number> {
     const emailId: string = emailRes.rows[0].id;
     const inserted: boolean = emailRes.rows[0].inserted;
 
-    // Rebuild recipients for this email (idempotent on re-sync).
-    await client.query(`DELETE FROM email_recipients WHERE email_id = $1`, [emailId]);
-
+    // Recipient edges live in links; the 5-tuple unique constraint makes re-sync a no-op.
     const seen = new Set<string>();
     for (const [kind, addrs] of [['to', toAddrs], ['cc', ccAddrs]] as const) {
+      const linkType = RECIPIENT_LINK_TYPES[kind];
+      if (!linkType) throw new Error(`gmail: unknown recipient kind "${kind}"`);
       for (const addr of addrs) {
         const dedupeKey = `${kind}:${addr.email}`;
         if (seen.has(dedupeKey)) continue;
         seen.add(dedupeKey);
         const personId = await upsertPerson(client, addr);
         await client.query(
-          `INSERT INTO email_recipients (email_id, person_id, kind)
-           VALUES ($1, $2, $3)
-           ON CONFLICT (email_id, person_id, kind) DO NOTHING`,
-          [emailId, personId, kind],
+          `INSERT INTO links (from_type, from_id, link_type, to_type, to_id)
+           VALUES ('emails', $1::text, $2, 'people', $3::text)
+           ON CONFLICT (from_type, from_id, link_type, to_type, to_id) DO NOTHING`,
+          [emailId, linkType, personId],
         );
       }
     }
