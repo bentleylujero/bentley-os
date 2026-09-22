@@ -66,6 +66,7 @@ dashboardRoute.get('/', async (c) => {
   let newEmails: any[] = [];
   let newEvents: any[] = [];
   let actions: any[] = [];
+  let folders: string[] = [];
   let lastSeen: Date | null = null;
   let dbError = '';
 
@@ -159,7 +160,11 @@ dashboardRoute.get('/', async (c) => {
         ORDER BY created_at DESC
         LIMIT 8`
     );
-    const [tasksR, attnR, periphR, upcomingR, pastR, newEmailsR, newEventsR, actionsR] =
+    // Distinct folder names in use, for the upload dropzone's datalist.
+    const foldersQ = pool.query(
+      `SELECT DISTINCT folder FROM documents ORDER BY folder`
+    );
+    const [tasksR, attnR, periphR, upcomingR, pastR, newEmailsR, newEventsR, actionsR, foldersR] =
       await Promise.all([
         tasksQ,
         attnQ,
@@ -169,6 +174,7 @@ dashboardRoute.get('/', async (c) => {
         newEmailsQ,
         newEventsQ,
         actionsQ,
+        foldersQ,
       ]);
     tasks = tasksR.rows;
     attnEmails = attnR.rows;
@@ -178,6 +184,7 @@ dashboardRoute.get('/', async (c) => {
     newEmails = newEmailsR.rows;
     newEvents = newEventsR.rows;
     actions = actionsR.rows;
+    folders = foldersR.rows.map((r: any) => r.folder as string);
   } catch (err: any) {
     dbError = err?.message ?? 'query failed';
   }
@@ -335,6 +342,10 @@ dashboardRoute.get('/', async (c) => {
       ? ` <span class="count">${attnEmails.length}</span>`
       : '';
 
+  const folderOptionsHtml = folders
+    .map((f) => `<option value="${esc(f)}">`)
+    .join('');
+
   return c.html(`<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -479,6 +490,10 @@ dashboardRoute.get('/', async (c) => {
   .pbtn[data-p="high"]:hover{border-color:var(--green);color:var(--green);text-shadow:0 0 5px var(--green);}
   .pbtn[data-p="medium"]:hover{border-color:var(--green-ghost);color:var(--green-dim);}
   .pbtn[data-p="low"]:hover{border-color:var(--purple-border);color:var(--text);}
+  .folderpick{display:flex;gap:.5rem;margin-top:.75rem;align-items:center;}
+  .folderpick label{font-size:.6rem;color:var(--green-faint);text-transform:uppercase;letter-spacing:.08em;white-space:nowrap;}
+  .folderpick input{flex:1;background:var(--purple-bg3);border:1px solid var(--purple-border);border-radius:6px;color:var(--text);padding:.35rem .55rem;font-family:inherit;font-size:.72rem;}
+  .folderpick input:focus{outline:none;border-color:var(--green);box-shadow:0 0 8px rgba(124,252,0,.25);}
   .docdrop{margin-top:.75rem;border:1px dashed var(--purple-border);border-radius:6px;padding:.5rem .6rem;color:var(--green-faint);font-size:.66rem;text-transform:uppercase;letter-spacing:.06em;cursor:pointer;transition:border-color .15s,color .15s;text-align:center;}
   .docdrop:hover,.docdrop.drag{border-color:var(--green);color:var(--green-dim);}
   .docdrop b{color:var(--green-dim);text-transform:none;letter-spacing:0;}
@@ -586,6 +601,11 @@ dashboardRoute.get('/', async (c) => {
           <button class="pbtn" data-p="high" onclick="addTask('high')">High</button>
           <button class="pbtn" data-p="medium" onclick="addTask('medium')">Med</button>
           <button class="pbtn" data-p="low" onclick="addTask('low')">Low</button>
+        </div>
+        <div class="folderpick">
+          <label for="docfolder">folder</label>
+          <input id="docfolder" type="text" list="folder-options" placeholder="general" value="general">
+          <datalist id="folder-options">${folderOptionsHtml}</datalist>
         </div>
         <div class="docdrop" id="docdrop" onclick="document.getElementById('docfile').click()">
           Drop a doc here or <b>click to upload</b> (.md / .txt / .docx / .pptx / .pdf)
@@ -703,17 +723,24 @@ dashboardRoute.get('/', async (c) => {
   // multipart boundary itself.
   async function uploadDoc(file){
     if(!file)return;
+    var folderInp=document.getElementById('docfolder');
+    var folder=(folderInp&&folderInp.value.trim())||'general';
     var fd=new FormData();
     fd.append('file',file);
+    fd.append('folder',folder);
     try{
       var r=await fetch('/documents',{method:'POST',body:fd});
       if(!r.ok)throw new Error('http '+r.status);
       var d=(await r.json()).document;
       var row=document.createElement('div');
       row.className='docrow';
-      row.innerHTML='<span class="ok">✓</span><b>'+esc(d.title)+'</b> queued';
+      row.innerHTML='<span class="ok">✓</span><b>'+esc(d.title)+'</b> <span class="sub">→ '+esc(d.folder)+'</span> queued';
       var list=document.getElementById('doclist');
       list.insertBefore(row,list.firstChild);
+      var dl=document.getElementById('folder-options');
+      if(dl&&d.folder&&!dl.querySelector('option[value="'+d.folder+'"]')){
+        var opt=document.createElement('option');opt.value=d.folder;dl.appendChild(opt);
+      }
     }catch(e){alert('Could not upload document: '+e.message);}
   }
   (function(){

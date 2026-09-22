@@ -75,14 +75,25 @@ async function extractText(file: File): Promise<string> {
   return text;
 }
 
+// normalizeFolder — mirrors the DB check constraint (documents_folder_normalized)
+// so a malformed value 415s here instead of tripping the constraint as a 500.
+// Empty/missing input defaults to 'general', matching the column default.
+function normalizeFolder(input: unknown): string {
+  if (typeof input !== 'string') return 'general';
+  const trimmed = input.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : 'general';
+}
+
 // POST /documents — multipart upload. api extracts text + writes the row only;
 // marionette embeds it later (Chonkie chunks -> OpenAI 3-small -> Qdrant) via the
 // /embed-doc work-queue, which drains on embedded_at IS NULL. No reasoning here (§9).
 documentsRoute.post('/documents', async (c) => {
   let file: unknown;
+  let folderInput: unknown;
   try {
     const body = await c.req.parseBody();
     file = body['file'];
+    folderInput = body['folder'];
   } catch {
     return c.json({ error: 'file required' }, 400);
   }
@@ -100,17 +111,27 @@ documentsRoute.post('/documents', async (c) => {
   const title = file.name || 'untitled';
   const mime = file.type || 'application/octet-stream';
   const char_count = text.length;
+  const folder = normalizeFolder(folderInput);
 
   try {
     const { rows } = await pool.query(
-      `insert into documents (title, source, mime, body, char_count)
-       values ($1, 'upload', $2, $3, $4)
-       returning id, title, mime, char_count, created_at, embedded_at`,
-      [title, mime, text, char_count],
+      `insert into documents (title, source, mime, body, char_count, folder)
+       values ($1, 'upload', $2, $3, $4, $5)
+       returning id, title, mime, char_count, created_at, embedded_at, folder`,
+      [title, mime, text, char_count, folder],
     );
     return c.json({ document: rows[0] }, 201);
   } catch (err) {
     console.error('POST /documents failed:', err);
     return c.json({ error: 'insert failed' }, 500);
   }
+});
+
+// GET /documents/folders — distinct folder names in use. Pure read, no
+// reasoning (§9) — feeds the dropzone's folder input.
+documentsRoute.get('/documents/folders', async (c) => {
+  const { rows } = await pool.query(
+    `select distinct folder from documents order by folder`,
+  );
+  return c.json({ folders: rows.map((r) => r.folder as string) });
 });
