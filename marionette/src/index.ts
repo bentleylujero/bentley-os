@@ -15,7 +15,7 @@ import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts'
 import { isDataQuestion, formatRetrievalForPrompt } from './data-gate.ts';
 import { retrieveContext } from './retrieve.ts';
 import { readIngestState, formatIngestForPrompt } from './ingest-sight.ts';
-import { routeQuestion, type Route } from './question-router.ts';
+import { routeQuestion, getKnownFolders, type Route } from './question-router.ts';
 import { readHistory, writeTurn, formatHistoryForPrompt } from './memory.ts';
 
 // contractor's /execute can run long (real OpenCode build tasks, multi-step
@@ -160,19 +160,28 @@ app.post('/think', async (c) => {
       console.error('[think] ingest-sight fetch failed:', ingestErr);
     }
     // ROUTING: one cheap flash classify decides which pre-fetch blocks this
-    // request needs. Replaces the two hand-written keyword gates, which failed
-    // silently on any phrasing not in their list (a document question that
-    // never said "email" got no retrieval at all). If the router call fails we
-    // fall back to those same gates — degraded is exactly today's behavior,
-    // never worse. See THE_BIBLE.md §8.
-    let route: Route = { needs_data: false, needs_system: false, source: 'fallback' };
-    const routed = await routeQuestion(request);
+    // request needs, and (since Ticket 4) which folder — if any — to scope a
+    // documents lookup to. Replaces the two hand-written keyword gates, which
+    // failed silently on any phrasing not in their list (a document question
+    // that never said "email" got no retrieval at all). If the router call
+    // fails we fall back to those same gates — degraded is exactly today's
+    // behavior, never worse (folder scoping is simply absent on that path,
+    // same as before Ticket 4). See THE_BIBLE.md §8.
+    let route: Route = { needs_data: false, needs_system: false, folder: null, source: 'fallback' };
+    let knownFolders: string[] = [];
+    try {
+      knownFolders = await getKnownFolders();
+    } catch (folderErr) {
+      console.error('[think] getKnownFolders failed, routing without folder grounding:', folderErr);
+    }
+    const routed = await routeQuestion(request, knownFolders);
     if (routed) {
       route = routed;
     } else {
       route = {
         needs_data: isDataQuestion(request),
         needs_system: isSystemStatusQuestion(request),
+        folder: null,
         source: 'fallback',
       };
     }
@@ -187,7 +196,7 @@ app.post('/think', async (c) => {
     }
     if (route.needs_data) {
       try {
-        const hits = await retrieveContext(request);
+        const hits = await retrieveContext(request, route.folder ?? undefined);
         messages.push({ role: 'system' as const, content: formatRetrievalForPrompt(hits) });
       } catch (retrieveErr) {
         console.error('[think] retrieval fetch failed:', retrieveErr);
