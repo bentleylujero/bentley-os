@@ -127,6 +127,8 @@ services:
       context: ./whisper
       dockerfile: Dockerfile
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:4300:4300"
     networks:
       - backend
     devices:
@@ -166,8 +168,7 @@ services:
     image: cloudflare/cloudflared:2025.5.0
     restart: unless-stopped
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
-    networks:
-      - backend
+    network_mode: host
     depends_on:
       api:
         condition: service_healthy
