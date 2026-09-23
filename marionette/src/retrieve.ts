@@ -67,11 +67,17 @@ async function searchQdrant(
   collection: string,
   vector: number[],
   withPayload: boolean,
+  filter?: Record<string, any>,
 ): Promise<QdrantHit[]> {
   const res = await fetch(`${QDRANT_URL}/collections/${collection}/points/search`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ vector, limit: TOP_K, with_payload: withPayload }),
+    body: JSON.stringify({
+      vector,
+      limit: TOP_K,
+      with_payload: withPayload,
+      ...(filter ? { filter } : {}),
+    }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -125,9 +131,14 @@ async function retrieveEmails(vector: number[]): Promise<RetrievedEmail[]> {
 // documents path: search (WITH payload) → cap to PER_DOCUMENT_CAP per document on
 // the payload BEFORE hitting Postgres → SELECT chunk text from document_chunks by
 // id. Chunk TEXT never comes from Qdrant payload — same one-source-of-truth rule
-// the emails path follows.
-async function retrieveChunks(vector: number[]): Promise<RetrievedChunk[]> {
-  const hits = await searchQdrant(QDRANT_DOCUMENTS, vector, true);
+// the emails path follows. Optional `folder` scopes the Qdrant search via a
+// payload match filter — emails have no folder concept, so this never touches
+// the emails path; no folder = search everything, unchanged from before.
+async function retrieveChunks(vector: number[], folder?: string): Promise<RetrievedChunk[]> {
+  const filter = folder
+    ? { must: [{ key: 'folder', match: { value: folder } }] }
+    : undefined;
+  const hits = await searchQdrant(QDRANT_DOCUMENTS, vector, true, filter);
   if (hits.length === 0) return [];
 
   // Per-document cap, applied on the payload before the Postgres read: group by
@@ -175,12 +186,12 @@ async function retrieveChunks(vector: number[]): Promise<RetrievedChunk[]> {
 // may throw (caller degrades to "no context injected"); the documents path is
 // isolated — a documents-side failure logs and yields [], so email can still
 // answer. Mirrors the graceful-degradation pattern in system-sight/audit-sight.
-export async function retrieveContext(request: string): Promise<Retrieved[]> {
+export async function retrieveContext(request: string, folder?: string): Promise<Retrieved[]> {
   const vector = await embedText(request);
 
   const [emails, chunks] = await Promise.all([
     retrieveEmails(vector),
-    retrieveChunks(vector).catch((err) => {
+    retrieveChunks(vector, folder).catch((err) => {
       console.error('[retrieve] documents retrieval failed, continuing with emails only:', err);
       return [] as RetrievedChunk[];
     }),

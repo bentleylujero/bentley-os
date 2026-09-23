@@ -36,6 +36,7 @@ interface DocRow {
   id: string;              // uuid
   title: string | null;
   body: string | null;
+  folder: string;
 }
 
 interface ChunkOut {
@@ -63,6 +64,7 @@ async function upsertChunkVector(
   documentId: string,
   chunkIndex: number,
   title: string | null,
+  folder: string,
   vector: number[],
 ): Promise<void> {
   const res = await fetch(`${QDRANT_URL}/collections/${QDRANT_COLLECTION}/points`, {
@@ -77,6 +79,7 @@ async function upsertChunkVector(
             document_id: documentId,
             chunk_index: chunkIndex,
             title: title ?? '',
+            folder,
           },
         },
       ],
@@ -100,7 +103,7 @@ export async function embedDocBatch(limit: number): Promise<{
   results: Array<{ id: string; ok: boolean; chunks?: number; error?: string }>;
 }> {
   const docs = await sql<DocRow[]>`
-    select id, title, body
+    select id, title, body, folder
     from documents
     where body is not null and embedded_at is null
     order by created_at desc nulls last
@@ -135,7 +138,7 @@ export async function embedDocBatch(limit: number): Promise<{
           returning id
         `;
         const vector = await embedText(chunk.text);
-        await upsertChunkVector(row.id, doc.id, index, doc.title, vector);
+        await upsertChunkVector(row.id, doc.id, index, doc.title, doc.folder, vector);
         index++;
       }
 
