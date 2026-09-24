@@ -17,8 +17,7 @@
 - Bible surgery: delete §4/§6/§8, point to STATUS.md
 
 ## Problems
-- contractor/src/index.ts:26 hardcoded 172.16.30.4:4096 → host.docker.internal:4096 (silently broken)
-- THE_BIBLE.md has 7 stale 172.16.30.4 refs + obsolete cloudflared LAN-IP rule
+- contractor/src/index.ts:26 baseUrl 172.16.30.4:4096 is dead (confirmed 2026-09-24); OpenCode delegation is likely broken until repointed to 192.168.68.58:4096 or host.docker.internal:4096
 - 84 pending updates, 36 security
 
 ## Parked

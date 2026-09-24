@@ -71,7 +71,7 @@ new front doors to whatever marionette can already do at any given milestone.
 ## 1. Operating rules (how we work together)
 
 **The most important fact:** Bentley runs everything on the server; Claude cannot. No
-network access to the box (private LAN, `172.16.30.4`). The loop:
+network access to the box (private LAN, `192.168.68.58`). The loop:
 1. Claude gives exact, copy-pasteable commands or files.
 2. Bentley runs them (SSH or browser terminal at `ssh.bentleyos.me`) and pastes back raw
    output.
@@ -201,13 +201,20 @@ new reasoning logic was added anywhere.** **The dashboard fits it cleanly too: i
 read view over Postgres in `api`, no reasoning — any future "insight" that requires
 classification/generation belongs in marionette, not the dashboard route.**
 
-**Cloudflare/networking gotcha:** `cloudflared` runs in a container on `backend`. It reaches
-app services by container name (`http://api:3000`), host services (SSH) by LAN IP
-(`172.16.30.4:22`). It **cannot** use `localhost` to mean the host.
+**Cloudflare/networking, corrected (2026-09-24).** `cloudflared` runs as a container with
+`network_mode: host` and `extra_hosts: host.docker.internal:host-gateway` (the container name
+carries a leftover hash prefix, `c0955a5f2be4_bentley-os-cloudflared-1`; harmless, logged
+here). It is a token-based tunnel; routes live only in the Cloudflare dashboard, not in this
+repo. Actual routes: `spaghettios.bentleyos.me` -> `http://127.0.0.1:3000`;
+`whisper.bentleyos.me` -> `http://127.0.0.1:4300`; `ssh.bentleyos.me` ->
+`ssh://host.docker.internal:22`. **The old rule ("cloudflared sits on `backend`, reaches the
+host by LAN IP") is obsolete** and superseded by this paragraph.
 
-**Same gotcha class:** `contractor` reaches the real systemd OpenCode server via LAN IP
-`172.16.30.4:4096`, never `127.0.0.1` — a service bound to loopback only is unreachable from
-any other container regardless of shared network.
+**Contractor's OpenCode address is dead, not a working gotcha-class case.** `contractor`
+points at the systemd OpenCode server via LAN IP `172.16.30.4:4096` (`contractor/src/index.ts:26`),
+and that address is confirmed dead (a container connecting to it times out; see §4). Contractor
+delegation to OpenCode is likely broken until this is repointed; see §8 for the read-only next
+step.
 ---
 
 ## 3a. Ontology-bound vs. utility services
@@ -242,7 +249,10 @@ over `document_chunks.text`); the bodies/chunk text stay in Postgres, the one so
 
 ## 4. Current state (living — what actually exists on the box right now)
 
-Running on the box at `~/bentley-os` (Ubuntu, LAN IP `172.16.30.4`). Absolute path is
+Running on the box at `~/bentley-os` (Ubuntu, LAN IP `192.168.68.58/22` on `enp4s0`, gateway
+`192.168.68.1`, sshd listening on `0.0.0.0:22`; confirmed 2026-09-24). `172.16.30.4` is dead:
+a container connecting to it times out; see §8 for the one remaining consumer
+(`contractor/src/index.ts:26`) that still needs repointing. Absolute path is
 `/home/spaghettios/bentley-os` — always exact, never an alias (see §7 bind-mount lesson).
 
 **Infrastructure — all up:** api (healthy, 3000), postgres (healthy, 5432), redis (6379),
@@ -1149,11 +1159,14 @@ M2 dashboard deploy (job `b3da007c`), isolation-tested first, confirmed via `aud
   rejected). **This unblocks Milestones 4 and 5.**
 
 **Contractor service** (`~/bentley-os/contractor/`): the coding/build layer. `POST /execute`
-runs a real `@opencode-ai/sdk` session against the systemd OpenCode server (LAN IP
-`172.16.30.4:4096`), audited (`actor='contractor'`). `WORKDIR /app` (outside the bind
-mount). Reached as `http://contractor:4100`. Now driven both by direct API testing and live
-Telegram-originated tasks — no difference in behavior, since Telegram is purely an inbound
-trigger for the same `/think` → `delegate` path.
+runs a real `@opencode-ai/sdk` session against the systemd OpenCode server, configured via
+`contractor/src/index.ts:26`'s `baseUrl` at LAN IP `172.16.30.4:4096`. **That address is
+dead** (confirmed 2026-09-24: a container connecting to it times out), so contractor
+delegation to OpenCode is likely broken until it's repointed (§8 has the read-only next step).
+Audited (`actor='contractor'`). `WORKDIR /app` (outside the bind
+mount). Reached as `http://contractor:4100`. Was driven both by direct API testing and live
+Telegram-originated tasks before the address died, with no difference in behavior, since
+Telegram is purely an inbound trigger for the same `/think` → `delegate` path.
 - **`undici.setGlobalDispatcher`** set at process start: `headersTimeout`/`bodyTimeout` =
   10 min. Node's fetch default (5 min) was killing real multi-step OpenCode tasks before
   they finished — a trivial "reply with pong" prompt (no tool calls) always worked, masking
@@ -1361,6 +1374,38 @@ prose stay human — a deliberate trade.
   (confirmed this session — `0` rows each) but no route reads or writes them yet (confirmed
   this session: a repo-wide grep for `oauth_clients`/`oauth_tokens`/`oauth_authorization_codes`
   under `apps/api/src` and `marionette/src` found no consuming code). Tables only, no wiring.
+- **MCP relay, SHIPPED and verified live (2026-09-24).** `apps/api/src/mcp-stdio.ts` +
+  `apps/api/src/mcp-tools.ts` (commits `fe58419`, `b73acf0`) implement the stdio transport with
+  two tools: `list_folders` (no args) and `search_folder` (`folder`, `query`, `limit`).
+  Allow-listing is via env `MCP_ALLOWED_FOLDERS` (currently `general`). Launched with
+  `docker exec -i bentley-os-api-1 env MCP_ALLOWED_FOLDERS=general node dist/mcp-stdio.js`.
+  Every call is audited: `mcp.list_folders` (`success`, payload carries `result_count`) and
+  `mcp.search_folder` (`success` or `rejected_not_allowed`, `target` = the requested folder),
+  both actor `api`. A successful search also writes a `marionette.retrieve_folder` row (actor
+  `marionette`); a rejected folder never reaches marionette at all. Deployed as job
+  `b1aaf61b`, commit `b73acf0`, `deploy.succeeded` at 2026-09-24 10:55:33 UTC, target `api`.
+  **Verified live this session:** stdout is JSON-only; `tools/list` responds correctly;
+  `list_folders` shows only `general (6 docs)`; requesting a non-allow-listed folder returns
+  `isError` and audits `rejected_not_allowed`; `search_folder` on `general` returned 5 chunks
+  (audit ids 6049-6052) called from Claude Desktop through the tunnel below.
+- **Remote access path (Path A), live.** Claude Desktop (Mac) -> `~/bin/kb-relay.sh` -> `ssh`
+  via `cloudflared access ssh` -> `kb-ssh.bentleyos.me` -> Cloudflare Access (Service Auth
+  only) -> tunnel route `ssh://host.docker.internal:22` -> a forced command in the box's
+  `sshd` config (the `authorized_keys` line is locked to the `docker exec` relay command
+  above, no pty, no forwarding) -> the relay.
+  - **Cloudflare side:** route `kb-ssh.bentleyos.me`; Access app "KB SSH" (self-hosted, public
+    hostname, no path, one policy "KB Service Token", action Service Auth, includes service
+    token `kb-desktop`). An anonymous request returns 403; a request carrying the token
+    returns 200. `kb-desktop`'s expiry was not read from the Cloudflare dashboard this session;
+    confirm there before relying on it.
+  - **Secrets:** the token ID and secret live only in the Mac Keychain (items
+    `kb-desktop-id`, `kb-desktop-secret`), never in files or chat. Mac-side files:
+    `~/bin/kb-relay.sh`, `~/.ssh/kb_config`, `~/.ssh/kb_desktop` (dedicated key),
+    `~/.ssh/known_hosts_kb` (host key fingerprint verified against
+    `/etc/ssh/ssh_host_ed25519_key.pub`). Claude Desktop's MCP config entry is
+    `bentley-os-kb`.
+  - **Box side:** the dedicated key is authorized in `~/.ssh/authorized_keys` (backup at
+    `~/.ssh/authorized_keys.bak-kb`).
 
 <!-- MARI:APPEND §4 -->
 
@@ -1586,9 +1631,10 @@ system.
 **MCP connector — design decision (2026-09-24).** MCP is a read-only command interface.
 **Path A (chosen for now): a stdio relay launched over SSH by Claude Desktop** — no public
 endpoint, no OAuth, calls marionette's `/retrieve/folder` directly from inside the box's own
-network. **Path B (deferred): a remote connector (claude.ai) with OAuth** — `0013_mcp_oauth.sql`
-(§4) already has the storage tables live for this path, but no route consumes them yet. Not
-started.
+network. **Path A is now live and verified, see §4** (the MCP relay and remote-access-path
+subsections). **Path B (deferred): a remote connector (claude.ai web/phone) with OAuth.**
+`0013_mcp_oauth.sql` (§4) already has the storage tables live for this path, but no route
+consumes them yet. Not started.
 
 ---
 
@@ -1863,6 +1909,14 @@ started.
   `bin/psql`, which runs `docker compose exec -T postgres sh -c 'PGPASSWORD="$POSTGRES_PASSWORD"
   psql -h postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"'`) so the value never appears in
   shell history or an interactive prompt.
+- **Guard every pasted command with a host check.** A box-only command pasted on the Mac ran
+  `ssh-keygen` on the wrong machine, and a Mac-only command pasted on the box ran the reverse.
+  Confirm which host a command targets before pasting it in.
+- **Cloudflare service-token values go in as the value only**, never with the
+  `CF-Access-Client-Id:` label attached. The label caused a 403 that looked like a policy
+  failure, not a formatting mistake.
+- **New self-hosted Cloudflare Access apps default to the Workers destination type.** Change
+  it to public hostname before saving, or the save fails with `worker_id is required`.
 
 <!-- MARI:APPEND §7 -->
 
@@ -2276,12 +2330,33 @@ by tap, contractor restarted, result reported. Deploy job `681b3fb3`, audit_log 
   not `initdb.d`. Not resolved.
 - **`spaghettios-recovery.tplinkdns.com:2222` router port-forward exposes SSH to the
   internet.** Not evaluated for hardening in this pass.
-- **LAN address mismatch.** This Bible's §4 header states `172.16.30.4`; the box's own
-  banner shows `192.168.68.58`. Not reconciled — not clear which is current/correct.
+- **LAN address mismatch, RESOLVED (2026-09-24).** The real address is `192.168.68.58/22` on
+  `enp4s0`, gateway `192.168.68.1`, sshd on `0.0.0.0:22`. `172.16.30.4` is dead: a container
+  connecting to it times out. All refs fixed in §1 and §4; the one live consumer that still
+  points at the dead address is `contractor/src/index.ts:26` (below), not yet fixed.
 - **`CLAUDE.md`'s isolation-test rule says context is `apps/<svc>`** for every service, but
   `marionette`, `deploy`, and `contractor` live at the repo root, not under `apps/`; only
   `api` is actually at `apps/api`. As written, `docker build -t <tag> apps/marionette` would
   fail for those three. Not fixed.
+- **Contractor's OpenCode address is dead** (`contractor/src/index.ts:26`, `baseUrl
+  http://172.16.30.4:4096`); contractor delegation to OpenCode is likely broken. Next step is
+  read-only: `ss -tlnp | grep 4096` to see where OpenCode actually binds, then choose between
+  `192.168.68.58:4096` and `host.docker.internal:4096`. Separate ticket, separate service from
+  the MCP relay work.
+- **DHCP reservation for `192.168.68.58`** still needed.
+- **`normalizeFolder` is duplicated** in `mcp-tools.ts` and `routes/documents.ts`. The dedupe
+  (export it from `routes/documents.ts`, import in `mcp-tools.ts`) exists as uncommitted WIP in
+  `stash@{0}` and needs the import actually written.
+- **`search_folder`'s `limit` has no practical cap** (max `9007199254740991`); cap it at
+  around 20.
+- **Miga material marked CONFIDENTIAL sits in the `general` folder**, which the MCP relay
+  exposes to Claude Desktop (§4). Consider a separate, non-allow-listed folder for it.
+- **Path B (later):** claude.ai web/phone via a remote OAuth connector, see the MCP connector
+  design decision above; not started.
+- **Migration state.** `supabase/migrations/` holds `0001` through `0013_mcp_oauth.sql`; the
+  latest is applied live but unused (§4). There is still no migration tracker (see the
+  no-record-of-applied-migrations item above), so this list says nothing about what actually
+  ran against the live volume.
 
 <!-- MARI:APPEND §8 -->
 
