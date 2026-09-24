@@ -86,7 +86,12 @@ async function searchByFolder(
 // legitimately yields zero results, not a wider search), caps to
 // PER_DOCUMENT_CAP chunks per document (mirrors retrieve.ts), then SELECTs
 // chunk text + title + folder from Postgres — the source of truth — joined
-// document_chunks -> documents by the Qdrant point id.
+// document_chunks -> documents by the Qdrant point id, filtered AGAIN by
+// d.folder = folder. The Qdrant payload is a derived copy that can only be
+// trusted to narrow the vector search; a Postgres hit whose document's real
+// folder doesn't match (a Qdrant payload gone stale relative to Postgres,
+// e.g. after a future folder-move that skipped /resync-folders) must not be
+// returned just because the derived copy said otherwise.
 export async function retrieveFolderChunks(
   folder: string,
   query: string,
@@ -121,7 +126,7 @@ export async function retrieveFolderChunks(
     select dc.id, dc.document_id, dc.text, d.title, d.folder
     from document_chunks dc
     join documents d on d.id = dc.document_id
-    where dc.id in ${sql(ids)}
+    where dc.id in ${sql(ids)} and d.folder = ${folder}
   `;
   const byId = new Map(rows.map((r) => [r.id, r]));
 
