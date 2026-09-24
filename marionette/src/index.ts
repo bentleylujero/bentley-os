@@ -15,6 +15,7 @@ import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts'
 import { isDataQuestion, formatRetrievalForPrompt } from './data-gate.ts';
 import { retrieveContext } from './retrieve.ts';
 import { retrieveFolderChunks, normalizeFolder } from './retrieve-folder.ts';
+import { resyncFolders } from './resync-folders.ts';
 import { readIngestState, formatIngestForPrompt } from './ingest-sight.ts';
 import { routeQuestion, getKnownFolders, type Route } from './question-router.ts';
 import { readHistory, writeTurn, formatHistoryForPrompt } from './memory.ts';
@@ -134,6 +135,24 @@ app.post('/retrieve/folder', async (c) => {
       payload: { folder, query, limit, error: message },
     });
     return c.json({ error: 'folder retrieval failed', detail: message }, 500);
+  }
+});
+
+// POST /resync-folders  { "limit": N }   (optional; default = all documents)
+// Idempotent backfill: sets Qdrant's `folder` payload key from Postgres
+// documents.folder (the one source of truth) on every chunk point. Manual
+// POST only — NOT exposed to /think, NOT wired to any cron or the auto-drain.
+app.post('/resync-folders', async (c) => {
+  let body: any = {};
+  try { body = await c.req.json(); } catch { /* empty body is fine */ }
+  const rawLimit = Number(body?.limit);
+  const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? rawLimit : undefined;
+
+  try {
+    const result = await resyncFolders(limit);
+    return c.json(result);
+  } catch (err: any) {
+    return c.json({ error: 'resync-folders failed', detail: err?.message || String(err) }, 500);
   }
 });
 
