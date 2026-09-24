@@ -1335,6 +1335,33 @@ prose stay human — a deliberate trade.
 
 <!-- appended by Mari 2026-07-21 (action 16) -->
 
+<!-- appended by Claude Code 2026-09-24 (session, docs-only) -->
+
+- **Folder-scoped MCP retrieval — SHIPPED.** `POST /retrieve/folder` (marionette, `46f52ef`
+  then corrected by `c269af3`) and `POST /resync-folders` (marionette, `a6b9783`) ship the
+  read side of a future MCP `search_folder` tool. **Postgres `documents.folder` is the sole
+  system of record for folder; the Qdrant payload `folder` key is a derived copy**, written
+  on new points by `embed-doc.ts` and backfilled onto old points by `/resync-folders`.
+  `/retrieve/folder` filters Qdrant on the payload `folder` key to narrow the vector search,
+  then constrains every returned row by Postgres `d.folder = <requested folder>` in the join
+  (`c269af3` — the Qdrant-only filter alone was insufficient, since a stale/drifted payload
+  could otherwise leak a chunk into the wrong folder's results; verified live this session via
+  a deliberate payload-drift simulation — a fixture point's Qdrant `folder` was manually set
+  to a mismatched value and the endpoint still excluded it). Deployed via audited `POST
+  /deploy {"service":"marionette"}`, job `e1132ee8`, confirmed by `audit_log` row `id=6010`
+  (`deploy.succeeded`, actor `deploy-service`, target `marionette`, commit `c269af3`).
+  **Verified live, raw counts this session:** all 24 existing `documents` Qdrant points now
+  carry a `folder` key (0 missing, via `points/count` with an `is_empty` filter); the only
+  folder in use is `general` (6 `documents` rows, all `folder='general'`, via `select
+  distinct folder`). `/resync-folders` is idempotent — two consecutive live runs returned
+  identical `points_missing_folder_after` (`0`) and 0 net change in Qdrant's `points_count`
+  (`24`) — and is manual-POST only, not wired to `/think`, cron, or the auto-drain.
+- **`0013_mcp_oauth.sql` — committed (`46b0bb9`), applied live, unused.** The three
+  `oauth_clients`/`oauth_authorization_codes`/`oauth_tokens` tables exist in Postgres
+  (confirmed this session — `0` rows each) but no route reads or writes them yet (confirmed
+  this session: a repo-wide grep for `oauth_clients`/`oauth_tokens`/`oauth_authorization_codes`
+  under `apps/api/src` and `marionette/src` found no consuming code). Tables only, no wiring.
+
 <!-- MARI:APPEND §4 -->
 
 ---
@@ -1555,6 +1582,13 @@ done (`52c3f72`) — no longer blocked.**
 **Milestone 6 — Self-extension.** Tool registry + isolated test + approval + git automation +
 rollback, **reusing `deploy`'s** job/audit machinery — not a parallel build-and-rollback
 system.
+
+**MCP connector — design decision (2026-09-24).** MCP is a read-only command interface.
+**Path A (chosen for now): a stdio relay launched over SSH by Claude Desktop** — no public
+endpoint, no OAuth, calls marionette's `/retrieve/folder` directly from inside the box's own
+network. **Path B (deferred): a remote connector (claude.ai) with OAuth** — `0013_mcp_oauth.sql`
+(§4) already has the storage tables live for this path, but no route consumes them yet. Not
+started.
 
 ---
 
@@ -1818,6 +1852,17 @@ system.
   `bentley-os_backend`, unlike deploy which IS on the host at :4000.
 
 <!-- appended by Mari 2026-07-21 (action 16) -->
+
+<!-- appended by Claude Code 2026-09-24 (session, docs-only) -->
+
+- **Never run `docker compose config`** — it prints every service's fully resolved
+  environment, secrets included (`DATABASE_URL`, API keys, `JWT_SECRET`, Telegram bot token,
+  Cloudflare tunnel token), straight to stdout/terminal. Use `docker compose ps` or
+  `docker compose config --services` instead.
+- **Never type a password at a `psql` prompt.** Use `PGPASSWORD` sourced from `.env` (see
+  `bin/psql`, which runs `docker compose exec -T postgres sh -c 'PGPASSWORD="$POSTGRES_PASSWORD"
+  psql -h postgres -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"'`) so the value never appears in
+  shell history or an interactive prompt.
 
 <!-- MARI:APPEND §7 -->
 
@@ -2219,6 +2264,24 @@ by tap, contractor restarted, result reported. Deploy job `681b3fb3`, audit_log 
 - **`bin/session-start` uses `psql -h 127.0.0.1`** (trust auth), the documented false-positive
   pattern. Read-only counting so it is harmless here, but it is inconsistent with the
   `-h postgres` rule used everywhere else.
+
+<!-- appended by Claude Code 2026-09-24 (session, docs-only) -->
+
+- **No record of which migrations are actually applied live.** `docker-entrypoint-initdb.d`
+  (the mount in `docker-compose.yml`) only runs SQL files on a FRESH data volume at first
+  init — there is no migration tracker (`schema_migrations` or equivalent), no migrate-cli.
+  A file sitting in `supabase/migrations/` proves nothing about whether it ran against the
+  live volume; `0013_mcp_oauth.sql` (§4) is a live example — its tables exist despite the
+  data volume predating the file, so they were applied by some other, unaudited mechanism,
+  not `initdb.d`. Not resolved.
+- **`spaghettios-recovery.tplinkdns.com:2222` router port-forward exposes SSH to the
+  internet.** Not evaluated for hardening in this pass.
+- **LAN address mismatch.** This Bible's §4 header states `172.16.30.4`; the box's own
+  banner shows `192.168.68.58`. Not reconciled — not clear which is current/correct.
+- **`CLAUDE.md`'s isolation-test rule says context is `apps/<svc>`** for every service, but
+  `marionette`, `deploy`, and `contractor` live at the repo root, not under `apps/`; only
+  `api` is actually at `apps/api`. As written, `docker build -t <tag> apps/marionette` would
+  fail for those three. Not fixed.
 
 <!-- MARI:APPEND §8 -->
 
