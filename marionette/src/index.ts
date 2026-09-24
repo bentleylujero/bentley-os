@@ -14,6 +14,7 @@ import { enrichBatch } from './enrich-task.ts';
 import { isSystemStatusQuestion, formatAuditForPrompt } from './system-sight.ts';
 import { isDataQuestion, formatRetrievalForPrompt } from './data-gate.ts';
 import { retrieveContext } from './retrieve.ts';
+import { retrieveFolderChunks, normalizeFolder } from './retrieve-folder.ts';
 import { readIngestState, formatIngestForPrompt } from './ingest-sight.ts';
 import { routeQuestion, getKnownFolders, type Route } from './question-router.ts';
 import { readHistory, writeTurn, formatHistoryForPrompt } from './memory.ts';
@@ -96,6 +97,45 @@ app.post('/embed-doc', async (c) => {
 });
 
 
+
+// POST /retrieve/folder  { "folder": "...", "query": "...", "limit": 5 }
+// Folder-scoped, documents-only retrieval for the remote MCP connector's
+// search_folder tool (Ticket 5). `folder` is required and normalized the same
+// way documents.folder is (trim + lowercase, 0012's check constraint); the
+// Qdrant search is filtered on the `folder` payload key with no fallback to an
+// unscoped search. Returns raw chunks (text/score/title/folder) — no /think,
+// no synthesis (§1 deliberate: the MCP caller does its own reasoning over what
+// comes back).
+app.post('/retrieve/folder', async (c) => {
+  let body: any = {};
+  try { body = await c.req.json(); } catch { /* empty body is fine */ }
+  const folder = normalizeFolder(typeof body?.folder === 'string' ? body.folder : '');
+  const query = typeof body?.query === 'string' ? body.query.trim() : '';
+  let limit = Number(body?.limit);
+  if (!Number.isInteger(limit) || limit < 1) limit = 5;
+  if (limit > 10) limit = 10;
+
+  if (!folder) return c.json({ error: 'folder is required' }, 400);
+  if (!query) return c.json({ error: 'query is required' }, 400);
+
+  try {
+    const chunks = await retrieveFolderChunks(folder, query, limit);
+    await audit({
+      action: 'marionette.retrieve_folder',
+      outcome: 'success',
+      payload: { folder, query, limit, results: chunks.length },
+    });
+    return c.json({ chunks });
+  } catch (err: any) {
+    const message = err?.message || String(err);
+    await audit({
+      action: 'marionette.retrieve_folder',
+      outcome: 'error',
+      payload: { folder, query, limit, error: message },
+    });
+    return c.json({ error: 'folder retrieval failed', detail: message }, 500);
+  }
+});
 
 // POST /enrich-task  { "limit": 20 }   (default 20)
 // Enriches unenriched tasks (priority/reason/category). Reasoning lives here;
