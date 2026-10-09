@@ -1418,7 +1418,7 @@ prose stay human — a deliberate trade.
 
 <!-- appended by Claude Code 2026-10-09 -->
 
-- **Knowledge Base — shipped and live (audit 6089, 6092); KB REST and MCP path isolation-tested (21 checks, `bin/iso-test-kb`); embedding and search not yet verified (2026-10-09, commit `0308dcb`).** Goal: throw
+- **Knowledge Base — shipped and live (audit 6089, 6092); KB REST and MCP path isolation-tested (21 checks, `bin/iso-test-kb`); embedding and search verified live 2026-10-09 (audit 6115 to 6123, see below) (commit `0308dcb`).** Goal: throw
   project files into folders and have a connected Claude read/search/add to them. Deployed via
   audited `/deploy` — marionette `deploy.succeeded` audit id 6089, api id 6092.
   - **Migration `0014_document_folder_registry.sql`** (applied live after `pg_dump` to
@@ -1467,9 +1467,22 @@ prose stay human — a deliberate trade.
     `/resync-folders` with `documents_scanned == 1`, the expected audit rows, and Qdrant/DB
     cleanup of its own test data. Its Qdrant leftover check returned `{"points_found":0,
     "points_after_delete":0}`: 0 points found, weak evidence, since the doc lived seconds.
-    **It does NOT cover embedding or search:** the test document
-    was still "indexing" (`embedded_at` null) when checked, and `/embed-doc`, `/retrieve/folder`
-    and `search_folder` results were not exercised. The earlier "54-check probe" this section
+    **`bin/iso-test-kb` itself does NOT cover embedding or search** (its test document was
+    still "indexing", `embedded_at` null, when checked). **Embedding and search were then
+    verified separately against the LIVE containers (2026-10-09, no script, raw output in
+    `~/logs/session-2026-10-09.log`):** a fixture document in a throwaway exposed folder was
+    uploaded through the live api, drained by live marionette `POST /embed-doc` (1 document, 1
+    chunk, `embedded_at` stamped, audit 6115 `text-embedding-3-small` dim 1536), and Qdrant
+    `documents` gained exactly 1 point carrying `document_id`/`chunk_index`/`title`/`folder`
+    (collection total 24 to 25). `POST /retrieve/folder` scoped to the folder returned the
+    fixture first (score 0.607, text contains the planted fact); the same query against
+    `general` returned 5 other chunks and not the fixture. The real `mcp-stdio.js`
+    `search_folder` matched: exposed folder found the fixture, `general` did not, a missing
+    folder was rejected (`mcp.search_folder` `rejected_not_allowed`, audit 6123; successes 6119,
+    6121; `marionette.retrieve_folder` 6116 to 6120). Cleanup removed the DB rows and the Qdrant
+    point (total back to 24, 0 points left). **Limits of that check:** one tiny single-chunk
+    document, one query; multi-chunk ranking, large-file chunking and relevance quality are not
+    assessed, and the document-move path was only covered by the earlier manual check. The earlier "54-check probe" this section
     used to cite was never saved (no script, log or audit row), so it is not evidence.
     Unrecorded: a manual post-deploy check was reported (relay lists 5 tools; upload → embed →
     move on a throwaway folder synced Qdrant), but no log of it exists.

@@ -1,8 +1,8 @@
 # Bentley OS — status
 
-<!-- GENERATED 2026-10-09 16:55 UTC — run bin/status, do not hand-edit -->
+<!-- GENERATED 2026-10-09 17:01 UTC — run bin/status, do not hand-edit -->
 - Box: `spaghettios@192.168.68.58` · `~/bentley-os`
-- HEAD: `1f3aa07` (dirty)
+- HEAD: `4e92e1b` (dirty)
 - Latest migration: `0014_document_folder_registry.sql`
 - Services: 12/12 up
 <!-- END GENERATED -->
@@ -11,7 +11,6 @@
 - Nothing in flight — networking session closed
 
 ## Next
-- Verify Knowledge Base embedding and search end to end (`/embed-doc` drain, `search_folder`, `/retrieve/folder`); `bin/iso-test-kb` does not cover them
 - Drop pair tables `email_recipients` / `event_attendees` (both still exist; check they are still write-only before dropping; the old `0012` slot went to `document_folders`)
 - Canvas object types (not built; `object_types` has none)
 - Path B: remote MCP connector (claude.ai web/phone) with OAuth; `0013` tables exist, no route consumes them (Bible §6)
