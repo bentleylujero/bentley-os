@@ -1,9 +1,9 @@
 # Bentley OS — status
 
-<!-- GENERATED 2026-08-24 22:55 UTC — run bin/status, do not hand-edit -->
-- Box: `spaghettios@192.168.68.51` · `~/bentley-os`
-- HEAD: `dbd9850` (dirty)
-- Latest migration: `0009_messages.sql`
+<!-- GENERATED 2026-10-09 16:13 UTC — run bin/status, do not hand-edit -->
+- Box: `spaghettios@192.168.68.58` · `~/bentley-os`
+- HEAD: `0308dcb` (dirty)
+- Latest migration: `0014_document_folder_registry.sql`
 - Services: 12/12 up
 <!-- END GENERATED -->
 

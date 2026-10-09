@@ -1381,7 +1381,9 @@ prose stay human — a deliberate trade.
 - **MCP relay, SHIPPED and verified live (2026-09-24).** `apps/api/src/mcp-stdio.ts` +
   `apps/api/src/mcp-tools.ts` (commits `fe58419`, `b73acf0`) implement the stdio transport with
   two tools: `list_folders` (no args) and `search_folder` (`folder`, `query`, `limit`).
-  Allow-listing is via env `MCP_ALLOWED_FOLDERS` (currently `general`). Launched with
+  **(Superseded 2026-10-09 by the Knowledge Base work below: exposure now lives in
+  `document_folders.mcp_exposed`; the env var is ignored and may stay in the launch command
+  harmlessly.)** Launched with
   `docker exec -i bentley-os-api-1 env MCP_ALLOWED_FOLDERS=general node dist/mcp-stdio.js`.
   Every call is audited: `mcp.list_folders` (`success`, payload carries `result_count`) and
   `mcp.search_folder` (`success` or `rejected_not_allowed`, `target` = the requested folder),
@@ -1410,6 +1412,63 @@ prose stay human — a deliberate trade.
     `bentley-os-kb`.
   - **Box side:** the dedicated key is authorized in `~/.ssh/authorized_keys` (backup at
     `~/.ssh/authorized_keys.bak-kb`).
+
+
+<!-- appended by Claude Code 2026-10-09 -->
+
+- **Knowledge Base — SHIPPED and verified live (2026-10-09, commit `0308dcb`).** Goal: throw
+  project files into folders and have a connected Claude read/search/add to them. Deployed via
+  audited `/deploy` — marionette `deploy.succeeded` audit id 6089, api id 6092.
+  - **Migration `0014_document_folder_registry.sql`** (applied live after `pg_dump` to
+    `~/backups/bentley-pre-0014-20261009-155732.sql`). New table `document_folders(name PK,
+    mcp_exposed bool default false, created_at)`. A folder now carries its own fact (exposure),
+    so it earned a table (0012 had said it wouldn't while it carried no metadata);
+    `documents.folder` stays the sole record of which folder a document is in, now an FK with
+    `ON UPDATE CASCADE`. A BEFORE INSERT/UPDATE trigger auto-registers any new folder as
+    **unexposed**, so every writer keeps working. Unique index `(folder, source_id)` where
+    `source_id` is `'sha256:<hex>'` of the extracted text → identical content in a folder is
+    skipped (this is what makes re-running bulk ingest safe). `general` was backfilled exposed.
+  - **Exposure is fail-closed and owner-only.** MCP exposes a folder iff `mcp_exposed`, read
+    from the DB on every call (a dashboard toggle is effective immediately, no redeploy or
+    restart). Only the dashboard routes (`PATCH /documents/folders/:name`) write the flag; no MCP
+    tool can, so a connected Claude can never widen its own access. `MCP_ALLOWED_FOLDERS` is
+    ignored. Edited exposure/creation/deletion/moves are audited (`documents.folder_exposure`,
+    `documents.folder_create`, `documents.folder_delete`, `documents.move`).
+  - **MCP tools (5):** `list_folders`, `list_documents(folder)`, `get_document(document_id,
+    offset?, max_chars?)` (paged, ≤12k chars/page; unknown id and unexposed folder give the same
+    error), `search_folder` (unchanged, limit clamped to 10), and **`upload_document(folder,
+    title, content)`** — add-only into an already-exposed folder: no overwrite, no delete, no
+    folder creation, ≤2M chars, source `'mcp'`. All audited (`mcp.*`, including `rejected_*`).
+    Shared logic in `apps/api/src/documents-lib.ts`.
+  - **Upload types:** md/txt/rst/log, csv/tsv, json/jsonl, yaml/toml/ini, xml/html, sql and
+    common code extensions (matched by **extension**, since browsers/curl send
+    `application/octet-stream`), plus docx/pptx/text-layer pdf (also recognised by extension when
+    the client sends a generic type). Rejected with 415: images, scanned PDFs, binaries (NUL
+    check), `.env`/keys (never indexed), <20 chars. 25 MB upload cap. Still no OCR, xlsx.
+  - **Dashboard "Knowledge Base" card** (`apps/api/src/routes/dashboard.ts`): every folder with
+    doc count, a "Claude can see" toggle, expandable document list with a per-document folder
+    dropdown (move, incl. "+ new folder…"), create folder, delete empty folder (not `general`).
+    The dropzone is now multi-file and shows server error text per file.
+  - **Moving a document** (`PATCH /documents/:id {folder}`) updates Postgres, then asks
+    marionette to resync that document's Qdrant `folder` payload — `/resync-folders` now accepts
+    `document_ids` (targeted; verified live: `documents_scanned = 1`). If marionette is down the
+    move stands (retrieval is also constrained by the Postgres folder, so nothing leaks) but the
+    document is unfindable in its new folder until `/resync-folders` runs; the dashboard says so.
+  - **`bin/ingest-dir <dir> <folder> [--api URL] [--dry-run]`** — bulk, re-runnable directory
+    ingest (skips dotfiles, `node_modules`, secrets-looking files, unsupported types).
+  - **Isolation-tested** with a 54-check probe (throwaway containers on `bentley-os_backend`;
+    api container run routes-only so the Gmail scheduler is not duplicated). Live post-deploy
+    check: relay launched with the original `docker exec … node dist/mcp-stdio.js` command lists
+    5 tools; an upload → embed → move on a throwaway folder synced Qdrant correctly and was
+    cleaned up.
+  - **Known limits:** editing a file and re-ingesting adds a NEW document (different hash); the
+    old version stays until there is a delete-document path (deleting requires a marionette
+    endpoint to remove Qdrant points — not built). No per-device scopes. The dashboard routes are
+    unauthenticated at the app layer (same as tasks/documents); access control is the Cloudflare
+    Access in front of `bentleyos.me`.
+  - **Second computer (Path A) is not done by code:** it needs that machine's public key added to
+    the box's `authorized_keys` with the same forced command, a Cloudflare Access service token,
+    and the three client files from the Mac. Path B (claude.ai web/phone) remains unbuilt.
 
 <!-- MARI:APPEND §4 -->
 
@@ -1632,7 +1691,8 @@ done (`52c3f72`) — no longer blocked.**
 rollback, **reusing `deploy`'s** job/audit machinery — not a parallel build-and-rollback
 system.
 
-**MCP connector — design decision (2026-09-24).** MCP is a read-only command interface.
+**MCP connector — design decision (2026-09-24).** MCP is a read-only command interface
+(**amended 2026-10-09: plus one add-only write tool, `upload_document` — see §4 Knowledge Base**).
 **Path A (chosen for now): a stdio relay launched over SSH by Claude Desktop** — no public
 endpoint, no OAuth, calls marionette's `/retrieve/folder` directly from inside the box's own
 network. **Path A is now live and verified, see §4** (the MCP relay and remote-access-path
@@ -2354,17 +2414,17 @@ by tap, contractor restarted, result reported. Deploy job `681b3fb3`, audit_log 
   `192.168.68.58:4096` and `host.docker.internal:4096`. Separate ticket, separate service from
   the MCP relay work.
 - **DHCP reservation for `192.168.68.58`** still needed.
-- **`normalizeFolder` is duplicated** in `mcp-tools.ts` and `routes/documents.ts`. The dedupe
-  (export it from `routes/documents.ts`, import in `mcp-tools.ts`) exists as uncommitted WIP in
-  `stash@{0}` and needs the import actually written.
-- **`search_folder`'s `limit` has no practical cap** (max `9007199254740991`); cap it at
-  around 20.
-- **Miga material marked CONFIDENTIAL sits in the `general` folder**, which the MCP relay
-  exposes to Claude Desktop (§4). Consider a separate, non-allow-listed folder for it.
+- **`normalizeFolder` duplication — RESOLVED (2026-10-09, `0308dcb`):** one definition in
+  `apps/api/src/documents-lib.ts`, used by routes and MCP tools. `stash@{0}` (the old WIP for
+  this) is now obsolete; it was not dropped.
+- **`search_folder` `limit` — not an issue:** the handler clamps to 10 regardless of the schema.
+- **Miga material marked CONFIDENTIAL sits in the `general` folder**, which the relay exposes to
+  Claude Desktop. Now fixable from the dashboard: move those documents to a new folder
+  (Knowledge Base card) — new folders are hidden from Claude by default.
 - **Path B (later):** claude.ai web/phone via a remote OAuth connector, see the MCP connector
   design decision above; not started.
-- **Migration state.** `supabase/migrations/` holds `0001` through `0013_mcp_oauth.sql`; the
-  latest is applied live but unused (§4). There is still no migration tracker (see the
+- **Migration state.** `supabase/migrations/` holds `0001` through `0014_document_folder_registry.sql`; 0014 is applied live and in use,
+  `0013_mcp_oauth.sql` is applied live but unused (§4). There is still no migration tracker (see the
   no-record-of-applied-migrations item above), so this list says nothing about what actually
   ran against the live volume.
 
