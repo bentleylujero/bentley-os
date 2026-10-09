@@ -284,7 +284,7 @@ confirmed never tracked (checked full git history for leaked values, not just cu
 state).
 
 **Database (Postgres `bentley` db):** ontology schema loaded. Tables: `people`, `emails`,
-`email_recipients`, `calendar_events`, `event_attendees`, `audit_log`, plus `sync_state`
+`calendar_events`, `event_attendees`, `audit_log`, plus `sync_state`
 (from `0002_sync_state.sql`), `actions` (from `0003_actions.sql`, M4 — see below),
 `dashboard_state` (from `0004_dashboard_state.sql`, M2 "what changed" — see below), the
 email-intelligence columns + partial index (from `0005_email_intelligence.sql`, `4c39435`,
@@ -1506,8 +1506,13 @@ prose stay human — a deliberate trade.
 ## 5. Data model
 
 ```
-people ──< email_recipients >── emails
+emails ──< links (email_has_to_recipient / email_has_cc_recipient) >── people
 people ──< event_attendees  >── calendar_events
+
+(`email_recipients` was dropped in migration `0015` on 2026-10-09: recipients live only in
+`links`. `event_attendees` is NOT a duplicate of `links`: it is live join storage for the
+`event_has_attendee` and `person_attends_event` link types (`link_types.via_kind = 'join'`),
+so it stays.)
 
 audit_log    (append-only ledger: every deploy action, every AI action — reasoning +
               delegation + action lifecycle — regardless of interface: API call or Telegram)
@@ -2470,7 +2475,9 @@ by tap, contractor restarted, result reported. Deploy job `681b3fb3`, audit_log 
   (Knowledge Base card) — new folders are hidden from Claude by default.
 - **Path B (later):** claude.ai web/phone via a remote OAuth connector, see the MCP connector
   design decision above; not started.
-- **Migration state.** `supabase/migrations/` holds `0001` through `0014_document_folder_registry.sql`; 0014 is applied live and in use,
+- **Migration state.** `supabase/migrations/` holds `0001` through `0015_drop_email_recipients.sql`; 0015 (backfilled 4 uncovered recipient
+  links, gate-asserted zero uncovered rows, dropped `email_recipients`; `pg_dump` at
+  `~/backups/bentley-pre-0015-20261009-170546.sql`) and 0014 are applied live and in use,
   `0013_mcp_oauth.sql` is applied live but unused (§4). There is still no migration tracker (see the
   no-record-of-applied-migrations item above), so this list says nothing about what actually
   ran against the live volume.
