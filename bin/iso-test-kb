@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# iso-test-kb: isolation test for the Knowledge Base path (api + marionette).
+# Run by Bentley as:  ! bin/iso-test-kb
+# Builds both images under throwaway tags, runs throwaway containers on
+# bentley-os_backend, probes /health and the real KB path (REST + MCP stdio),
+# confirms the audit rows, then removes ONLY the containers/images it created.
+# Env comes from the compose env file via docker's --env-file; nothing is printed.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+NET=bentley-os_backend
+API_C=iso-kb-api
+MARI_C=iso-kb-mari
+API_IMG=iso-kb-api:test
+MARI_IMG=iso-kb-mari:test
+STAMP=$(date +%s)
+FOLDER="iso-kb-$STAMP"
+PASS=0
+FAIL=0
+
+PSQL() { docker exec bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -tA -c "$1"; }
+
+cleanup() {
+  echo "=== cleanup (only iso-kb-* containers and images)"
+  docker rm -f "$API_C" "$MARI_C" >/dev/null 2>&1
+  docker rmi "$API_IMG" "$MARI_IMG" >/dev/null 2>&1
+  docker ps -a --filter "name=iso-kb-" --format 'left over: {{.Names}}'
+}
+trap cleanup EXIT
+
+check() { # check "<label>" <exit-code>
+  if [ "$2" -eq 0 ]; then echo "PASS  $1"; PASS=$((PASS+1)); else echo "FAIL  $1"; FAIL=$((FAIL+1)); fi
+}
+
+echo "=== HEAD"
+git log -1 --format='%h %s'
+git status --porcelain | head -5
+
+echo "=== build (api context apps/api, marionette context marionette/)"
+docker build -q -t "$API_IMG" apps/api; check "build api" $?
+docker build -q -t "$MARI_IMG" marionette; check "build marionette" $?
+[ "$FAIL" -eq 0 ] || { echo "build failed, stopping"; exit 1; }
+
+docker run --rm --entrypoint test "$API_IMG" -f dist/index.js; check "api dist/index.js exists" $?
+docker run --rm --entrypoint test "$API_IMG" -f dist/mcp-stdio.js; check "api dist/mcp-stdio.js exists" $?
+
+echo "=== start throwaway containers on $NET"
+# marionette: real CMD (strip-types) so a wrong import extension fails here.
+docker run -d --name "$MARI_C" --network "$NET" --env-file .env "$MARI_IMG" >/dev/null; check "start marionette" $?
+# api: routes only (no Gmail scheduler, so ingestion is not duplicated).
+docker run -d --name "$API_C" --network "$NET" --env-file .env "$API_IMG" \
+  node --input-type=module -e "
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
+import { routes } from './dist/routes/index.js';
+const app = new Hono(); app.route('/', routes);
+serve({ fetch: app.fetch, port: 3000 }, () => console.log('iso api up'));
+" >/dev/null; check "start api (routes only)" $?
+
+wait_health() { # container port
+  for i in $(seq 1 30); do
+    docker exec "$1" node -e "fetch('http://localhost:$2/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null && return 0
+    sleep 1
+  done
+  return 1
+}
+wait_health "$API_C" 3000; check "api /health" $?
+wait_health "$MARI_C" 4200; check "marionette /health" $?
+if [ "$FAIL" -ne 0 ]; then
+  echo "--- api logs"; docker logs --tail 40 "$API_C" 2>&1
+  echo "--- marionette logs"; docker logs --tail 40 "$MARI_C" 2>&1
+  exit 1
+fi
+
+T0=$(PSQL "select now()")
+echo "=== audit window starts $T0, test folder $FOLDER"
+
+echo "=== REST KB path via api"
+REST_OUT=$(docker exec -i -e F="$FOLDER" "$API_C" node --input-type=module - <<'JS'
+const B = 'http://localhost:3000', F = process.env.F;
+const j = async (r) => { const t = await r.text(); try { return JSON.parse(t); } catch { return t; } };
+const out = {};
+let r = await fetch(`${B}/documents/folders`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: F }) });
+out.folder_create = [r.status, await j(r)];
+const fd = new FormData();
+fd.append('folder', F);
+fd.append('file', new File([`iso-kb probe document ${F}. This text exists only for the isolation test.`], 'iso-kb-probe.md', { type: 'text/markdown' }));
+r = await fetch(`${B}/documents`, { method: 'POST', body: fd });
+const up = await j(r);
+out.upload = [r.status, up?.document?.id ?? up];
+r = await fetch(`${B}/documents?folder=${encodeURIComponent(F)}`);
+const ls = await j(r);
+out.list = [r.status, ls?.documents?.length];
+r = await fetch(`${B}/documents/folders/${encodeURIComponent(F)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mcp_exposed: true }) });
+out.expose = [r.status, await j(r)];
+console.log(JSON.stringify(out));
+JS
+)
+echo "$REST_OUT"
+DOC_ID=$(echo "$REST_OUT" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).upload[1])}catch{console.log('')}})")
+echo "$REST_OUT" | node -e "
+let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const o=JSON.parse(s);
+process.exit(o.folder_create[0]===201&&o.upload[0]===201&&o.list[1]===1&&o.expose[0]===200?0:1)})"
+check "REST: create folder 201, upload 201, list 1, expose 200" $?
+
+echo "=== MCP stdio path (real mcp-stdio.js inside api image)"
+MCP_OUT=$(docker exec -i -e F="$FOLDER" -e D="$DOC_ID" "$API_C" node --input-type=module - <<'JS'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+const F = process.env.F, D = process.env.D;
+const t = new StdioClientTransport({ command: 'node', args: ['dist/mcp-stdio.js'], env: { ...process.env } });
+const c = new Client({ name: 'iso-kb', version: '0' });
+await c.connect(t);
+const out = {};
+out.tools = (await c.listTools()).tools.map((x) => x.name).sort();
+const call = async (name, args) => { const r = await c.callTool({ name, arguments: args }); return { isError: !!r.isError, text: (r.content?.[0]?.text ?? '').slice(0, 200) }; };
+out.list_folders = await call('list_folders', {});
+out.list_documents = await call('list_documents', { folder: F });
+out.get_document = await call('get_document', { document_id: D });
+out.upload = await call('upload_document', { folder: F, title: 'iso-kb-mcp.md', content: `mcp upload for ${F}, isolation test only.` });
+out.upload_unexposed = await call('upload_document', { folder: 'iso-kb-does-not-exist', title: 'x.md', content: 'should be rejected, not written.' });
+await c.close();
+console.log(JSON.stringify(out));
+JS
+)
+echo "$MCP_OUT"
+echo "$MCP_OUT" | node -e "
+let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const o=JSON.parse(s);
+const want=['get_document','list_documents','list_folders','search_folder','upload_document'];
+const ok=JSON.stringify(o.tools)===JSON.stringify(want)&&!o.list_folders.isError&&!o.list_documents.isError&&!o.get_document.isError&&!o.upload.isError&&o.upload_unexposed.isError;
+process.exit(ok?0:1)})"
+check "MCP: 5 tools, reads ok, upload ok, unexposed upload rejected" $?
+
+echo "=== marionette KB path (throwaway container)"
+MARI_OUT=$(docker exec -i -e D="$DOC_ID" "$MARI_C" node --input-type=module - <<'JS'
+const r = await fetch('http://localhost:4200/resync-folders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ document_ids: [process.env.D] }) });
+console.log(JSON.stringify({ status: r.status, body: await r.json().catch(() => null) }));
+JS
+)
+echo "$MARI_OUT"
+echo "$MARI_OUT" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.exit(JSON.parse(s).status===200?0:1))"
+check "marionette /resync-folders (targeted, one document) 200" $?
+
+echo "=== audit rows since $T0 for this test"
+PSQL "select id, action, target, outcome from audit_log where at >= '$T0' and (target = '$FOLDER' or target = '$DOC_ID' or action in ('mcp.list_folders','mcp.upload_document')) order by id"
+for A in documents.folder_create documents.folder_exposure mcp.upload_document mcp.get_document mcp.list_documents; do
+  N=$(PSQL "select count(*) from audit_log where at >= '$T0' and action = '$A' and (target = '$FOLDER' or target = '$DOC_ID')")
+  [ "${N:-0}" -ge 1 ]; check "audit row $A (n=$N)" $?
+done
+N=$(PSQL "select count(*) from audit_log where at >= '$T0' and action = 'mcp.upload_document' and outcome like 'rejected%'")
+[ "${N:-0}" -ge 1 ]; check "audit row mcp.upload_document rejected (n=$N)" $?
+
+echo "=== remove this test's own data (folder $FOLDER only)"
+PSQL "select count(*) as unembedded_docs_in_test_folder from documents where folder = '$FOLDER' and embedded_at is null"
+PSQL "delete from documents where folder = '$FOLDER'"
+docker exec "$API_C" node -e "fetch('http://localhost:3000/documents/folders/' + encodeURIComponent('$FOLDER'), {method:'DELETE'}).then(async r=>console.log('delete folder', r.status, await r.text()))"
+PSQL "select count(*) as folder_rows_left from document_folders where name = '$FOLDER'"
+
+echo "=== Qdrant leftovers for this test (collection 'documents', payload keys folder / document_id)"
+# The live api scheduler drains /embed-doc every 5 min, so the test document may have been
+# embedded before the DB delete. Count points tied to the test folder or doc id, delete them,
+# then recount. QDRANT_URL comes from the container env and is not printed.
+QD_OUT=$(docker exec -i -e F="$FOLDER" -e D="$DOC_ID" "$API_C" node --input-type=module - <<'JS'
+const base = process.env.QDRANT_URL || 'http://qdrant:6333';
+const col = `${base}/collections/documents/points`;
+const should = [{ key: 'folder', match: { value: process.env.F } }];
+if (process.env.D) should.push({ key: 'document_id', match: { value: process.env.D } });
+const filter = { should };
+const post = async (path, body) => {
+  const r = await fetch(col + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(`qdrant ${path} ${r.status}`);
+  return r.json();
+};
+const found = (await post('/count', { filter, exact: true })).result.count;
+if (found > 0) await post('/delete?wait=true', { filter });
+const after = (await post('/count', { filter, exact: true })).result.count;
+console.log(JSON.stringify({ points_found: found, points_after_delete: after }));
+JS
+)
+echo "$QD_OUT"
+echo "$QD_OUT" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.exit(JSON.parse(s).points_after_delete===0?0:1)}catch{process.exit(1)}})"
+check "Qdrant: no points left for test folder / doc id" $?
+
+echo "=== result: PASS=$PASS FAIL=$FAIL"
+[ "$FAIL" -eq 0 ]

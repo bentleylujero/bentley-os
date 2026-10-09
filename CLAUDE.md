@@ -31,7 +31,7 @@ Absolute repo path: /home/spaghettios/bentley-os. Believe real output over assum
 - Commit before any risky change.
 - `pg_dump` to ~/backups/ before every migration.
 - `git fetch origin` and diff origin/main before every push.
-- Isolation test before every deploy: `docker build -t <tag> apps/<svc>` (context is apps/<svc>/), run a throwaway container on bentley-os_backend, then check /health, the real code path, and the resulting audit row. Use `node -e fetch(...)` for probes (no curl in alpine/slim).
+- Isolation test before every deploy: `docker build -t <tag> <context>` (contexts per docker-compose.yml: api is apps/api; marionette, contractor, deploy and whisper are top-level ./marionette, ./contractor, ./deploy, ./whisper), run a throwaway container on bentley-os_backend, then check /health, the real code path, and the resulting audit row. Use `node -e fetch(...)` for probes (no curl in alpine/slim).
 - Confirm a deploy only from the `deploy.succeeded` audit row, never from the 202.
 - whisper is not in the deploy map. Rebuild it with `docker compose up -d --build whisper`.
 - Never ship a change that could take down /health without saying so and giving the rollback.
