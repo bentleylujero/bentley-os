@@ -1,8 +1,8 @@
 # Bentley OS — status
 
-<!-- GENERATED 2026-10-09 17:20 UTC — run bin/status, do not hand-edit -->
+<!-- GENERATED 2026-10-09 17:27 UTC — run bin/status, do not hand-edit -->
 - Box: `spaghettios@192.168.68.58` · `~/bentley-os`
-- HEAD: `d522fe7` (dirty)
+- HEAD: `1d9de23` (dirty)
 - Latest migration: `0015_drop_email_recipients.sql`
 - Services: 12/12 up
 <!-- END GENERATED -->

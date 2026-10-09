@@ -1375,7 +1375,7 @@ prose stay human — a deliberate trade.
   distinct folder`). `/resync-folders` is idempotent — two consecutive live runs returned
   identical `points_missing_folder_after` (`0`) and 0 net change in Qdrant's `points_count`
   (`24`) — and is manual-POST only, not wired to `/think`, cron, or the auto-drain.
-- **`0013_mcp_oauth.sql` — committed (`46b0bb9`), applied live. Consumed by Path B code since `d522fe7` (not deployed, so still unused live; 2026-10-09 recon found `0` rows each and no consuming code before that commit).** The three
+- **`0013_mcp_oauth.sql` — committed (`46b0bb9`), applied live. Consumed by Path B code since `d522fe7` (deployed 2026-10-09 at `1d9de23`; still `0` rows after deploy, nothing exposed publicly; 2026-10-09 recon found `0` rows each and no consuming code before that commit).** The three
   `oauth_clients`/`oauth_authorization_codes`/`oauth_tokens` tables exist in Postgres
   (confirmed this session — `0` rows each) but no route reads or writes them yet (confirmed
   this session: a repo-wide grep for `oauth_clients`/`oauth_tokens`/`oauth_authorization_codes`
@@ -1414,8 +1414,18 @@ prose stay human — a deliberate trade.
     `bentley-os-kb`.
   - **Box side:** the dedicated key is authorized in `~/.ssh/authorized_keys` (backup at
     `~/.ssh/authorized_keys.bak-kb`).
-- **Path B — remote MCP over OAuth 2.1, BUILT 2026-10-09 (`d522fe7`), NOT deployed, isolation test
-  not yet run.** All in api, no migration, no new tables, no reasoning.
+- **Path B — remote MCP over OAuth 2.1, BUILT 2026-10-09 (`d522fe7`), DEPLOYED 2026-10-09 (HEAD
+  `1d9de23`, audit `deploy.succeeded` id 6172), NOT yet publicly exposed.** All in api, no migration,
+  no new tables, no reasoning. Post-deploy evidence (`~/logs/session-2026-10-09.log`): api `/health`
+  200 db connected; `/.well-known/oauth-authorization-server` issuer is
+  `https://spaghettios.bentleyos.me`; `oauth_clients`/`oauth_authorization_codes`/`oauth_tokens` all
+  `0` rows; public `GET https://spaghettios.bentleyos.me/mcp` returns a `302` to
+  `silent-water-8eb9.cloudflareaccess.com` (Cloudflare Access login), not an app 401, so nothing is
+  reachable without Access. `get_document` rejection string (unknown id or unexposed folder, same
+  answer): `Document not found, or its folder is not exposed to this connector.` (audit
+  `mcp.get_document`, outcome `rejected_not_found_or_not_allowed`). **Open items:** rate limits and
+  the client cap are untested; the Access bypass policy for the OAuth/MCP paths is pending
+  (`/authorize` must stay behind Access).
   - **Files:** `routes/mcp.ts` (`ALL /mcp`, stateless `WebStandardStreamableHTTPServerTransport`,
     fresh `McpServer` per request, `registerTools(server, {transport:'http', clientId})`),
     `routes/oauth.ts`, `oauth-lib.ts`. `registerTools` now takes a ctx; every `mcp.*` audit payload
@@ -1760,7 +1770,7 @@ system.
 **Path A (chosen for now): a stdio relay launched over SSH by Claude Desktop** — no public
 endpoint, no OAuth, calls marionette's `/retrieve/folder` directly from inside the box's own
 network. **Path A is now live and verified, see §4** (the MCP relay and remote-access-path
-subsections). **Path B (built 2026-10-09, NOT deployed): a remote connector (claude.ai web/phone) with OAuth
+subsections). **Path B (built and deployed 2026-10-09, not yet publicly exposed): a remote connector (claude.ai web/phone) with OAuth
 2.1.** Commit `d522fe7`, api only, no migration: `routes/mcp.ts`, `routes/oauth.ts`,
 `oauth-lib.ts` on the `0013_mcp_oauth.sql` tables (§4). Isolation test `bin/iso-test-pathb`
 exists; its result is recorded in §4 only once it has been run.
@@ -2497,9 +2507,9 @@ by tap, contractor restarted, result reported. Deploy job `681b3fb3`, audit_log 
 - **Miga material marked CONFIDENTIAL sits in the `general` folder**, which the relay exposes to
   Claude Desktop. Now fixable from the dashboard: move those documents to a new folder
   (Knowledge Base card) — new folders are hidden from Claude by default.
-- **Path B:** built in code (`d522fe7`), not deployed, isolation test not yet recorded; see the MCP
-  connector design decision above and §4 Path B. Remaining before it can work for real: run
-  `bin/iso-test-pathb`, deploy api, and settle the Cloudflare Access question in §4 Path B.
+- **Path B:** deployed 2026-10-09 (`1d9de23`, audit id 6172), not yet publicly exposed (Access still
+  fronts `/mcp`); see the MCP connector design decision above and §4 Path B. Remaining before it can
+  work for real: Access bypass for the OAuth/MCP paths, and testing rate limits and the client cap.
 - **Migration state.** `supabase/migrations/` holds `0001` through `0015_drop_email_recipients.sql`; 0015 (backfilled 4 uncovered recipient
   links, gate-asserted zero uncovered rows, dropped `email_recipients`; `pg_dump` at
   `~/backups/bentley-pre-0015-20261009-170546.sql`) and 0014 are applied live and in use,
