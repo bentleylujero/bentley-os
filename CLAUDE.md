@@ -14,7 +14,7 @@ Believe real output over any prior assumption. Never say something worked withou
 - Import extensions: api uses `.js` (compiled tsc); deploy/contractor/marionette use `.ts`
   (strip-types). Wrong one throws ERR_MODULE_NOT_FOUND at startup.
 - Schema changes = versioned migration in supabase/migrations/ (sequential prefix, plain SQL).
-  Never ad-hoc production edits.
+  Never ad-hoc production edits. Run `pg_dump` to ~/backups/ before applying any migration.
 - psql in container: `docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley
   -d bentley -P pager=off -c "..."` (peer auth fails on socket; no less installed).
 - Escape all DB-derived strings before HTML interpolation (esc() helper).
@@ -28,6 +28,8 @@ Believe real output over any prior assumption. Never say something worked withou
   and is NOT a health signal. /health green does not mean data is flowing.
 - Never ship a change that could take down /health without saying so + giving rollback.
 - `git fetch origin` + diff origin/main BEFORE every push (Copilot cloud agent reverts docs).
+- Never wire or use outbound Gmail/Telegram sending (Bible §2 rule 5 — inbound-only,
+  approval-gated; this is a hard line, not a style preference).
 
 ## Architecture (Bible §3, §9)
 - One brain: all AI reasoning lives in marionette, never in apps/api.

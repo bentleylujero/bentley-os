@@ -8,6 +8,7 @@ volumes/
 client_secret.json
 token.json
 whisper/Dockerfile.bak
-.claude/
+.claude/*
+!.claude/settings.json
 whisper/ggml-small.en.bin
 whisper/jfk.wav

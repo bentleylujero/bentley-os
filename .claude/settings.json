@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": ["Bash", "Read", "Edit", "Write", "WebFetch"],
+    "deny": [
+      "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(rm -rf /home:*)",
+      "Bash(rm -fr /:*)", "Bash(sudo rm:*)",
+      "Bash(git push --force:*)", "Bash(git push -f:*)",
+      "Read(./.env)", "Read(./token.json)", "Read(./client_secret.json)", "Read(/secrets/**)"
+    ]
+  }
+}

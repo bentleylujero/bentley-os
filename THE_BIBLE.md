@@ -70,12 +70,12 @@ new front doors to whatever marionette can already do at any given milestone.
 
 ## 1. Operating rules (how we work together)
 
-**The most important fact:** Bentley runs everything on the server; Claude cannot. No
-network access to the box (private LAN, `192.168.68.58`). The loop:
-1. Claude gives exact, copy-pasteable commands or files.
-2. Bentley runs them (SSH or browser terminal at `ssh.bentleyos.me`) and pastes back raw
-   output.
-3. Claude reads the actual output — never assumes it worked — and gives the next step.
+**The most important fact:** Claude Code runs directly on the box, interactive only (human
+present at the terminal) — it has real filesystem, git, docker, and DB access and executes
+its own commands. **claude.ai chat (no CLI, no human-present execution loop) remains
+planning-only**: it gives exact, copy-pasteable commands/files, Bentley runs them (SSH or
+browser terminal at `ssh.bentleyos.me`) and pastes back raw output, and it reads that output
+before giving the next step.
 
 **Believe the output, not the prior.** If pasted output contradicts expectation, the output
 is truth. **This includes this doc's own prior claims** — the marionette→contractor
@@ -142,7 +142,11 @@ flagged as failure-prone.
    lets a human (allow-listed, single user) direct marionette; it does not give marionette
    or contractor any new outbound-comms capability. The distinction is direction: a human
    messaging in is fine, marionette autonomously messaging out to arbitrary
-   contacts/services is exactly what rule 5 forbids.
+   contacts/services is exactly what rule 5 forbids. **Interactive Claude Code (human
+   present) has full filesystem, git, docker, and DB authority on the box** — this is
+   execution capability, not a relaxation of the rule above: outbound comms remain forbidden
+   regardless of who/what is driving the terminal. Mari/contractor delegation is unchanged
+   and still approval-gated.
 
 **Code conventions:**
 - TypeScript + Hono for the API/app. Python only if genuinely unavoidable (basically never).
@@ -1924,6 +1928,12 @@ consumes them yet. Not started.
 
 ## 8. Open questions (decided-when-we-get-there, not blocking)
 
+- **Decision: Claude Code full-capability on box, 2026-10-09.** Interactive Claude Code
+  (human present at the terminal) now has full filesystem/git/docker/DB authority directly
+  on the box, replacing the old "Claude cannot run anything on the box, Bentley pastes
+  output back" loop (§1). claude.ai chat sessions (no CLI) stay planning-only under the old
+  loop. Outbound comms stay forbidden either way (§2 rule 5) — this is an execution-access
+  change, not a guardrail change.
 - **Rogue auto-committing actor — RESOLVED, and the agent is now DISABLED (2026-07-20).**
   The Copilot cloud agent was turned off after reverting `THE_BIBLE.md` to stale snapshots
   three times. First post-disable push survived clean. **The `git fetch origin` + diff
