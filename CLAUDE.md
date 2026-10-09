@@ -15,6 +15,8 @@ Absolute repo path: /home/spaghettios/bentley-os. Believe real output over assum
 - contractor :4100 is the sandbox delegation service.
 - deploy (:4000) owns docker and git actions.
 - marionette :4200 and contractor :4100 are not published to the host (api :3000, deploy :4000, whisper :4300 are, on 127.0.0.1). Reach them from inside bentley-os_backend or via docker exec, never localhost.
+- cloudflared runs with network_mode host; tunnel targets are 127.0.0.1 ports (api 3000, whisper 4300), not container names. Routes live in the Cloudflare dashboard (token tunnel), not in the repo.
+- api also serves the remote MCP endpoint (/mcp) and OAuth 2.1 routes (Path B, built, see Bible section 4). Tool logic stays in mcp-tools.ts, shared by stdio and http. Folder exposure is only `isExposed()` / `document_folders.mcp_exposed`.
 - Import extensions: api uses `.js` (compiled tsc). marionette, contractor, deploy use `.ts` (strip-types). The wrong one throws ERR_MODULE_NOT_FOUND at startup.
 
 ## Design rules

@@ -1025,7 +1025,7 @@ nothing.
   multipart form, field `file` (audio, wav tested at 16kHz mono), optional
   `response_format=json` → `{"text": " transcribed words\n"}`. No auth of its own — auth is
   entirely Cloudflare Access in front of it.
-- **Public route:** `whisper.bentleyos.me` → `http://whisper:4300` (Cloudflare dashboard,
+- **Public route:** `whisper.bentleyos.me` → `http://127.0.0.1:4300` (cloudflared is `network_mode: host`, so targets are host-loopback, not container names; see the Cloudflare/networking paragraph in §2; Cloudflare dashboard,
   token-based tunnel — no local `cloudflared` config file exists on the box; routes/policies
   live entirely in the Cloudflare dashboard, not the repo).
 - **Access policies on the `whisper` app — two, both required:**
@@ -1375,7 +1375,7 @@ prose stay human — a deliberate trade.
   distinct folder`). `/resync-folders` is idempotent — two consecutive live runs returned
   identical `points_missing_folder_after` (`0`) and 0 net change in Qdrant's `points_count`
   (`24`) — and is manual-POST only, not wired to `/think`, cron, or the auto-drain.
-- **`0013_mcp_oauth.sql` — committed (`46b0bb9`), applied live, unused.** The three
+- **`0013_mcp_oauth.sql` — committed (`46b0bb9`), applied live. Consumed by Path B code since `d522fe7` (not deployed, so still unused live; 2026-10-09 recon found `0` rows each and no consuming code before that commit).** The three
   `oauth_clients`/`oauth_authorization_codes`/`oauth_tokens` tables exist in Postgres
   (confirmed this session — `0` rows each) but no route reads or writes them yet (confirmed
   this session: a repo-wide grep for `oauth_clients`/`oauth_tokens`/`oauth_authorization_codes`
@@ -1414,6 +1414,29 @@ prose stay human — a deliberate trade.
     `bentley-os-kb`.
   - **Box side:** the dedicated key is authorized in `~/.ssh/authorized_keys` (backup at
     `~/.ssh/authorized_keys.bak-kb`).
+- **Path B — remote MCP over OAuth 2.1, BUILT 2026-10-09 (`d522fe7`), NOT deployed, isolation test
+  not yet run.** All in api, no migration, no new tables, no reasoning.
+  - **Files:** `routes/mcp.ts` (`ALL /mcp`, stateless `WebStandardStreamableHTTPServerTransport`,
+    fresh `McpServer` per request, `registerTools(server, {transport:'http', clientId})`),
+    `routes/oauth.ts`, `oauth-lib.ts`. `registerTools` now takes a ctx; every `mcp.*` audit payload
+    carries `transport` and `client_id` (stdio rows carry `transport:'stdio'`, `client_id:null`).
+    `isExposed()` is unchanged and shared by both transports.
+  - **OAuth:** public clients, PKCE S256 only. `/register` accepts only
+    `https://claude.ai/api/mcp/auth_callback` and `https://claude.com/api/mcp/auth_callback`, caps
+    clients at 20, rate-limited. `/authorize` needs the Cloudflare Access identity header
+    (`Cf-Access-Authenticated-User-Email`, else 403 + audit) and a CSRF cookie nonce; codes are 32
+    random bytes, sha256-stored, 60s, single use. `/token`: access 1h, refresh 30d, rotation, and
+    reuse of a rotated refresh token revokes every token for that client. Only hashes are stored.
+    Audit actions: `oauth.register`, `oauth.authorize_approved|denied`,
+    `oauth.token_issued|refreshed|rejected`, `mcp.auth_rejected`.
+  - **Config:** `OAUTH_ISSUER` (optional; defaults to `https://spaghettios.bentleyos.me`).
+  - **Open, not provable from the box:** the `spaghettios.bentleyos.me` Access app already gates the
+    hostname. claude.ai calls `/mcp`, `/token`, `/register` and `/.well-known/*` anonymously, so
+    those paths need an Access bypass policy while `/authorize` must stay behind Access (the
+    identity header is only trustworthy because the api is reachable solely through the tunnel).
+    Confirm in the Cloudflare dashboard before relying on it. Also unverified: `kb-desktop`-style
+    token expiry and the real claude.ai handshake.
+  - **Rollback if deployed and `/health` suffers:** `git revert d522fe7` and redeploy api.
 
 
 <!-- appended by Claude Code 2026-10-09 -->
@@ -1497,7 +1520,7 @@ prose stay human — a deliberate trade.
     Access in front of `bentleyos.me`.
   - **Second computer (Path A) is not done by code:** it needs that machine's public key added to
     the box's `authorized_keys` with the same forced command, a Cloudflare Access service token,
-    and the three client files from the Mac. Path B (claude.ai web/phone) remains unbuilt.
+    and the three client files from the Mac. Path B (claude.ai web/phone) is built in code but not deployed (§4 Path B).
 
 <!-- MARI:APPEND §4 -->
 
@@ -1737,9 +1760,10 @@ system.
 **Path A (chosen for now): a stdio relay launched over SSH by Claude Desktop** — no public
 endpoint, no OAuth, calls marionette's `/retrieve/folder` directly from inside the box's own
 network. **Path A is now live and verified, see §4** (the MCP relay and remote-access-path
-subsections). **Path B (deferred): a remote connector (claude.ai web/phone) with OAuth.**
-`0013_mcp_oauth.sql` (§4) already has the storage tables live for this path, but no route
-consumes them yet. Not started.
+subsections). **Path B (built 2026-10-09, NOT deployed): a remote connector (claude.ai web/phone) with OAuth
+2.1.** Commit `d522fe7`, api only, no migration: `routes/mcp.ts`, `routes/oauth.ts`,
+`oauth-lib.ts` on the `0013_mcp_oauth.sql` tables (§4). Isolation test `bin/iso-test-pathb`
+exists; its result is recorded in §4 only once it has been run.
 
 ---
 
@@ -2473,12 +2497,13 @@ by tap, contractor restarted, result reported. Deploy job `681b3fb3`, audit_log 
 - **Miga material marked CONFIDENTIAL sits in the `general` folder**, which the relay exposes to
   Claude Desktop. Now fixable from the dashboard: move those documents to a new folder
   (Knowledge Base card) — new folders are hidden from Claude by default.
-- **Path B (later):** claude.ai web/phone via a remote OAuth connector, see the MCP connector
-  design decision above; not started.
+- **Path B:** built in code (`d522fe7`), not deployed, isolation test not yet recorded; see the MCP
+  connector design decision above and §4 Path B. Remaining before it can work for real: run
+  `bin/iso-test-pathb`, deploy api, and settle the Cloudflare Access question in §4 Path B.
 - **Migration state.** `supabase/migrations/` holds `0001` through `0015_drop_email_recipients.sql`; 0015 (backfilled 4 uncovered recipient
   links, gate-asserted zero uncovered rows, dropped `email_recipients`; `pg_dump` at
   `~/backups/bentley-pre-0015-20261009-170546.sql`) and 0014 are applied live and in use,
-  `0013_mcp_oauth.sql` is applied live but unused (§4). There is still no migration tracker (see the
+  `0013_mcp_oauth.sql` is applied live; its only consumer is the undeployed Path B code (§4). There is still no migration tracker (see the
   no-record-of-applied-migrations item above), so this list says nothing about what actually
   ran against the live volume.
 
