@@ -5,7 +5,8 @@
       "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)", "Bash(rm -rf /home:*)",
       "Bash(rm -fr /:*)", "Bash(sudo rm:*)",
       "Bash(git push --force:*)", "Bash(git push -f:*)",
-      "Read(./.env)", "Read(./token.json)", "Read(./client_secret.json)", "Read(/secrets/**)"
+      "Read(./.env)", "Read(./token.json)", "Read(./client_secret.json)", "Read(/secrets/**)",
+      "Bash(* .env*)", "Bash(*/.env*)", "Bash(*token.json*)", "Bash(*client_secret.json*)", "Bash(*/secrets/*)"
     ]
   }
 }
