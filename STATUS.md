@@ -11,9 +11,11 @@
 - Nothing in flight — networking session closed
 
 ## Next
-- `0010` BFO registry: object_types, link_types, links + backfill (2043 rows: 2011 email_recipients + 32 event_attendees)
-- `0011` Canvas object types
-- `0012` drop pair tables (write-only: gmail.ts:164,174 gcal.ts:134,142)
+- Verify Knowledge Base embedding and search end to end (`/embed-doc` drain, `search_folder`, `/retrieve/folder`); `bin/iso-test-kb` does not cover them
+- Drop pair tables `email_recipients` / `event_attendees` (both still exist; check they are still write-only before dropping; the old `0012` slot went to `document_folders`)
+- Canvas object types (not built; `object_types` has none)
+- Path B: remote MCP connector (claude.ai web/phone) with OAuth; `0013` tables exist, no route consumes them (Bible §6)
+- Later, Bible §6: Wolverine (fixer), M5.1 auto-execute rate limiting (deferred), Milestone 6 self-extension, local embeddings, Gmail snippet polish (cosmetic)
 - Bible surgery: delete §4/§6/§8, point to STATUS.md
 
 ## Problems

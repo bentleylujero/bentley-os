@@ -1416,7 +1416,7 @@ prose stay human — a deliberate trade.
 
 <!-- appended by Claude Code 2026-10-09 -->
 
-- **Knowledge Base — SHIPPED and verified live (2026-10-09, commit `0308dcb`).** Goal: throw
+- **Knowledge Base — shipped and live (audit 6089, 6092); KB REST and MCP path isolation-tested (21 checks, `bin/iso-test-kb`); embedding and search not yet verified (2026-10-09, commit `0308dcb`).** Goal: throw
   project files into folders and have a connected Claude read/search/add to them. Deployed via
   audited `/deploy` — marionette `deploy.succeeded` audit id 6089, api id 6092.
   - **Migration `0014_document_folder_registry.sql`** (applied live after `pg_dump` to
@@ -1463,7 +1463,9 @@ prose stay human — a deliberate trade.
     both `/health`, REST folder create/upload/list/expose, the real `mcp-stdio.js` (exactly 5
     tools, reads, add-only upload, rejected upload to a missing folder), a targeted
     `/resync-folders` with `documents_scanned == 1`, the expected audit rows, and Qdrant/DB
-    cleanup of its own test data. **It does NOT cover embedding or search:** the test document
+    cleanup of its own test data. Its Qdrant leftover check returned `{"points_found":0,
+    "points_after_delete":0}`: 0 points found, weak evidence, since the doc lived seconds.
+    **It does NOT cover embedding or search:** the test document
     was still "indexing" (`embedded_at` null) when checked, and `/embed-doc`, `/retrieve/folder`
     and `search_folder` results were not exercised. The earlier "54-check probe" this section
     used to cite was never saved (no script, log or audit row), so it is not evidence.
