@@ -1456,11 +1456,19 @@ prose stay human — a deliberate trade.
     document is unfindable in its new folder until `/resync-folders` runs; the dashboard says so.
   - **`bin/ingest-dir <dir> <folder> [--api URL] [--dry-run]`** — bulk, re-runnable directory
     ingest (skips dotfiles, `node_modules`, secrets-looking files, unsupported types).
-  - **Isolation-tested** with a 54-check probe (throwaway containers on `bentley-os_backend`;
-    api container run routes-only so the Gmail scheduler is not duplicated). Live post-deploy
-    check: relay launched with the original `docker exec … node dist/mcp-stdio.js` command lists
-    5 tools; an upload → embed → move on a throwaway folder synced Qdrant correctly and was
-    cleaned up.
+  - **Isolation test: `bin/iso-test-kb`, 21 checks, PASS=21 FAIL=0 at HEAD `1f3aa07`
+    (2026-10-09; audit rows 6105 to 6111, raw output in `~/logs/session-2026-10-09.log`).**
+    It builds api and marionette under throwaway tags, runs throwaway containers on
+    `bentley-os_backend` (api routes-only so the Gmail scheduler is not duplicated), and checks:
+    both `/health`, REST folder create/upload/list/expose, the real `mcp-stdio.js` (exactly 5
+    tools, reads, add-only upload, rejected upload to a missing folder), a targeted
+    `/resync-folders` with `documents_scanned == 1`, the expected audit rows, and Qdrant/DB
+    cleanup of its own test data. **It does NOT cover embedding or search:** the test document
+    was still "indexing" (`embedded_at` null) when checked, and `/embed-doc`, `/retrieve/folder`
+    and `search_folder` results were not exercised. The earlier "54-check probe" this section
+    used to cite was never saved (no script, log or audit row), so it is not evidence.
+    Unrecorded: a manual post-deploy check was reported (relay lists 5 tools; upload → embed →
+    move on a throwaway folder synced Qdrant), but no log of it exists.
   - **Known limits:** editing a file and re-ingesting adds a NEW document (different hash); the
     old version stays until there is a delete-document path (deleting requires a marionette
     endpoint to remove Qdrant points — not built). No per-device scopes. The dashboard routes are
@@ -1626,6 +1634,12 @@ auto-drain + grounded Q&A + tasks panel all shipped.** In **marionette**, not ap
   **DOCX extraction SHIPPED (`960116a`) via mammoth and PDF extraction SHIPPED (`1c90a43`) via
   unpdf, both behind the same `MIN_CHARS` empty-text guard — the format seam is closed for the
   common cases. OCR for scanned PDFs remains a deliberate later slice (§8).**
+- ✅ **Knowledge Base shipped (`0308dcb`, 2026-10-09)** — folder registry (migration `0014`,
+  `document_folders`, fail-closed MCP exposure toggled only from the dashboard), dashboard
+  Knowledge Base card, MCP document tools (5, incl. add-only `upload_document`), wider upload
+  types, `bin/ingest-dir`. Deployed via audited `POST /deploy`: marionette `deploy.succeeded`
+  id 6089, api id 6092. Isolation-tested with `bin/iso-test-kb` (21/21), which does not cover
+  embedding or search. See §4 Knowledge Base.
 - **Done when:** email is auto-classified + auto-embedded on ingest AND grounded Q&A is live
   AND the tasks/responsibilities panel is live. **All conditions met — M3 is CLOSED** (the
   document-ingestion pipeline extends M3's read-only AI layer to long-form sources).
