@@ -138,7 +138,7 @@ app.post('/retrieve/folder', async (c) => {
   }
 });
 
-// POST /resync-folders  { "limit": N }   (optional; default = all documents)
+// POST /resync-folders  { "limit": N, "document_ids": [...] }   (both optional; default = all documents)
 // Idempotent backfill: sets Qdrant's `folder` payload key from Postgres
 // documents.folder (the one source of truth) on every chunk point. Manual
 // POST only — NOT exposed to /think, NOT wired to any cron or the auto-drain.
@@ -147,9 +147,14 @@ app.post('/resync-folders', async (c) => {
   try { body = await c.req.json(); } catch { /* empty body is fine */ }
   const rawLimit = Number(body?.limit);
   const limit = Number.isInteger(rawLimit) && rawLimit > 0 ? rawLimit : undefined;
+  // Optional targeted resync: { "document_ids": ["<uuid>", ...] } (max 200, uuid-shaped only).
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const documentIds = Array.isArray(body?.document_ids)
+    ? body.document_ids.filter((x: unknown): x is string => typeof x === 'string' && UUID_RE.test(x)).slice(0, 200)
+    : undefined;
 
   try {
-    const result = await resyncFolders(limit);
+    const result = await resyncFolders(limit, documentIds);
     return c.json(result);
   } catch (err: any) {
     return c.json({ error: 'resync-folders failed', detail: err?.message || String(err) }, 500);

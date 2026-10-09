@@ -78,9 +78,16 @@ export interface ResyncResult {
 // document_chunks.id — the same uuids embed-doc.ts used as Qdrant point ids).
 // A document with zero chunk rows (unembedded) is scanned but has nothing to
 // update. One audit_log row per RUN (not per document), counts in payload.
-export async function resyncFolders(limit?: number): Promise<ResyncResult> {
+export async function resyncFolders(
+  limit?: number,
+  documentIds?: string[],
+): Promise<ResyncResult> {
+  // documentIds targets specific documents (used by the api after a folder move);
+  // it takes precedence over limit. Ids that match no row are simply not scanned.
   const docs =
-    typeof limit === 'number' && Number.isInteger(limit) && limit > 0
+    documentIds && documentIds.length > 0
+      ? await sql<DocRow[]>`select id, folder from documents where id in ${sql(documentIds)}`
+      : typeof limit === 'number' && Number.isInteger(limit) && limit > 0
       ? await sql<DocRow[]>`select id, folder from documents order by created_at desc nulls last limit ${limit}`
       : await sql<DocRow[]>`select id, folder from documents order by created_at desc nulls last`;
 

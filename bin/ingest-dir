@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# bin/ingest-dir — push every supported file under a directory into a Bentley OS
+# folder (POST /documents). Safe to re-run: identical content already in the
+# folder is skipped server-side (content hash), so only new/changed files land.
+#
+#   bin/ingest-dir <dir> <folder> [--api URL] [--dry-run]
+#
+# Runs on the box (api listens on 127.0.0.1:3000). From another machine, tunnel
+# first:  ssh -L 3000:127.0.0.1:3000 <box>   then use the default --api.
+#
+# Skips: dotfiles/dot-dirs, node_modules, __pycache__, venvs, build output,
+# .env*, keys/certs, and anything over 25 MB. The server still decides what it
+# can read (scanned PDFs / images come back 415 and are reported, not fatal).
+set -uo pipefail
+
+API="http://127.0.0.1:3000"
+DRY=0
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --api) API="$2"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+[ ${#ARGS[@]} -eq 2 ] || { echo "usage: bin/ingest-dir <dir> <folder> [--api URL] [--dry-run]" >&2; exit 2; }
+DIR="${ARGS[0]%/}"
+FOLDER="${ARGS[1]}"
+[ -d "$DIR" ] || { echo "not a directory: $DIR" >&2; exit 2; }
+
+EXTS='md|markdown|txt|rst|org|tex|log|csv|tsv|json|jsonl|ndjson|yaml|yml|toml|ini|cfg|conf|xml|html|htm|svg|css|scss|sql|py|js|mjs|cjs|ts|tsx|jsx|java|c|h|cpp|hpp|cs|go|rs|rb|php|sh|bash|zsh|swift|kt|dart|lua|r|pl|docx|pptx|pdf'
+MAX=$((25*1024*1024))
+
+up=0; dup=0; skip=0; fail=0
+TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
+
+while IFS= read -r -d '' f; do
+  rel="${f#"$DIR"/}"
+  base="$(basename "$f")"
+  ext="${base##*.}"; ext="${ext,,}"
+  case "$base" in .*|*.pem|*.key|*.p12|*.pfx|id_rsa*|id_ed25519*|*secret*|*credentials*) echo "skip   $rel (looks sensitive/hidden)"; skip=$((skip+1)); continue ;; esac
+  if ! [[ "$ext" =~ ^($EXTS)$ ]]; then echo "skip   $rel (unsupported type)"; skip=$((skip+1)); continue; fi
+  size=$(stat -c %s "$f")
+  if [ "$size" -gt "$MAX" ]; then echo "skip   $rel (over 25 MB)"; skip=$((skip+1)); continue; fi
+  if [ "$DRY" = 1 ]; then echo "would  $rel -> $FOLDER"; up=$((up+1)); continue; fi
+
+  code=$(curl -sS -o "$TMP" -w '%{http_code}' -F "folder=$FOLDER" -F "file=@\"$f\";filename=\"$rel\"" "$API/documents" 2>&1) || code=000
+  case "$code" in
+    201) echo "added  $rel"; up=$((up+1)) ;;
+    200) echo "same   $rel (already in $FOLDER)"; dup=$((dup+1)) ;;
+    415) echo "skip   $rel ($(grep -o '"error":"[^"]*"' "$TMP" | head -1))"; skip=$((skip+1)) ;;
+    *)   echo "FAIL   $rel (http $code $(head -c 160 "$TMP"))"; fail=$((fail+1)) ;;
+  esac
+done < <(find "$DIR" \( -name .git -o -name node_modules -o -name __pycache__ -o -name .venv -o -name venv -o -name dist -o -name build -o -name .next \) -prune -o -type f -print0 | sort -z)
+
+verb="added"; [ "$DRY" = 1 ] && verb="would add"
+echo
+echo "$verb: $up   already there: $dup   skipped: $skip   failed: $fail   -> folder '$FOLDER'"
+[ "$DRY" = 1 ] || echo "Indexing runs on the next 5-minute tick; searchable shortly after."
+[ "$fail" -eq 0 ]

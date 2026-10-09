@@ -498,6 +498,29 @@ dashboardRoute.get('/', async (c) => {
   .docdrop:hover,.docdrop.drag{border-color:var(--green);color:var(--green-dim);}
   .docdrop b{color:var(--green-dim);text-transform:none;letter-spacing:0;}
   #doclist{margin-top:.4rem;}
+  #doclist .docrow.err{color:#ff9a9a;}
+  .kbbar{display:flex;gap:.5rem;margin:0 0 .7rem;flex-wrap:wrap;align-items:center;}
+  .kbbar input{flex:1;min-width:160px;max-width:280px;background:var(--purple-bg3);border:1px solid var(--purple-border);border-radius:6px;color:var(--text);padding:.35rem .55rem;font-family:inherit;font-size:.72rem;}
+  .kbbar input:focus{outline:none;border-color:var(--green);box-shadow:0 0 8px rgba(124,252,0,.25);}
+  #kbmsg{font-size:.66rem;color:var(--green-faint);min-height:1em;}
+  #kbmsg.bad{color:#ff9a9a;}
+  .kbf{border:1px solid var(--purple-border);border-radius:7px;margin-bottom:.45rem;background:var(--purple-bg3);}
+  .kbf>summary{display:flex;align-items:center;gap:.6rem;padding:.45rem .65rem;cursor:pointer;list-style:none;font-size:.78rem;color:var(--green-dim);}
+  .kbf>summary::-webkit-details-marker{display:none;}
+  .kbf>summary::before{content:'▸';color:var(--green-faint);}
+  .kbf[open]>summary::before{content:'▾';}
+  .kbf .kbname{color:var(--green);letter-spacing:.04em;}
+  .kbf .kbcount{color:var(--green-faint);font-size:.66rem;}
+  .kbf .kbsp{flex:1;}
+  .kbf .kbexp{display:flex;align-items:center;gap:.35rem;font-size:.62rem;text-transform:uppercase;letter-spacing:.06em;color:var(--green-faint);cursor:pointer;}
+  .kbf .kbexp.on{color:var(--green);}
+  .kbf .kbdocs{padding:.1rem .65rem .55rem;}
+  .kbd{display:flex;align-items:center;gap:.6rem;padding:.25rem 0;font-size:.72rem;border-top:1px solid var(--purple-border);}
+  .kbd .kbt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
+  .kbd .kbm{color:var(--green-faint);font-size:.62rem;white-space:nowrap;}
+  .kbd select{background:var(--purple-bg);border:1px solid var(--purple-border);border-radius:5px;color:var(--green-dim);padding:.15rem .3rem;font-family:inherit;font-size:.66rem;max-width:150px;}
+  .kbdel{color:var(--green-faint);cursor:pointer;font-size:.62rem;text-transform:uppercase;letter-spacing:.06em;}
+  .kbdel:hover{color:#ff9a9a;}
   #doclist .docrow{font-size:.7rem;color:var(--green-dim);padding:.2rem 0;}
   #doclist .docrow .ok{color:var(--green);margin-right:.4rem;}
   .muted{color:var(--green-faint);font-size:.8rem;}
@@ -608,10 +631,22 @@ dashboardRoute.get('/', async (c) => {
           <datalist id="folder-options">${folderOptionsHtml}</datalist>
         </div>
         <div class="docdrop" id="docdrop" onclick="document.getElementById('docfile').click()">
-          Drop a doc here or <b>click to upload</b> (.md / .txt / .docx / .pptx / .pdf)
+          Drop files here or <b>click to upload</b> (md, txt, docx, pptx, pdf, csv, json, code…)
         </div>
-        <input id="docfile" type="file" accept=".md,.txt,.docx,.pptx,.pdf,text/markdown,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation" style="display:none">
+        <input id="docfile" type="file" multiple accept=".md,.markdown,.txt,.rst,.log,.csv,.tsv,.json,.jsonl,.yaml,.yml,.toml,.ini,.cfg,.conf,.xml,.html,.htm,.css,.sql,.py,.js,.mjs,.ts,.tsx,.jsx,.java,.c,.h,.cpp,.hpp,.cs,.go,.rs,.rb,.php,.sh,.swift,.kt,.dart,.lua,.r,.tex,.docx,.pptx,.pdf" style="display:none">
         <div id="doclist"></div>
+      </section>
+
+
+      <!-- KNOWLEDGE BASE -->
+      <section class="card span2" id="kb">
+        <div class="ch">▸ Knowledge Base <span class="sub" style="text-transform:none;letter-spacing:0">— what lives in which folder, and what connected Claudes can see</span></div>
+        <div class="kbbar">
+          <input id="kbnew" type="text" placeholder="New folder…" maxlength="64" onkeydown="if(event.key==='Enter')kbCreate()">
+          <button class="pbtn" data-p="medium" onclick="kbCreate()">Create</button>
+          <span id="kbmsg"></span>
+        </div>
+        <div id="kblist"><p class="empty-ph">Loading…</p></div>
       </section>
 
       <!-- NEEDS ATTENTION -->
@@ -684,6 +719,7 @@ dashboardRoute.get('/', async (c) => {
 <script>
   document.getElementById('time').textContent = new Date().toLocaleTimeString();
   function esc(s){var d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
+  function escA(s){return esc(s).replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
   // ===== tasks =====
   async function addTask(priority){
@@ -718,9 +754,16 @@ dashboardRoute.get('/', async (c) => {
   }
 
   // ===== document upload =====
-  // Thin multipart POST to /documents. api writes the row; marionette embeds it
-  // later via the /embed-doc drain. No content-type header — the browser sets the
-  // multipart boundary itself.
+  // Thin multipart POST to /documents, one file at a time. api writes the row;
+  // marionette embeds it later via the /embed-doc drain. No content-type header —
+  // the browser sets the multipart boundary itself.
+  function docNote(html,cls){
+    var row=document.createElement('div');
+    row.className='docrow'+(cls?' '+cls:'');
+    row.innerHTML=html;
+    var list=document.getElementById('doclist');
+    list.insertBefore(row,list.firstChild);
+  }
   async function uploadDoc(file){
     if(!file)return;
     var folderInp=document.getElementById('docfolder');
@@ -730,32 +773,115 @@ dashboardRoute.get('/', async (c) => {
     fd.append('folder',folder);
     try{
       var r=await fetch('/documents',{method:'POST',body:fd});
-      if(!r.ok)throw new Error('http '+r.status);
-      var d=(await r.json()).document;
-      var row=document.createElement('div');
-      row.className='docrow';
-      row.innerHTML='<span class="ok">✓</span><b>'+esc(d.title)+'</b> <span class="sub">→ '+esc(d.folder)+'</span> queued';
-      var list=document.getElementById('doclist');
-      list.insertBefore(row,list.firstChild);
+      var j=await r.json().catch(function(){return {};});
+      if(!r.ok)throw new Error(j.error||('http '+r.status));
+      var d=j.document;
+      docNote('<span class="ok">'+(j.duplicate?'=':'✓')+'</span><b>'+esc(d.title)+'</b> <span class="sub">→ '+esc(d.folder)+'</span> '+(j.duplicate?'already there':'queued'));
       var dl=document.getElementById('folder-options');
-      if(dl&&d.folder&&!dl.querySelector('option[value="'+d.folder+'"]')){
+      if(dl&&d.folder&&!dl.querySelector('option[value="'+escA(d.folder)+'"]')){
         var opt=document.createElement('option');opt.value=d.folder;dl.appendChild(opt);
       }
-    }catch(e){alert('Could not upload document: '+e.message);}
+    }catch(e){docNote('✗ <b>'+esc(file.name)+'</b> <span class="sub">'+esc(e.message)+'</span>','err');}
+  }
+  async function uploadMany(files){
+    if(!files||!files.length)return;
+    for(var i=0;i<files.length;i++){await uploadDoc(files[i]);}
+    kbLoad();
   }
   (function(){
     var zone=document.getElementById('docdrop');
     var picker=document.getElementById('docfile');
     picker.addEventListener('change',function(){
-      if(picker.files&&picker.files[0])uploadDoc(picker.files[0]);
+      uploadMany(Array.prototype.slice.call(picker.files||[]));
       picker.value='';
     });
     zone.addEventListener('dragover',function(e){e.preventDefault();zone.classList.add('drag');});
     zone.addEventListener('dragleave',function(){zone.classList.remove('drag');});
     zone.addEventListener('drop',function(e){
       e.preventDefault();zone.classList.remove('drag');
-      if(e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0])uploadDoc(e.dataTransfer.files[0]);
+      if(e.dataTransfer&&e.dataTransfer.files)uploadMany(Array.prototype.slice.call(e.dataTransfer.files));
     });
+  })();
+
+  // ===== knowledge base: folders, exposure, moving documents =====
+  // All state lives in Postgres (documents.folder, document_folders.mcp_exposed);
+  // this just renders it and PATCHes changes. Every string is escaped on the way in.
+  var kbOpen={};
+  function kbMsg(t,bad){var m=document.getElementById('kbmsg');m.textContent=t||'';m.className=bad?'bad':'';}
+  async function kbJson(url,opts){
+    var r=await fetch(url,opts);
+    var j=await r.json().catch(function(){return {};});
+    if(!r.ok)throw new Error(j.error||('http '+r.status));
+    return j;
+  }
+  async function kbLoad(){
+    try{
+      var res=await Promise.all([kbJson('/documents/folders'),kbJson('/documents?limit=500')]);
+      var folders=res[0].details||[];
+      var docs=res[1].documents||[];
+      var by={};
+      docs.forEach(function(d){(by[d.folder]=by[d.folder]||[]).push(d);});
+      var names=folders.map(function(f){return f.name;});
+      var html=folders.map(function(f){
+        var fd=by[f.name]||[];
+        var del=(f.doc_count===0&&f.name!=='general')?'<span class="kbdel" data-act="rmfolder" data-name="'+escA(f.name)+'">delete</span>':'';
+        var rows=fd.map(function(d){
+          var opts=names.map(function(n){return '<option value="'+escA(n)+'"'+(n===d.folder?' selected':'')+'>'+esc(n)+'</option>';}).join('')+'<option value="__new__">+ new folder…</option>';
+          return '<div class="kbd"><span class="kbt" title="'+escA(d.title)+'">'+esc(d.title)+'</span>'
+            +'<span class="kbm">'+esc(d.char_count)+' chars · '+(d.embedded_at?'searchable':'indexing…')+'</span>'
+            +'<select data-act="move" data-id="'+escA(d.id)+'" data-from="'+escA(d.folder)+'">'+opts+'</select></div>';
+        }).join('');
+        return '<details class="kbf" data-name="'+escA(f.name)+'"'+(kbOpen[f.name]?' open':'')+'>'
+          +'<summary><span class="kbname">'+esc(f.name)+'</span><span class="kbcount">'+esc(f.doc_count)+' docs</span><span class="kbsp"></span>'+del
+          +'<label class="kbexp'+(f.mcp_exposed?' on':'')+'" title="When on, connected Claudes can search, read and add documents in this folder"><input type="checkbox" data-act="expose" data-name="'+escA(f.name)+'"'+(f.mcp_exposed?' checked':'')+'> Claude can see</label></summary>'
+          +'<div class="kbdocs">'+(rows||'<p class="sub" style="font-size:.7rem;padding:.3rem 0">Empty.</p>')+'</div></details>';
+      }).join('');
+      document.getElementById('kblist').innerHTML=html||'<p class="empty-ph">No folders yet.</p>';
+    }catch(e){
+      document.getElementById('kblist').innerHTML='<p class="empty-ph">Could not load knowledge base: '+esc(e.message)+'</p>';
+    }
+  }
+  async function kbCreate(){
+    var inp=document.getElementById('kbnew');
+    var name=inp.value.trim();
+    if(!name)return;
+    try{await kbJson('/documents/folders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name})});
+      inp.value='';kbMsg('Created "'+name.toLowerCase()+'" (hidden from Claude until you switch it on).');kbLoad();
+    }catch(e){kbMsg(e.message,true);}
+  }
+  (function(){
+    var list=document.getElementById('kblist');
+    list.addEventListener('toggle',function(e){
+      var d=e.target;if(d&&d.classList&&d.classList.contains('kbf'))kbOpen[d.getAttribute('data-name')]=d.open;
+    },true);
+    list.addEventListener('click',async function(e){
+      var t=e.target;
+      if(t.getAttribute&&t.getAttribute('data-act')==='rmfolder'){
+        e.preventDefault();
+        var n=t.getAttribute('data-name');
+        if(!confirm('Delete empty folder "'+n+'"?'))return;
+        try{await kbJson('/documents/folders/'+encodeURIComponent(n),{method:'DELETE'});kbMsg('Deleted "'+n+'".');}catch(er){kbMsg(er.message,true);}
+        kbLoad();
+      }
+    });
+    list.addEventListener('change',async function(e){
+      var t=e.target;var act=t.getAttribute&&t.getAttribute('data-act');
+      if(act==='expose'){
+        var n=t.getAttribute('data-name');
+        try{await kbJson('/documents/folders/'+encodeURIComponent(n),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({mcp_exposed:t.checked})});
+          kbMsg('"'+n+'": Claude '+(t.checked?'can now see':'can no longer see')+' this folder.');
+        }catch(er){kbMsg(er.message,true);t.checked=!t.checked;}
+        kbLoad();
+      }else if(act==='move'){
+        var to=t.value;var id=t.getAttribute('data-id');var from=t.getAttribute('data-from');
+        if(to==='__new__'){to=(prompt('New folder name:')||'').trim();if(!to){t.value=from;return;}}
+        try{var j=await kbJson('/documents/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({folder:to})});
+          kbMsg(j.qdrant_synced===false?'Moved, but search index not updated yet: '+j.warning:'Moved to "'+j.folder+'".',j.qdrant_synced===false);
+        }catch(er){kbMsg(er.message,true);}
+        kbOpen[from]=true;kbLoad();
+      }
+    });
+    kbLoad();
   })();
 
   // ===== chatbar (STUB: wire to marionette /think next pass) =====
