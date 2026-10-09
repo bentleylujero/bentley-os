@@ -24,6 +24,8 @@ cleanup() {
   echo "=== cleanup (only iso-kb-* containers and images)"
   docker rm -f "$API_C" "$MARI_C" >/dev/null 2>&1
   docker rmi "$API_IMG" "$MARI_IMG" >/dev/null 2>&1
+  # Early exits (hard-stop, failed check) must not strand this run's folder; scoped to its own name.
+  PSQL "delete from documents where folder = '$FOLDER'; delete from document_folders where name = '$FOLDER' and name like 'iso-kb-%'" >/dev/null 2>&1
   docker ps -a --filter "name=iso-kb-" --format 'left over: {{.Names}}'
 }
 trap cleanup EXIT
@@ -97,11 +99,17 @@ console.log(JSON.stringify(out));
 JS
 )
 echo "$REST_OUT"
-DOC_ID=$(echo "$REST_OUT" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).upload[1])}catch{console.log('')}})")
-echo "$REST_OUT" | node -e "
-let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const o=JSON.parse(s);
-process.exit(o.folder_create[0]===201&&o.upload[0]===201&&o.list[1]===1&&o.expose[0]===200?0:1)})"
+# Host has jq (no node). Verdicts are parsed with jq on the host.
+DOC_ID=$(echo "$REST_OUT" | jq -er '.upload[1] | strings' 2>/dev/null || true)
+[ -n "$DOC_ID" ] || { echo "FAIL  no DOC_ID, stopping"; exit 1; }
+echo "$REST_OUT" | jq -e '.folder_create[0]==201 and .upload[0]==201 and .list[1]==1 and .expose[0]==200' >/dev/null
 check "REST: create folder 201, upload 201, list 1, expose 200" $?
+if ! [[ "$DOC_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+  echo "FAIL  no valid document id from REST upload (got: '${DOC_ID}'); stopping before MCP and marionette sections"
+  FAIL=$((FAIL+1))
+  echo "=== result: PASS=$PASS FAIL=$FAIL"
+  exit 1
+fi
 
 echo "=== MCP stdio path (real mcp-stdio.js inside api image)"
 MCP_OUT=$(docker exec -i -e F="$FOLDER" -e D="$DOC_ID" "$API_C" node --input-type=module - <<'JS'
@@ -124,12 +132,14 @@ console.log(JSON.stringify(out));
 JS
 )
 echo "$MCP_OUT"
-echo "$MCP_OUT" | node -e "
-let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const o=JSON.parse(s);
-const want=['get_document','list_documents','list_folders','search_folder','upload_document'];
-const ok=JSON.stringify(o.tools)===JSON.stringify(want)&&!o.list_folders.isError&&!o.list_documents.isError&&!o.get_document.isError&&!o.upload.isError&&o.upload_unexposed.isError;
-process.exit(ok?0:1)})"
-check "MCP: 5 tools, reads ok, upload ok, unexposed upload rejected" $?
+echo "$MCP_OUT" | jq -e '.tools == ["get_document","list_documents","list_folders","search_folder","upload_document"]' >/dev/null
+check "MCP: exactly the 5 expected tools" $?
+echo "$MCP_OUT" | jq -e '(.list_folders.isError==false) and (.list_documents.isError==false) and (.upload.isError==false)' >/dev/null
+check "MCP: list_folders, list_documents, upload_document succeed" $?
+echo "$MCP_OUT" | jq -e '.get_document.isError==false' >/dev/null
+check "MCP: get_document succeeds (required)" $?
+echo "$MCP_OUT" | jq -e '.upload_unexposed.isError==true' >/dev/null
+check "MCP: upload to a missing/unexposed folder is rejected" $?
 
 echo "=== marionette KB path (throwaway container)"
 MARI_OUT=$(docker exec -i -e D="$DOC_ID" "$MARI_C" node --input-type=module - <<'JS'
@@ -138,8 +148,8 @@ console.log(JSON.stringify({ status: r.status, body: await r.json().catch(() => 
 JS
 )
 echo "$MARI_OUT"
-echo "$MARI_OUT" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.exit(JSON.parse(s).status===200?0:1))"
-check "marionette /resync-folders (targeted, one document) 200" $?
+echo "$MARI_OUT" | jq -e '.status==200 and .body.documents_scanned==1' >/dev/null
+check "marionette /resync-folders 200 and documents_scanned == 1 (targeted)" $?
 
 echo "=== audit rows since $T0 for this test"
 PSQL "select id, action, target, outcome from audit_log where at >= '$T0' and (target = '$FOLDER' or target = '$DOC_ID' or action in ('mcp.list_folders','mcp.upload_document')) order by id"
@@ -178,7 +188,7 @@ console.log(JSON.stringify({ points_found: found, points_after_delete: after }))
 JS
 )
 echo "$QD_OUT"
-echo "$QD_OUT" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.exit(JSON.parse(s).points_after_delete===0?0:1)}catch{process.exit(1)}})"
+echo "$QD_OUT" | jq -e '.points_after_delete==0' >/dev/null
 check "Qdrant: no points left for test folder / doc id" $?
 
 echo "=== result: PASS=$PASS FAIL=$FAIL"
