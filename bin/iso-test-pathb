@@ -20,36 +20,100 @@ PASS=0
 FAIL=0
 CID=""
 
-PSQL() { docker exec bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -tA -c "$1"; }
+PSQL() { docker exec bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -tA -v ON_ERROR_STOP=1 -c "$1"; }
+
+declare -A OK # proof key -> 0 if its check passed; unset or nonzero means not proven
+
+check() { # check "<label>" <exit-code> [proof-key]
+  if [ "$2" -eq 0 ]; then echo "PASS  $1"; PASS=$((PASS+1)); else echo "FAIL  $1"; FAIL=$((FAIL+1)); fi
+  [ -n "${3:-}" ] && OK[$3]=$2
+  return 0
+}
+
+# cnt "<sql>": sets CNT to a non-negative integer, or returns 1 with CNT_ERR holding the psql error / bad output.
+cnt() {
+  local o rc
+  o=$(PSQL "$1" 2>&1); rc=$?
+  if [ "$rc" -ne 0 ] || ! [[ "$o" =~ ^[0-9]+$ ]]; then CNT=""; CNT_ERR="${o:-<empty output, rc=$rc>}"; return 1; fi
+  CNT="$o"; CNT_ERR=""; return 0
+}
+
+# acheck <key> "<label>" "<count sql>" eq|ge <n>
+acheck() {
+  local key=$1 label=$2 sql=$3 op=$4 want=$5
+  if ! cnt "$sql"; then check "$label: psql error or non-integer result: $CNT_ERR" 1 "$key"; return 1; fi
+  if [ "$op" = eq ]; then [ "$CNT" -eq "$want" ]; else [ "$CNT" -ge "$want" ]; fi
+  check "$label (rows=$CNT)" $? "$key"
+}
+
+# claim "<text>" key...: prints under PROVES only if every key passed, else under NOT PROVEN.
+PROVEN=(); UNPROVEN=()
+claim() {
+  local text=$1 k; shift
+  for k in "$@"; do
+    if [ "${OK[$k]:-1}" -ne 0 ]; then UNPROVEN+=("$text  [failed or not run: $k]"); return; fi
+  done
+  PROVEN+=("$text")
+}
+
+summary() {
+  echo "=== result: PASS=$PASS FAIL=$FAIL"
+  claim "The api image builds (tsc) and the real routes mount: discovery metadata, /register, /authorize, /token, /mcp." build dist_oauth dist_mcp dist_stdio health prm asm reg_ok
+  claim "DCR accepts only the two claude callback URIs; PKCE is S256-only; wrong verifier, code reuse and unregistered redirect are refused." reg_bad asm authz_plain token_wrong_verifier code_reuse authz_bad_redirect
+  claim "/authorize refuses requests lacking the Cloudflare Access identity header and requests lacking the CSRF cookie." authz_noheader authz_csrf
+  claim "/mcp refuses missing/garbage/revoked tokens with a resource_metadata challenge; a valid token lists exactly the 5 tools." mcp_noauth mcp_badtoken mcp_tools old_revoked
+  claim "isExposed() gates the http transport like stdio: list_documents, get_document, search_folder and upload_document on an unexposed folder are refused, audited with transport=http and client_id, and upload stored nothing." mcp_list_docs_unexposed mcp_get_doc_unexposed mcp_search_unexposed mcp_upload_unexposed a_list_docs a_get_doc a_search a_upload upload_no_row upload_no_mcp_row
+  claim "Refresh rotation revokes the old pair; reuse of a rotated refresh token revokes every token for the client." refresh_ok old_revoked refresh_reuse after_reuse a_tokens_dead
+  claim "Audit ledger carries each oauth.* and mcp.* event, with no raw token fields." a_oauth a_auth_rejected a_list_folders a_no_tokens
+  claim "Cleanup removed the test client, folder and documents." clean_client clean_folder clean_docs
+  echo "PROVES"
+  local x
+  for x in "${PROVEN[@]}"; do echo "  - $x"; done
+  if [ "${#UNPROVEN[@]}" -gt 0 ]; then
+    echo "NOT PROVEN (FAILED)"
+    for x in "${UNPROVEN[@]}"; do echo "  - $x"; done
+  fi
+  cat <<'TXT'
+DOES NOT PROVE
+  - Cloudflare Access itself: the header was supplied by the test. Whether Access injects it for a real login, and whether Access policies let anonymous claude.ai reach /mcp, /token, /register and /.well-known/* is untested.
+  - The public hostname, TLS, or the live OAUTH_ISSUER value (the test used http://iso-pathb-api:3000).
+  - claude.ai's real connector handshake, or the 20-client cap and rate limits (not exercised).
+  - Anything about the live api container: nothing here is deployed.
+TXT
+}
 
 cleanup() {
   echo "=== cleanup (only $NAME rows, iso-pathb-* container and image)"
   docker rm -f "$API_C" >/dev/null 2>&1
   docker rmi "$API_IMG" >/dev/null 2>&1
   # oauth codes/tokens cascade from the client row; the match is on this run's exact name.
-  PSQL "delete from oauth_clients where client_name = '$NAME'; delete from documents where folder = '$FOLDER'; delete from document_folders where name = '$FOLDER' and name like 'iso-pathb-%'" >/dev/null 2>&1
+  local out
+  out=$(PSQL "delete from oauth_clients where client_name = '$NAME'; delete from documents where folder = '$FOLDER'; delete from document_folders where name = '$FOLDER' and name like 'iso-pathb-%'" 2>&1) || echo "cleanup psql error: $out"
   docker ps -a --filter "name=iso-pathb-" --format 'left over: {{.Names}}'
-  echo "oauth_clients rows for this run after cleanup: $(PSQL "select count(*) from oauth_clients where client_name = '$NAME'")"
+  acheck clean_client "cleanup: oauth_clients rows for $NAME gone" "select count(*) from oauth_clients where client_name = '$NAME'" eq 0
+  acheck clean_folder "cleanup: document_folders row $FOLDER gone" "select count(*) from document_folders where name = '$FOLDER'" eq 0
+  acheck clean_docs "cleanup: documents in folder $FOLDER gone" "select count(*) from documents where folder = '$FOLDER'" eq 0
+  summary
+  [ "$FAIL" -eq 0 ] && exit 0 || exit 1
 }
 trap cleanup EXIT
-
-check() { # check "<label>" <exit-code>
-  if [ "$2" -eq 0 ]; then echo "PASS  $1"; PASS=$((PASS+1)); else echo "FAIL  $1"; FAIL=$((FAIL+1)); fi
-}
 
 echo "=== HEAD"
 git log -1 --format='%h %s'
 git status --porcelain | head -10
 
 echo "=== build api (tsc runs inside the build)"
-docker build -q -t "$API_IMG" apps/api; check "build api" $?
+docker build -q -t "$API_IMG" apps/api; check "build api" $? build
 [ "$FAIL" -eq 0 ] || { echo "build failed, stopping"; exit 1; }
-docker run --rm --entrypoint test "$API_IMG" -f dist/routes/oauth.js; check "dist/routes/oauth.js exists" $?
-docker run --rm --entrypoint test "$API_IMG" -f dist/routes/mcp.js; check "dist/routes/mcp.js exists" $?
-docker run --rm --entrypoint test "$API_IMG" -f dist/mcp-stdio.js; check "dist/mcp-stdio.js exists" $?
+docker run --rm --entrypoint test "$API_IMG" -f dist/routes/oauth.js; check "dist/routes/oauth.js exists" $? dist_oauth
+docker run --rm --entrypoint test "$API_IMG" -f dist/routes/mcp.js; check "dist/routes/mcp.js exists" $? dist_mcp
+docker run --rm --entrypoint test "$API_IMG" -f dist/mcp-stdio.js; check "dist/mcp-stdio.js exists" $? dist_stdio
 
 echo "=== start throwaway api on $NET (routes only, no scheduler)"
 PSQL "insert into document_folders (name, mcp_exposed) values ('$FOLDER', false)" >/dev/null; check "create unexposed test folder $FOLDER" $?
+DOC_ID=$(PSQL "with i as (insert into documents (title, source, mime, body, char_count, folder, embedded_at) values ('iso-pathb seed', 'iso-test', 'text/plain', 'iso-pathb seed body', 19, '$FOLDER', now()) returning id) select id from i" 2>&1)
+[[ "$DOC_ID" =~ ^[0-9a-f-]{36}$ ]]; check "seed one document in unexposed folder (id=$DOC_ID)" $?
+[ "$FAIL" -eq 0 ] || { echo "seed failed, stopping"; exit 1; }
 docker run -d --name "$API_C" --network "$NET" --env-file .env -e OAUTH_ISSUER="http://$API_C:3000" "$API_IMG" \
   node --input-type=module -e "
 import { serve } from '@hono/node-server';
@@ -63,14 +127,14 @@ for i in $(seq 1 30); do
   docker exec "$API_C" node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null && { ok=0; break; }
   sleep 1
 done
-check "api /health" $ok
+check "api /health" $ok health
 if [ "$FAIL" -ne 0 ]; then echo "--- api logs"; docker logs --tail 40 "$API_C" 2>&1; exit 1; fi
 
 T0=$(PSQL "select now()")
 echo "=== audit window starts $T0, client name $NAME, folder $FOLDER"
 
 echo "=== full flow, driven from inside the container"
-OUT=$(docker exec -i -e NAME="$NAME" -e F="$FOLDER" "$API_C" node --input-type=module - <<'JS'
+OUT=$(docker exec -i -e NAME="$NAME" -e F="$FOLDER" -e DOC_ID="$DOC_ID" "$API_C" node --input-type=module - <<'JS'
 import { createHash, randomBytes } from 'node:crypto';
 const B = 'http://localhost:3000';
 const REDIR = 'https://claude.ai/api/mcp/auth_callback';
@@ -137,6 +201,9 @@ r = await mcp('initialize', { protocolVersion: '2025-06-18', capabilities: {}, c
 r = await mcp('tools/list', {}, A1, 2); b = await j(r); out.mcp_tools = [r.status, (b?.result?.tools || []).map((t) => t.name).sort()];
 r = await mcp('tools/call', { name: 'list_folders', arguments: {} }, A1, 3); b = await j(r); out.mcp_list_folders = [r.status, b?.result?.isError ?? false, (b?.result?.content?.[0]?.text || '').includes(process.env.F)];
 r = await mcp('tools/call', { name: 'list_documents', arguments: { folder: process.env.F } }, A1, 4); b = await j(r); out.mcp_list_docs_unexposed = [r.status, b?.result?.isError === true];
+r = await mcp('tools/call', { name: 'get_document', arguments: { document_id: process.env.DOC_ID } }, A1, 8); b = await j(r); out.mcp_get_doc_unexposed = [r.status, b?.result?.isError === true];
+r = await mcp('tools/call', { name: 'search_folder', arguments: { folder: process.env.F, query: 'iso pathb probe' } }, A1, 9); b = await j(r); out.mcp_search_unexposed = [r.status, b?.result?.isError === true];
+r = await mcp('tools/call', { name: 'upload_document', arguments: { folder: process.env.F, title: 'iso-pathb upload probe', content: 'iso-pathb upload probe content that must never be stored' } }, A1, 10); b = await j(r); out.mcp_upload_unexposed = [r.status, b?.result?.isError === true];
 
 r = await tok({ grant_type: 'refresh_token', refresh_token: R1 }); b = await j(r);
 out.refresh_ok = [r.status, !!b.access_token, !!b.refresh_token, b.refresh_token !== R1];
@@ -153,61 +220,52 @@ echo "$OUT"
 echo "$OUT" | jq -e . >/dev/null || { echo "FAIL  flow output is not JSON, stopping"; docker logs --tail 40 "$API_C" 2>&1; exit 1; }
 CID=$(echo "$OUT" | jq -r '.client_id')
 
-v() { echo "$OUT" | jq -e "$1" >/dev/null; check "$2" $?; }
-v '.prm[0]==200 and (.prm[1]|endswith("/mcp")) and (.prm[2]|length==1)' "protected-resource metadata served"
-v '.asm[0]==200 and .asm[1]==["S256"] and .asm[2]==["none"]' "authorization-server metadata: S256 only, public clients"
-v '.reg_bad[0]==400' "register: non-claude redirect URI rejected"
-v '.reg_ok[0]==201 and .reg_ok[1]==true and .reg_ok[2]=="none"' "register: valid redirect URI accepted, public client"
-v '.authz_noheader[0]==403' "authorize without Access header: 403"
-v '.authz_bad_redirect[0]==400' "authorize with unregistered redirect_uri: 400, no redirect"
-v '.authz_plain_rejected==[302,true]' "authorize with PKCE method plain rejected"
-v '.authz_post_no_csrf[0]==400' "authorize POST without CSRF cookie rejected"
+v() { echo "$OUT" | jq -e "$1" >/dev/null; check "$2" $? "${3:-}"; }
+v '.prm[0]==200 and (.prm[1]|endswith("/mcp")) and (.prm[2]|length==1)' "protected-resource metadata served" prm
+v '.asm[0]==200 and .asm[1]==["S256"] and .asm[2]==["none"]' "authorization-server metadata: S256 only, public clients" asm
+v '.reg_bad[0]==400' "register: non-claude redirect URI rejected" reg_bad
+v '.reg_ok[0]==201 and .reg_ok[1]==true and .reg_ok[2]=="none"' "register: valid redirect URI accepted, public client" reg_ok
+v '.authz_noheader[0]==403' "authorize without Access header: 403" authz_noheader
+v '.authz_bad_redirect[0]==400' "authorize with unregistered redirect_uri: 400, no redirect" authz_bad_redirect
+v '.authz_plain_rejected==[302,true]' "authorize with PKCE method plain rejected" authz_plain
+v '.authz_post_no_csrf[0]==400' "authorize POST without CSRF cookie rejected" authz_csrf
 v '.authz_denied==[200,302,"access_denied","st-123"]' "authorize deny: access_denied with state passed through"
 v '.authz_ok==[200,true,302,true,"st-123"]' "authorize approve: consent page, 302 with code and state"
-v '.token_wrong_verifier==[400,"invalid_grant"]' "token: wrong PKCE verifier rejected"
+v '.token_wrong_verifier==[400,"invalid_grant"]' "token: wrong PKCE verifier rejected" token_wrong_verifier
 v '.token_ok==[200,"Bearer",3600,true,true]' "token: code + PKCE verifier issues bearer, 1h, refresh token"
-v '.code_reuse==[400,"invalid_grant"]' "token: authorization code reuse rejected"
-v '.mcp_noauth[0]==401 and (.mcp_noauth[1]|test("resource_metadata=.*oauth-protected-resource"))' "/mcp without token: 401 with resource_metadata"
-v '.mcp_badtoken[0]==401' "/mcp with garbage token: 401"
+v '.code_reuse==[400,"invalid_grant"]' "token: authorization code reuse rejected" code_reuse
+v '.mcp_noauth[0]==401 and (.mcp_noauth[1]|test("resource_metadata=.*oauth-protected-resource"))' "/mcp without token: 401 with resource_metadata" mcp_noauth
+v '.mcp_badtoken[0]==401' "/mcp with garbage token: 401" mcp_badtoken
 v '.mcp_init[0]==200 and .mcp_init[1]=="bentley-os-folders"' "/mcp initialize with bearer"
-v '.mcp_tools[0]==200 and .mcp_tools[1]==["get_document","list_documents","list_folders","search_folder","upload_document"]' "/mcp tools/list returns exactly the 5 tools"
+v '.mcp_tools[0]==200 and .mcp_tools[1]==["get_document","list_documents","list_folders","search_folder","upload_document"]' "/mcp tools/list returns exactly the 5 tools" mcp_tools
 v '.mcp_list_folders==[200,false,false]' "list_folders OK and does not show the unexposed test folder"
-v '.mcp_list_docs_unexposed==[200,true]' "list_documents on unexposed folder returns isError"
-v '.refresh_ok==[200,true,true,true]' "refresh: rotation issues a new, different pair"
-v '.old_access_revoked[0]==401 and .new_access_works[0]==200' "refresh: old access revoked, new access works"
-v '.refresh_reuse==[400,"invalid_grant"]' "refresh: reuse of rotated token rejected"
-v '.after_reuse_access_dead[0]==401 and .after_reuse_refresh_dead[0]==400' "refresh reuse revoked every token for the client"
+v '.mcp_list_docs_unexposed==[200,true]' "list_documents on unexposed folder returns isError" mcp_list_docs_unexposed
+v '.mcp_get_doc_unexposed==[200,true]' "get_document on a doc in the unexposed folder returns isError" mcp_get_doc_unexposed
+v '.mcp_search_unexposed==[200,true]' "search_folder on unexposed folder returns isError" mcp_search_unexposed
+v '.mcp_upload_unexposed==[200,true]' "upload_document to unexposed folder returns isError" mcp_upload_unexposed
+v '.refresh_ok==[200,true,true,true]' "refresh: rotation issues a new, different pair" refresh_ok
+v '.old_access_revoked[0]==401 and .new_access_works[0]==200' "refresh: old access revoked, new access works" old_revoked
+v '.refresh_reuse==[400,"invalid_grant"]' "refresh: reuse of rotated token rejected" refresh_reuse
+v '.after_reuse_access_dead[0]==401 and .after_reuse_refresh_dead[0]==400' "refresh reuse revoked every token for the client" after_reuse
 
 echo "=== audit rows (window since $T0, this client only)"
-PSQL "select id, action, coalesce(target,''), coalesce(outcome,''), payload->>'transport', payload->>'client_id' from audit_log where created_at >= '$T0' and (payload->>'client_id' = '$CID' or target = '$CID' or action in ('mcp.auth_rejected','oauth.register')) order by id" || true
-n=$(PSQL "select count(*) from audit_log where created_at >= '$T0' and action='mcp.list_documents' and outcome='rejected_not_allowed' and target='$FOLDER' and payload->>'transport'='http' and payload->>'client_id'='$CID'")
-[ "$n" = "1" ]; check "audit: mcp.list_documents rejected_not_allowed, transport=http, client_id=$CID (rows=$n)" $?
-for a in oauth.register oauth.authorize_approved oauth.authorize_denied oauth.token_issued oauth.token_refreshed oauth.token_rejected; do
-  n=$(PSQL "select count(*) from audit_log where created_at >= '$T0' and action='$a'")
-  [ "$n" -ge 1 ]; check "audit: $a present (rows=$n)" $?
+PSQL "select id, action, coalesce(target,''), coalesce(outcome,''), payload->>'transport', payload->>'client_id' from audit_log where at >= '$T0' and (payload->>'client_id' = '$CID' or target = '$CID' or action in ('mcp.auth_rejected','oauth.register')) order by id" || echo "audit listing failed (psql error above)"
+J="payload->>'transport'='http' and payload->>'client_id'='$CID'"
+acheck a_list_docs "audit: mcp.list_documents rejected_not_allowed, transport=http, client_id=$CID" "select count(*) from audit_log where at >= '$T0' and action='mcp.list_documents' and outcome='rejected_not_allowed' and target='$FOLDER' and $J" eq 1
+# get_document's real outcome string (apps/api/src/mcp-tools.ts) is rejected_not_found_or_not_allowed, target = document id.
+acheck a_get_doc "audit: mcp.get_document rejected_not_found_or_not_allowed (actual app string), target=doc id, transport=http, client_id" "select count(*) from audit_log where at >= '$T0' and action='mcp.get_document' and outcome='rejected_not_found_or_not_allowed' and target='$DOC_ID' and $J" eq 1
+acheck a_search "audit: mcp.search_folder rejected_not_allowed, transport=http, client_id" "select count(*) from audit_log where at >= '$T0' and action='mcp.search_folder' and outcome='rejected_not_allowed' and target='$FOLDER' and $J" eq 1
+acheck a_upload "audit: mcp.upload_document rejected_not_allowed, transport=http, client_id" "select count(*) from audit_log where at >= '$T0' and action='mcp.upload_document' and outcome='rejected_not_allowed' and target='$FOLDER' and $J" eq 1
+acheck upload_no_row "db: upload_document created no document row (only the seed remains in $FOLDER)" "select count(*) from documents where folder='$FOLDER'" eq 1
+acheck upload_no_mcp_row "db: no document with source='mcp' in $FOLDER" "select count(*) from documents where folder='$FOLDER' and source='mcp'" eq 0
+oauth_ok=0
+for act in oauth.register oauth.authorize_approved oauth.authorize_denied oauth.token_issued oauth.token_refreshed oauth.token_rejected; do
+  acheck "a_$act" "audit: $act present" "select count(*) from audit_log where at >= '$T0' and action='$act'" ge 1
+  [ "${OK[a_$act]:-1}" -eq 0 ] || oauth_ok=1
 done
-n=$(PSQL "select count(*) from audit_log where created_at >= '$T0' and action='mcp.auth_rejected'")
-[ "$n" -ge 2 ]; check "audit: mcp.auth_rejected present (rows=$n)" $?
-n=$(PSQL "select count(*) from audit_log where created_at >= '$T0' and action='mcp.list_folders' and payload->>'transport'='http' and payload->>'client_id'='$CID'")
-[ "$n" = "1" ]; check "audit: mcp.list_folders carries transport=http and client_id (rows=$n)" $?
-n=$(PSQL "select count(*) from audit_log where created_at >= '$T0' and payload::text ~* '(access_token|refresh_token|code_verifier)\"'")
-[ "$n" = "0" ]; check "audit: no raw token fields in payloads (rows=$n)" $?
-n=$(PSQL "select count(*) from oauth_tokens where client_id='$CID' and revoked_at is null")
-[ "$n" = "0" ]; check "db: no live tokens left for test client (rows=$n)" $?
-
-echo "=== result: PASS=$PASS FAIL=$FAIL"
-cat <<'TXT'
-PROVES
-  - The api image builds (tsc) and the real routes mount: discovery metadata, /register, /authorize, /token, /mcp.
-  - DCR accepts only the two claude callback URIs; PKCE is S256-only; wrong verifier, code reuse and unregistered redirect are refused.
-  - /authorize refuses requests lacking the Cloudflare Access identity header and requests lacking the CSRF cookie.
-  - /mcp refuses missing/garbage/revoked tokens with a resource_metadata challenge; a valid token lists exactly the 5 tools.
-  - isExposed() gates the http transport like stdio: an unexposed folder gives rejected_not_allowed with transport=http and client_id in audit_log.
-  - Refresh rotation revokes the old pair; reuse of a rotated refresh token revokes every token for the client.
-DOES NOT PROVE
-  - Cloudflare Access itself: the header was supplied by the test. Whether Access injects it for a real login, and whether Access policies let anonymous claude.ai reach /mcp, /token, /register and /.well-known/* is untested.
-  - The public hostname, TLS, or the live OAUTH_ISSUER value (the test used http://iso-pathb-api:3000).
-  - claude.ai's real connector handshake, or the 20-client cap and rate limits (not exercised).
-  - Anything about the live api container: nothing here is deployed.
-TXT
-[ "$FAIL" -eq 0 ]
+OK[a_oauth]=$oauth_ok
+acheck a_auth_rejected "audit: mcp.auth_rejected present (>=2)" "select count(*) from audit_log where at >= '$T0' and action='mcp.auth_rejected'" ge 2
+acheck a_list_folders "audit: mcp.list_folders carries transport=http and client_id" "select count(*) from audit_log where at >= '$T0' and action='mcp.list_folders' and $J" eq 1
+acheck a_no_tokens "audit: no raw token fields in payloads" "select count(*) from audit_log where at >= '$T0' and payload::text ~* '(access_token|refresh_token|code_verifier)\"'" eq 0
+acheck a_tokens_dead "db: no live tokens left for test client" "select count(*) from oauth_tokens where client_id='$CID' and revoked_at is null" eq 0
+# the result summary and the cleanup assertions run from the EXIT trap, after cleanup.
