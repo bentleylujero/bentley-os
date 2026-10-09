@@ -16,7 +16,6 @@
 - Canvas object types (not built; `object_types` has none)
 - Path B: remote MCP connector (claude.ai web/phone) with OAuth; `0013` tables exist, no route consumes them (Bible §6)
 - Later, Bible §6: Wolverine (fixer), M5.1 auto-execute rate limiting (deferred), Milestone 6 self-extension, local embeddings, Gmail snippet polish (cosmetic)
-- Bible surgery: delete §4/§6/§8, point to STATUS.md
 
 ## Problems
 - contractor/src/index.ts:26 baseUrl 172.16.30.4:4096 is dead (confirmed 2026-09-24); OpenCode delegation is likely broken until repointed to 192.168.68.58:4096 or host.docker.internal:4096

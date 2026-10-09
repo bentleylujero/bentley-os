@@ -72,10 +72,12 @@ new front doors to whatever marionette can already do at any given milestone.
 
 **The most important fact:** Claude Code runs directly on the box, interactive only (human
 present at the terminal) — it has real filesystem, git, docker, and DB access and executes
-its own commands. **claude.ai chat (no CLI, no human-present execution loop) remains
-planning-only**: it gives exact, copy-pasteable commands/files, Bentley runs them (SSH or
-browser terminal at `ssh.bentleyos.me`) and pastes back raw output, and it reads that output
-before giving the next step.
+its own commands. **Claude Code works autonomously and logs raw output to the session log
+(`~/logs/session-YYYY-MM-DD.log`); Bentley relays only on failure, review, or forced
+hand-offs** (`.env`-needing tests run via `! bin/iso-test-<svc>`, sudo; see §8). **claude.ai
+chat (no CLI, no execution loop) remains planning-only**: it gives exact, copy-pasteable
+commands/files, Bentley runs them (SSH or browser terminal at `ssh.bentleyos.me`) and pastes
+back raw output, and it reads that output before giving the next step.
 
 **Believe the output, not the prior.** If pasted output contradicts expectation, the output
 is truth. **This includes this doc's own prior claims** — the marionette→contractor
@@ -1605,10 +1607,11 @@ auto-drain + grounded Q&A + tasks panel all shipped.** In **marionette**, not ap
   (`embedded_at` + `idx_emails_unembedded`). Full backlog embedded, Qdrant
   `emails` collection populated one point per email (counts: see STATUS header). Embeddings-provider decision RESOLVED = OpenAI (§8).
   Isolation-tested, deployed via audited `POST /deploy` (`deploy.succeeded`). See §4.
-- ⏳ **Grounded Q&A** — now **UNBLOCKED** (embeddings done). Next slice: `retrieve.ts` (embed
-  query → Qdrant top-k → SELECT bodies from Postgres → inject as grounding via the pre-fetch
-  injection pattern, same shape as audit-sight) + a `/think` data-question gate + a
-  prompt.ts widen. NOT built.
+- ✅ **Grounded Q&A — DONE** (the earlier "UNBLOCKED, NOT built" note was refuted and
+  removed 2026-10-09; see the shipped entry below, `a0ced26`). Evidence: `marionette/src/retrieve.ts`
+  and `data-gate.ts` exist; `marionette/src/index.ts:15-17` imports them and `:246`/`:263` call
+  `isDataQuestion` and `retrieveContext` inside `/think`; `/retrieve/folder` audit rows
+  (`marionette.retrieve_folder`, e.g. ids 6081, 6082) show retrieval running in production.
 - ✅ **Auto-drain shipped** (`a9e7bc1`): the 5-min ingestion cron POSTs marionette
   `/classify` then `/embed` (limit 50 each) after every sync, so new mail self-triages and
   self-embeds; backlog drains 50+50/tick until caught up. Thin HTTP forward (§9-clean),
@@ -2024,8 +2027,8 @@ consumes them yet. Not started.
 - **Rogue auto-committing actor — RESOLVED, and the agent is now DISABLED (2026-07-20).**
   The Copilot cloud agent was turned off after reverting `THE_BIBLE.md` to stale snapshots
   three times. First post-disable push survived clean. **The `git fetch origin` + diff
-  before EVERY push rule is relaxed to normal hygiene** — fetch before pushing because it
-  is good practice, not because a bot is racing you. **Incident history:**
+  `origin/main` before EVERY push rule stays in force** (as in `CLAUDE.md`), kept as a
+  standing procedure rather than because a bot is known to be racing you. **Incident history:**
   `e06ed72`/`449a9b7` (and a third recurrence,
   `650a7a8`, caught live in a later session) are GitHub's native **Copilot coding agent**
   (workflow `dynamic/copilot-swe-agent/copilot`, confirmed via `gh api
