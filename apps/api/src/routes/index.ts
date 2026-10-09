@@ -6,6 +6,8 @@ import { telegramRoute } from './telegram.js';
 import { tasksRoute } from './tasks.js';
 import { documentsRoute } from './documents.js';
 import { metricsRoute } from './metrics.js';
+import { oauthRoute } from './oauth.js';
+import { mcpRoute } from './mcp.js';
 
 export const routes = new Hono();
 routes.route('/', healthRoute);
@@ -15,3 +17,5 @@ routes.route('/', telegramRoute);
 routes.route('/', tasksRoute);
 routes.route('/', documentsRoute);
 routes.route('/', metricsRoute);
+routes.route('/', oauthRoute);
+routes.route('/', mcpRoute);

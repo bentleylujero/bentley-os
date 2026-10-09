@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# iso-test-pathb: isolation test for Path B (remote Streamable HTTP MCP + OAuth 2.1).
+# Run by Bentley as:  ! bin/iso-test-pathb
+# Builds apps/api under a throwaway tag, runs ONE throwaway container on
+# bentley-os_backend, drives the whole OAuth + MCP flow from inside it, and checks
+# verdicts with jq on the host (no node on the host). Uses a test client named
+# iso-pathb-<timestamp> and a test folder iso-pathb-<timestamp>; it never touches
+# other oauth rows. Cleanup removes only its own container, image, client and folder.
+# Env comes from docker's --env-file; nothing from it is printed.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+NET=bentley-os_backend
+API_C=iso-pathb-api
+API_IMG=iso-pathb-api:test
+STAMP=$(date +%s)
+NAME="iso-pathb-$STAMP"
+FOLDER="$NAME"
+PASS=0
+FAIL=0
+CID=""
+
+PSQL() { docker exec bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -tA -c "$1"; }
+
+cleanup() {
+  echo "=== cleanup (only $NAME rows, iso-pathb-* container and image)"
+  docker rm -f "$API_C" >/dev/null 2>&1
+  docker rmi "$API_IMG" >/dev/null 2>&1
+  # oauth codes/tokens cascade from the client row; the match is on this run's exact name.
+  PSQL "delete from oauth_clients where client_name = '$NAME'; delete from documents where folder = '$FOLDER'; delete from document_folders where name = '$FOLDER' and name like 'iso-pathb-%'" >/dev/null 2>&1
+  docker ps -a --filter "name=iso-pathb-" --format 'left over: {{.Names}}'
+  echo "oauth_clients rows for this run after cleanup: $(PSQL "select count(*) from oauth_clients where client_name = '$NAME'")"
+}
+trap cleanup EXIT
+
+check() { # check "<label>" <exit-code>
+  if [ "$2" -eq 0 ]; then echo "PASS  $1"; PASS=$((PASS+1)); else echo "FAIL  $1"; FAIL=$((FAIL+1)); fi
+}
+
+echo "=== HEAD"
+git log -1 --format='%h %s'
+git status --porcelain | head -10
+
+echo "=== build api (tsc runs inside the build)"
+docker build -q -t "$API_IMG" apps/api; check "build api" $?
+[ "$FAIL" -eq 0 ] || { echo "build failed, stopping"; exit 1; }
+docker run --rm --entrypoint test "$API_IMG" -f dist/routes/oauth.js; check "dist/routes/oauth.js exists" $?
+docker run --rm --entrypoint test "$API_IMG" -f dist/routes/mcp.js; check "dist/routes/mcp.js exists" $?
+docker run --rm --entrypoint test "$API_IMG" -f dist/mcp-stdio.js; check "dist/mcp-stdio.js exists" $?
+
+echo "=== start throwaway api on $NET (routes only, no scheduler)"
+PSQL "insert into document_folders (name, mcp_exposed) values ('$FOLDER', false)" >/dev/null; check "create unexposed test folder $FOLDER" $?
+docker run -d --name "$API_C" --network "$NET" --env-file .env -e OAUTH_ISSUER="http://$API_C:3000" "$API_IMG" \
+  node --input-type=module -e "
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
+import { routes } from './dist/routes/index.js';
+const app = new Hono(); app.route('/', routes);
+serve({ fetch: app.fetch, port: 3000 }, () => console.log('iso api up'));
+" >/dev/null; check "start api" $?
+ok=1
+for i in $(seq 1 30); do
+  docker exec "$API_C" node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" 2>/dev/null && { ok=0; break; }
+  sleep 1
+done
+check "api /health" $ok
+if [ "$FAIL" -ne 0 ]; then echo "--- api logs"; docker logs --tail 40 "$API_C" 2>&1; exit 1; fi
+
+T0=$(PSQL "select now()")
+echo "=== audit window starts $T0, client name $NAME, folder $FOLDER"
+
+echo "=== full flow, driven from inside the container"
+OUT=$(docker exec -i -e NAME="$NAME" -e F="$FOLDER" "$API_C" node --input-type=module - <<'JS'
+import { createHash, randomBytes } from 'node:crypto';
+const B = 'http://localhost:3000';
+const REDIR = 'https://claude.ai/api/mcp/auth_callback';
+const ID_HDR = { 'Cf-Access-Authenticated-User-Email': 'iso-test@example.invalid' };
+const out = {};
+const j = async (r) => { const t = await r.text(); try { return JSON.parse(t); } catch { return t; } };
+
+let r = await fetch(`${B}/.well-known/oauth-protected-resource`); let b = await j(r);
+out.prm = [r.status, b.resource, b.authorization_servers];
+r = await fetch(`${B}/.well-known/oauth-authorization-server`); b = await j(r);
+out.asm = [r.status, b.code_challenge_methods_supported, b.token_endpoint_auth_methods_supported];
+
+const reg = (uris, name) => fetch(`${B}/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ client_name: name, redirect_uris: uris }) });
+r = await reg(['https://evil.example/cb'], process.env.NAME); out.reg_bad = [r.status];
+r = await reg([REDIR], process.env.NAME); b = await j(r);
+const CID = b.client_id; out.reg_ok = [r.status, !!CID, b.token_endpoint_auth_method]; out.client_id = CID;
+
+const verifier = () => randomBytes(32).toString('base64url');
+const chal = (v) => createHash('sha256').update(v).digest('base64url');
+const q = (v, extra = {}) => new URLSearchParams({ client_id: CID, redirect_uri: REDIR, response_type: 'code', code_challenge: chal(v), code_challenge_method: 'S256', state: 'st-123', ...extra });
+
+const v0 = verifier();
+r = await fetch(`${B}/authorize?${q(v0)}`); out.authz_noheader = [r.status];
+r = await fetch(`${B}/authorize?${q(v0, { redirect_uri: 'https://evil.example/cb' })}`, { headers: ID_HDR }); out.authz_bad_redirect = [r.status];
+r = await fetch(`${B}/authorize?${q(v0, { code_challenge_method: 'plain' })}`, { headers: ID_HDR, redirect: 'manual' }); out.authz_plain_rejected = [r.status, (r.headers.get('location') || '').includes('error=invalid_request')];
+
+// POST without a CSRF cookie must fail even with the identity header.
+const post = (v, cookie, csrf, decision = 'approve') => fetch(`${B}/authorize`, {
+  method: 'POST', redirect: 'manual',
+  headers: { ...ID_HDR, 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}) },
+  body: new URLSearchParams({ client_id: CID, redirect_uri: REDIR, response_type: 'code', code_challenge: chal(v), code_challenge_method: 'S256', state: 'st-123', scope: 'mcp', csrf, decision }),
+});
+r = await post(v0, '', 'x'); out.authz_post_no_csrf = [r.status];
+
+async function getCode(v, decision = 'approve') {
+  const g = await fetch(`${B}/authorize?${q(v)}`, { headers: ID_HDR });
+  const html = await g.text();
+  const cookie = (g.headers.getSetCookie()[0] || '').split(';')[0];
+  const csrf = (/name="csrf" value="([^"]+)"/.exec(html) || [])[1] || '';
+  const p = await post(v, cookie, csrf, decision);
+  const loc = new URL(p.headers.get('location') || 'http://x/');
+  return { get: g.status, consent: html.includes('Authorize connector'), status: p.status, code: loc.searchParams.get('code'), state: loc.searchParams.get('state'), error: loc.searchParams.get('error') };
+}
+const tok = (params) => fetch(`${B}/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ client_id: CID, ...params }) });
+
+let d = await getCode(verifier(), 'deny'); out.authz_denied = [d.get, d.status, d.error, d.state];
+d = await getCode(verifier()); out.authz_ok = [d.get, d.consent, d.status, !!d.code, d.state];
+r = await tok({ grant_type: 'authorization_code', code: d.code, redirect_uri: REDIR, code_verifier: verifier() }); out.token_wrong_verifier = [r.status, (await j(r)).error];
+
+const v1 = verifier(); d = await getCode(v1);
+r = await tok({ grant_type: 'authorization_code', code: d.code, redirect_uri: REDIR, code_verifier: v1 }); b = await j(r);
+out.token_ok = [r.status, b.token_type, b.expires_in, !!b.access_token, !!b.refresh_token];
+const A1 = b.access_token, R1 = b.refresh_token;
+r = await tok({ grant_type: 'authorization_code', code: d.code, redirect_uri: REDIR, code_verifier: v1 }); out.code_reuse = [r.status, (await j(r)).error];
+
+const mcp = (method, params, tokn, id = 1) => fetch(`${B}/mcp`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...(tokn ? { authorization: `Bearer ${tokn}` } : {}) },
+  body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
+});
+r = await mcp('tools/list', {}, null); out.mcp_noauth = [r.status, r.headers.get('www-authenticate')];
+r = await mcp('tools/list', {}, 'not-a-real-token'); out.mcp_badtoken = [r.status];
+r = await mcp('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'iso', version: '0' } }, A1); b = await j(r); out.mcp_init = [r.status, b?.result?.serverInfo?.name];
+r = await mcp('tools/list', {}, A1, 2); b = await j(r); out.mcp_tools = [r.status, (b?.result?.tools || []).map((t) => t.name).sort()];
+r = await mcp('tools/call', { name: 'list_folders', arguments: {} }, A1, 3); b = await j(r); out.mcp_list_folders = [r.status, b?.result?.isError ?? false, (b?.result?.content?.[0]?.text || '').includes(process.env.F)];
+r = await mcp('tools/call', { name: 'list_documents', arguments: { folder: process.env.F } }, A1, 4); b = await j(r); out.mcp_list_docs_unexposed = [r.status, b?.result?.isError === true];
+
+r = await tok({ grant_type: 'refresh_token', refresh_token: R1 }); b = await j(r);
+out.refresh_ok = [r.status, !!b.access_token, !!b.refresh_token, b.refresh_token !== R1];
+const A2 = b.access_token, R2 = b.refresh_token;
+r = await mcp('tools/list', {}, A1, 5); out.old_access_revoked = [r.status];
+r = await mcp('tools/list', {}, A2, 6); out.new_access_works = [r.status];
+r = await tok({ grant_type: 'refresh_token', refresh_token: R1 }); out.refresh_reuse = [r.status, (await j(r)).error];
+r = await mcp('tools/list', {}, A2, 7); out.after_reuse_access_dead = [r.status];
+r = await tok({ grant_type: 'refresh_token', refresh_token: R2 }); out.after_reuse_refresh_dead = [r.status];
+console.log(JSON.stringify(out));
+JS
+)
+echo "$OUT"
+echo "$OUT" | jq -e . >/dev/null || { echo "FAIL  flow output is not JSON, stopping"; docker logs --tail 40 "$API_C" 2>&1; exit 1; }
+CID=$(echo "$OUT" | jq -r '.client_id')
+
+v() { echo "$OUT" | jq -e "$1" >/dev/null; check "$2" $?; }
+v '.prm[0]==200 and (.prm[1]|endswith("/mcp")) and (.prm[2]|length==1)' "protected-resource metadata served"
+v '.asm[0]==200 and .asm[1]==["S256"] and .asm[2]==["none"]' "authorization-server metadata: S256 only, public clients"
+v '.reg_bad[0]==400' "register: non-claude redirect URI rejected"
+v '.reg_ok[0]==201 and .reg_ok[1]==true and .reg_ok[2]=="none"' "register: valid redirect URI accepted, public client"
+v '.authz_noheader[0]==403' "authorize without Access header: 403"
+v '.authz_bad_redirect[0]==400' "authorize with unregistered redirect_uri: 400, no redirect"
+v '.authz_plain_rejected==[302,true]' "authorize with PKCE method plain rejected"
+v '.authz_post_no_csrf[0]==400' "authorize POST without CSRF cookie rejected"
+v '.authz_denied==[200,302,"access_denied","st-123"]' "authorize deny: access_denied with state passed through"
+v '.authz_ok==[200,true,302,true,"st-123"]' "authorize approve: consent page, 302 with code and state"
+v '.token_wrong_verifier==[400,"invalid_grant"]' "token: wrong PKCE verifier rejected"
+v '.token_ok==[200,"Bearer",3600,true,true]' "token: code + PKCE verifier issues bearer, 1h, refresh token"
+v '.code_reuse==[400,"invalid_grant"]' "token: authorization code reuse rejected"
+v '.mcp_noauth[0]==401 and (.mcp_noauth[1]|test("resource_metadata=.*oauth-protected-resource"))' "/mcp without token: 401 with resource_metadata"
+v '.mcp_badtoken[0]==401' "/mcp with garbage token: 401"
+v '.mcp_init[0]==200 and .mcp_init[1]=="bentley-os-folders"' "/mcp initialize with bearer"
+v '.mcp_tools[0]==200 and .mcp_tools[1]==["get_document","list_documents","list_folders","search_folder","upload_document"]' "/mcp tools/list returns exactly the 5 tools"
+v '.mcp_list_folders==[200,false,false]' "list_folders OK and does not show the unexposed test folder"
+v '.mcp_list_docs_unexposed==[200,true]' "list_documents on unexposed folder returns isError"
+v '.refresh_ok==[200,true,true,true]' "refresh: rotation issues a new, different pair"
+v '.old_access_revoked[0]==401 and .new_access_works[0]==200' "refresh: old access revoked, new access works"
+v '.refresh_reuse==[400,"invalid_grant"]' "refresh: reuse of rotated token rejected"
+v '.after_reuse_access_dead[0]==401 and .after_reuse_refresh_dead[0]==400' "refresh reuse revoked every token for the client"
+
+echo "=== audit rows (window since $T0, this client only)"
+PSQL "select id, action, coalesce(target,''), coalesce(outcome,''), payload->>'transport', payload->>'client_id' from audit_log where created_at >= '$T0' and (payload->>'client_id' = '$CID' or target = '$CID' or action in ('mcp.auth_rejected','oauth.register')) order by id" || true
+n=$(PSQL "select count(*) from audit_log where created_at >= '$T0' and action='mcp.list_documents' and outcome='rejected_not_allowed' and target='$FOLDER' and payload->>'transport'='http' and payload->>'client_id'='$CID'")
+[ "$n" = "1" ]; check "audit: mcp.list_documents rejected_not_allowed, transport=http, client_id=$CID (rows=$n)" $?
+for a in oauth.register oauth.authorize_approved oauth.authorize_denied oauth.token_issued oauth.token_refreshed oauth.token_rejected; do
+  n=$(PSQL "select count(*) from audit_log where created_at >= '$T0' and action='$a'")
+  [ "$n" -ge 1 ]; check "audit: $a present (rows=$n)" $?
+done
+n=$(PSQL "select count(*) from audit_log where created_at >= '$T0' and action='mcp.auth_rejected'")
+[ "$n" -ge 2 ]; check "audit: mcp.auth_rejected present (rows=$n)" $?
+n=$(PSQL "select count(*) from audit_log where created_at >= '$T0' and action='mcp.list_folders' and payload->>'transport'='http' and payload->>'client_id'='$CID'")
+[ "$n" = "1" ]; check "audit: mcp.list_folders carries transport=http and client_id (rows=$n)" $?
+n=$(PSQL "select count(*) from audit_log where created_at >= '$T0' and payload::text ~* '(access_token|refresh_token|code_verifier)\"'")
+[ "$n" = "0" ]; check "audit: no raw token fields in payloads (rows=$n)" $?
+n=$(PSQL "select count(*) from oauth_tokens where client_id='$CID' and revoked_at is null")
+[ "$n" = "0" ]; check "db: no live tokens left for test client (rows=$n)" $?
+
+echo "=== result: PASS=$PASS FAIL=$FAIL"
+cat <<'TXT'
+PROVES
+  - The api image builds (tsc) and the real routes mount: discovery metadata, /register, /authorize, /token, /mcp.
+  - DCR accepts only the two claude callback URIs; PKCE is S256-only; wrong verifier, code reuse and unregistered redirect are refused.
+  - /authorize refuses requests lacking the Cloudflare Access identity header and requests lacking the CSRF cookie.
+  - /mcp refuses missing/garbage/revoked tokens with a resource_metadata challenge; a valid token lists exactly the 5 tools.
+  - isExposed() gates the http transport like stdio: an unexposed folder gives rejected_not_allowed with transport=http and client_id in audit_log.
+  - Refresh rotation revokes the old pair; reuse of a rotated refresh token revokes every token for the client.
+DOES NOT PROVE
+  - Cloudflare Access itself: the header was supplied by the test. Whether Access injects it for a real login, and whether Access policies let anonymous claude.ai reach /mcp, /token, /register and /.well-known/* is untested.
+  - The public hostname, TLS, or the live OAUTH_ISSUER value (the test used http://iso-pathb-api:3000).
+  - claude.ai's real connector handshake, or the 20-client cap and rate limits (not exercised).
+  - Anything about the live api container: nothing here is deployed.
+TXT
+[ "$FAIL" -eq 0 ]

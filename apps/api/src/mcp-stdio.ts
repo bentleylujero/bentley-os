@@ -16,7 +16,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { registerTools } from './mcp-tools.js';
 
 const server = new McpServer({ name: 'bentley-os-folders', version: '1.0.0' });
-registerTools(server);
+registerTools(server, { transport: 'stdio' });
 
 async function main() {
   const transport = new StdioServerTransport();

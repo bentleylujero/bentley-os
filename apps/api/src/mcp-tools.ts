@@ -19,7 +19,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { pool } from './db/pool.js';
-import { audit } from './db/audit.js';
+import { audit as baseAudit, type AuditRow } from './db/audit.js';
 import { insertDocument, normalizeFolder, MAX_DOC_CHARS } from './documents-lib.js';
 
 const MARIONETTE = 'http://marionette:4200';
@@ -50,7 +50,19 @@ interface FolderChunk {
   text: string;
 }
 
-export function registerTools(server: McpServer): void {
+export interface ToolCtx {
+  transport: 'stdio' | 'http';
+  clientId?: string;
+}
+
+export function registerTools(server: McpServer, ctx: ToolCtx): void {
+  // Every mcp.* audit row carries which transport and which OAuth client made the call.
+  const audit = (row: AuditRow) =>
+    baseAudit({
+      ...row,
+      payload: { ...(row.payload as object | undefined), transport: ctx.transport, client_id: ctx.clientId ?? null },
+    });
+
   server.registerTool(
     'list_folders',
     {
