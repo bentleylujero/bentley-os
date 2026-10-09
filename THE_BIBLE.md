@@ -2008,6 +2008,17 @@ consumes them yet. Not started.
   output back" loop (§1). claude.ai chat sessions (no CLI) stay planning-only under the old
   loop. Outbound comms stay forbidden either way (§2 rule 5) — this is an execution-access
   change, not a guardrail change.
+- **Decision: Claude Code has no human approval gates, 2026-10-09 (amends the entry above).**
+  For Claude Code on the box, commit, push `main`, run migrations and `POST /deploy` are
+  standing autonomy: no per-action approval. The rails stay as self-imposed procedure (commit
+  before risky changes, `pg_dump` before migrations, `git fetch` + diff before push, isolation
+  test before deploy, confirm deploys from `deploy.succeeded`). The only forced human
+  touchpoints are (1) tests that need `.env`, run by Bentley as `! bin/iso-test-<svc>` because
+  the deny-list blocks any bash command naming `.env`, `token.json`, `client_secret.json` or
+  `/secrets/`, and (2) sudo hand-offs (sudo is impossible for Claude Code). The deny-list is
+  unchanged (`d746170`) and is never to be wrapped, aliased or routed around. This does not
+  touch the Milestone 4 approval gate on marionette's own actions, and outbound
+  Gmail/Telegram stays forbidden (§2 rule 5). Rules live in `CLAUDE.md`.
 - **Rogue auto-committing actor — RESOLVED, and the agent is now DISABLED (2026-07-20).**
   The Copilot cloud agent was turned off after reverting `THE_BIBLE.md` to stale snapshots
   three times. First post-disable push survived clean. **The `git fetch origin` + diff
