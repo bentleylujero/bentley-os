@@ -1476,7 +1476,11 @@ prose stay human — a deliberate trade.
     `documents` gained exactly 1 point carrying `document_id`/`chunk_index`/`title`/`folder`
     (collection total 24 to 25). `POST /retrieve/folder` scoped to the folder returned the
     fixture first (score 0.607, text contains the planted fact); the same query against
-    `general` returned 5 other chunks and not the fixture. The real `mcp-stdio.js`
+    `general` returned 5 other chunks and not the fixture. (The probe's raw log line names this
+    check `leak_in_other`, which is a misleading name: it only means "some returned chunk has the
+    fixture's document id". It is `true` on the scoped query because the fixture was found, as
+    expected, and `false` on `general`, which is the no-leak result. Called `contains_fixture`
+    here; the scoped result was 1 chunk, all from the test folder.) The real `mcp-stdio.js`
     `search_folder` matched: exposed folder found the fixture, `general` did not, a missing
     folder was rejected (`mcp.search_folder` `rejected_not_allowed`, audit 6123; successes 6119,
     6121; `marionette.retrieve_folder` 6116 to 6120). Cleanup removed the DB rows and the Qdrant
