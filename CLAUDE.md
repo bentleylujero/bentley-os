@@ -1,42 +1,62 @@
-# Bentley OS — rules for Claude Code
+# Bentley OS: rules for Claude Code
 
-You run commands on the box directly. THE_BIBLE.md is ground truth — read it before acting.
-Believe real output over any prior assumption. Never say something worked without checking.
+Absolute repo path: /home/spaghettios/bentley-os. Believe real output over assumptions. Never claim success without checking.
 
-## Hard rules (from Bible §2, §7, §9)
-- Isolation-test before every commit: `docker build -t <tag> apps/<svc>` (context is
-  apps/<svc>/, NOT repo root), throwaway `docker run` on bentley-os_backend, probe /health +
-  the real path via `node -e fetch(...)` (no curl in alpine/slim images).
-- Deploy known services (api/contractor/marionette) via `POST http://127.0.0.1:4000/deploy
-  {"service":"..."}` — confirm success by the `deploy.succeeded` audit row, NEVER the 202.
-  whisper is NOT in the deploy map — rebuild it with raw `docker compose up -d --build whisper`.
-- `git add` by explicit path, NEVER `-A` (untracked .bak files in tree).
-- Import extensions: api uses `.js` (compiled tsc); deploy/contractor/marionette use `.ts`
-  (strip-types). Wrong one throws ERR_MODULE_NOT_FOUND at startup.
-- Schema changes = versioned migration in supabase/migrations/ (sequential prefix, plain SQL).
-  Never ad-hoc production edits. Run `pg_dump` to ~/backups/ before applying any migration.
-- psql in container: `docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley
-  -d bentley -P pager=off -c "..."` (peer auth fails on socket; no less installed).
-- Escape all DB-derived strings before HTML interpolation (esc() helper).
-- Single-FILE bind mounts (token.json, client_secret.json) are pinned to an inode. Replace
-  in place with `cat new > old` — NEVER `mv`/`rm`+`cp`, which silently leaves the container
-  serving stale content. Verify the value from INSIDE the container, not the host.
-- One-off helper scripts must live inside the app tree (/usr/src/app/), not /tmp — ESM
-  resolves node_modules from the script's own directory, so /tmp throws ERR_MODULE_NOT_FOUND
-  regardless of `-w`. Delete after use.
-- Ingestion health = `sync_state.updated_at` age. token.json's expiry_date is frozen at mint
-  and is NOT a health signal. /health green does not mean data is flowing.
-- Never ship a change that could take down /health without saying so + giving rollback.
-- `git fetch origin` + diff origin/main BEFORE every push (Copilot cloud agent reverts docs).
-- Never wire or use outbound Gmail/Telegram sending (Bible §2 rule 5 — inbound-only,
-  approval-gated; this is a hard line, not a style preference).
+## Start of session
+- Read THE_BIBLE.md and STATUS.md first. The Bible wins on any conflict.
+- Counts (migrations, services, rows) live only in STATUS.md. Never copy them elsewhere.
+- Follow the Bible section 6 roadmap in order. Log skipped-ahead ideas in Open Questions (section 8), do not build them.
+- Run `bin/session-start` and read its header. It is read-only and prints ground-truth HEAD and counts.
+- Run `mkdir -p ~/logs` before the first session-log write.
 
-## Architecture (Bible §3, §9)
-- One brain: all AI reasoning lives in marionette, never in apps/api.
-- Ingestion + read APIs → api. docker/git → deploy. AI reasoning → marionette.
-- audit_log is the one ledger. No parallel tables. Ontology-first, store each fact once.
-- Absolute path is /home/spaghettios/bentley-os — never an alias.
+## Service boundaries
+- marionette :4200 is the one brain. All AI reasoning lives here, never in api.
+- api :3000 is ingestion and read APIs.
+- contractor :4100 is the sandbox delegation service.
+- deploy (:4000) owns docker and git actions.
+- Import extensions: api uses `.js` (compiled tsc). marionette, contractor, deploy use `.ts` (strip-types). The wrong one throws ERR_MODULE_NOT_FOUND at startup.
 
-## When done
-Update THE_BIBLE.md current-state (§4); roadmap/open-questions when a milestone or decision
-moves. Regenerate from repo state, don't hand-edit into staleness.
+## Design rules
+- Ontology-first: every feature is an object type, link type, or action. No parallel ad-hoc tables.
+- Store each fact once.
+- Schema changes are versioned migrations in supabase/migrations/ (sequential prefix, plain SQL). No ad-hoc production edits.
+- audit_log is the one ledger.
+- AI is API-only. No local LLM inference (whisper is the narrow exception).
+
+## Autonomy
+- You may edit, migrate, commit, push main, and `POST http://127.0.0.1:4000/deploy {"service":"..."}` without asking.
+
+## Self-imposed rails
+- Commit before any risky change.
+- `pg_dump` to ~/backups/ before every migration.
+- `git fetch origin` and diff origin/main before every push.
+- Isolation test before every deploy: `docker build -t <tag> apps/<svc>` (context is apps/<svc>/), run a throwaway container on bentley-os_backend, then check /health, the real code path, and the resulting audit row. Use `node -e fetch(...)` for probes (no curl in alpine/slim).
+- Confirm a deploy only from the `deploy.succeeded` audit row, never from the 202.
+- whisper is not in the deploy map. Rebuild it with `docker compose up -d --build whisper`.
+- Never ship a change that could take down /health without saying so and giving the rollback.
+
+## Git
+- Stage by explicit path. Never `git add -A` or `git add .` (untracked .bak files exist).
+
+## Failure handling
+- On any failure: stop, report the raw output, no retry loops.
+- Sudo is impossible. Stop and list the hand-off steps for Bentley.
+
+## Forbidden
+- Never touch .env, token.json, client_secret.json, or /secrets/.
+- Never run bare `docker compose config` (it prints secrets).
+- No outbound Gmail or Telegram, ever. Telegram is inbound-only.
+- The deny-list blocks any bash command naming .env, token.json, client_secret.json, or /secrets/. For isolation tests that need env, write bin/iso-test-<svc>, tell Bentley to run `! bin/iso-test-<svc>`, then read the output. Never wrap, alias, or otherwise route around a deny rule.
+
+## Evidence
+- Write raw git diff and command output to a session log (~/logs/session-YYYY-MM-DD.log, outside the repo). No prose summaries as evidence.
+
+## Docs
+- Update THE_BIBLE.md only when a rule or decision changes. Current state goes in STATUS.md (generated by bin/status, do not hand-edit the generated block).
+
+## Carried over from the previous CLAUDE.md
+- psql: `docker exec -it bentley-os-postgres-1 psql -h 127.0.0.1 -U bentley -d bentley -P pager=off -c "..."`.
+- Escape DB-derived strings with esc() before HTML interpolation.
+- Ingestion health is `sync_state.updated_at` age, not /health and not token expiry_date.
+- One-off helper scripts go inside the app tree (/usr/src/app/), not /tmp. Delete after use.
+- Bind mounts use the exact absolute host path, never an alias. Single-file bind mounts pin an inode, so hand-offs to Bentley use `cat new > old`, never mv or rm+cp.
